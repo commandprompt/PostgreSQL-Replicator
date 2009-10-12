@@ -1,0 +1,1 @@
+ALTER ROLE foo superuser createdb createrole inherit login connection limit 20 password 'test' valid until 'June 1 0:0 2020 +2';

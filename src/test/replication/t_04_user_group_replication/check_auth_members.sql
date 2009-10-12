@@ -1,0 +1,1 @@
+SELECT (SELECT rolname FROM pg_authid WHERE oid = s.roleid) AS role, (SELECT rolname FROM pg_authid WHERE oid = s.member) AS member, (SELECT rolname FROM pg_authid WHERE oid = s.grantor) AS grantor, s.admin_option FROM pg_auth_members s ORDER BY role,member;

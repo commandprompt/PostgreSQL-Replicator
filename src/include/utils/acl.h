@@ -286,4 +286,6 @@ extern bool pg_conversion_ownercheck(Oid conv_oid, Oid roleid);
 extern bool pg_ts_dict_ownercheck(Oid dict_oid, Oid roleid);
 extern bool pg_ts_config_ownercheck(Oid cfg_oid, Oid roleid);
 
+extern void replicate_grants_on_role_rename(Oid roleid);
+
 #endif   /* ACL_H */

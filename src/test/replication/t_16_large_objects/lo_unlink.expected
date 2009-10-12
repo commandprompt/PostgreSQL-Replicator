@@ -1,0 +1,2 @@
+ERROR:  large object [0-9]+ couldn't be deleted
+DETAIL:  1 reference found in master_lo_refs.

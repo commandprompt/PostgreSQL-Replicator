@@ -491,3 +491,19 @@
 #------------------------------------------------------------------------------
 
 #custom_variable_classes = ''		# list of custom variable class names
+
+#---------------------------------------------------------------------------
+# MAMMOTH REPLICATOR OPTIONS
+#---------------------------------------------------------------------------
+
+#replication_enable = false				# true to enable replication
+#replication_mode = master				# master or slave
+#replication_slave_no = 0				# slave number, not used on master
+#replication_database = 'template1'		# name of the database to replicate
+#replication_mcp_address = '127.0.0.1'	# IP address of the MCP server
+#replication_mcp_port = 7777			# port to connect to the MCP server
+#replication_mcp_authkey = 'mcp-key'	# should match the key in mcp_server.conf
+#replication_data_path = 'rlog'	# where to store replication queue files
+#replication_mcp_require_ssl = false	# set to true if MCP is configured for SSL
+#replication_compression = true 	# true to enable queue data compression
+#replication_use_utf8_encoding = true	# whether conversion from/to utf8 enconding should be performed for the replicated data.

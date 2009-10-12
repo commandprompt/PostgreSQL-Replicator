@@ -44,9 +44,12 @@
 #include "commands/user.h"
 #include "commands/vacuum.h"
 #include "commands/view.h"
+#include "mammoth_r/pgr.h"
+#include "mammoth_r/forwcmds.h"
 #include "miscadmin.h"
 #include "parser/parse_utilcmd.h"
 #include "postmaster/bgwriter.h"
+#include "postmaster/replication.h"
 #include "rewrite/rewriteDefine.h"
 #include "rewrite/rewriteRemove.h"
 #include "storage/fd.h"
@@ -313,6 +316,7 @@ check_xact_readonly(Node *parsetree)
 		case T_AlterFunctionStmt:
 		case T_AlterRoleStmt:
 		case T_AlterRoleSetStmt:
+		case T_AlterRoleSlaveReplicationStmt:
 		case T_AlterObjectSchemaStmt:
 		case T_AlterOwnerStmt:
 		case T_AlterSeqStmt:
@@ -1035,6 +1039,26 @@ ProcessUtility(Node *parsetree,
 			vacuum((VacuumStmt *) parsetree, NIL, NULL, false, isTopLevel);
 			break;
 
+		case T_McpStmt:
+			ProcessMcpStmt((McpStmt *) parsetree);
+			break;
+
+		case T_PromoteStmt:
+			ProcessPromoteStmt((PromoteStmt *) parsetree);
+			break;
+
+		case T_CreateForwarderStmt:
+			CreateForwarder((CreateForwarderStmt *) parsetree);
+			break;
+
+		case T_DropForwarderStmt:
+			DropForwarder((DropForwarderStmt *) parsetree);
+			break;
+
+		case T_AlterForwarderStmt:
+			AlterForwarder((AlterForwarderStmt *) parsetree);
+			break;
+
 		case T_ExplainStmt:
 			ExplainQuery((ExplainStmt *) parsetree, queryString, params, dest);
 			break;
@@ -1114,6 +1138,10 @@ ProcessUtility(Node *parsetree,
 
 		case T_AlterRoleSetStmt:
 			AlterRoleSet((AlterRoleSetStmt *) parsetree);
+			break;
+
+		case T_AlterRoleSlaveReplicationStmt:
+			AlterRoleSetSlaveReplication((AlterRoleSlaveReplicationStmt *) parsetree);
 			break;
 
 		case T_DropRoleStmt:
@@ -1871,6 +1899,13 @@ CreateCommandTag(Node *parsetree)
 				tag = "ANALYZE";
 			break;
 
+		case T_McpStmt:
+			if (((McpStmt *) parsetree)->kind == McpBatchUpdate)
+				tag = "MCP BATCHUPDATE";
+			else
+				tag = "UNKNOWN MCP";
+			break;
+               
 		case T_ExplainStmt:
 			tag = "EXPLAIN";
 			break;
@@ -1952,6 +1987,10 @@ CreateCommandTag(Node *parsetree)
 			tag = "ALTER ROLE";
 			break;
 
+		case T_AlterRoleSlaveReplicationStmt:
+			tag = "ALTER ROLE";
+			break;
+
 		case T_DropRoleStmt:
 			tag = "DROP ROLE";
 			break;
@@ -2022,6 +2061,27 @@ CreateCommandTag(Node *parsetree)
 
 		case T_PrepareStmt:
 			tag = "PREPARE";
+			break;
+
+		case T_PromoteStmt:
+			if (((PromoteStmt *) parsetree)->force)
+				tag = "PROMOTE FORCE";
+			else if (((PromoteStmt *) parsetree)->back)
+				tag = "PROMOTE BACK";
+			else
+				tag = "PROMOTE";
+			break;
+
+		case T_CreateForwarderStmt:
+			tag = "CREATE FORWARDER";
+			break;
+
+		case T_DropForwarderStmt:
+			tag = "DROP FORWARDER";
+			break;
+
+		case T_AlterForwarderStmt:
+			tag = "ALTER FORWARDER";
 			break;
 
 		case T_ExecuteStmt:
@@ -2397,6 +2457,10 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_AlterRoleSetStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
+		case T_AlterRoleSlaveReplicationStmt:
 			lev = LOGSTMT_DDL;
 			break;
 

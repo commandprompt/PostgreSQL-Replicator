@@ -139,7 +139,7 @@ typedef struct PROC_HDR
  * We set aside some extra PGPROC structures for auxiliary processes,
  * ie things that aren't full-fledged backends but need shmem access.
  */
-#define NUM_AUXILIARY_PROCS		3
+#define NUM_AUXILIARY_PROCS		4
 
 
 /* configurable options */
@@ -174,5 +174,7 @@ extern void ProcSendSignal(int pid);
 extern bool enable_sig_alarm(int delayms, bool is_statement_timeout);
 extern bool disable_sig_alarm(bool is_statement_timeout);
 extern void handle_sig_alarm(SIGNAL_ARGS);
+
+extern bool FindMyDatabase(const char *name, Oid *db_id, Oid *db_tablespace);
 
 #endif   /* PROC_H */

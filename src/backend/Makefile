@@ -16,7 +16,7 @@ include $(top_builddir)/src/Makefile.global
 
 DIRS = access bootstrap catalog parser commands executor lib libpq \
 	main nodes optimizer port postmaster regex rewrite \
-	storage tcop tsearch utils $(top_builddir)/src/timezone
+	storage tcop tsearch utils $(top_builddir)/src/timezone mammoth_r
 
 SUBSYSOBJS = $(DIRS:%=%/SUBSYS.o)
 
@@ -168,6 +168,7 @@ endif
 endif
 	$(MAKE) -C catalog install-data
 	$(MAKE) -C tsearch install-data
+	$(MAKE) -C mammoth_r install
 	$(INSTALL_DATA) $(srcdir)/libpq/pg_hba.conf.sample '$(DESTDIR)$(datadir)/pg_hba.conf.sample'
 	$(INSTALL_DATA) $(srcdir)/libpq/pg_ident.conf.sample '$(DESTDIR)$(datadir)/pg_ident.conf.sample'
 	$(INSTALL_DATA) $(srcdir)/utils/misc/postgresql.conf.sample '$(DESTDIR)$(datadir)/postgresql.conf.sample'

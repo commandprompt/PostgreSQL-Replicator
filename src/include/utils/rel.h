@@ -132,6 +132,7 @@ typedef struct RelationData
 	SubTransactionId rd_createSubid;	/* rel was created in current xact */
 	SubTransactionId rd_newRelfilenodeSubid;	/* new relfilenode assigned in
 												 * current xact */
+	bool		rd_replicate;	/* do we replicate this table? */
 
 	/*
 	 * rd_createSubid is the ID of the highest subtransaction the rel has

@@ -1,0 +1,2 @@
+psql:.*:1: ERROR:  cannon inherit from replicated relation "rebels"
+HINT:  enable replication for relation "jedi"

@@ -1509,6 +1509,16 @@ _equalAlterRoleSetStmt(AlterRoleSetStmt *a, AlterRoleSetStmt *b)
 }
 
 static bool
+_equalAlterRoleSlaveReplicationStmt(AlterRoleSlaveReplicationStmt *a, AlterRoleSlaveReplicationStmt *b)
+{
+	COMPARE_STRING_FIELD(role);
+	COMPARE_SCALAR_FIELD(enable);
+	COMPARE_SCALAR_FIELD(slaveno);
+
+	return true;
+}
+
+static bool
 _equalDropRoleStmt(DropRoleStmt *a, DropRoleStmt *b)
 {
 	COMPARE_NODE_FIELD(roles);
@@ -2399,6 +2409,9 @@ equal(void *a, void *b)
 			break;
 		case T_AlterRoleSetStmt:
 			retval = _equalAlterRoleSetStmt(a, b);
+			break;
+		case T_AlterRoleSlaveReplicationStmt:
+			retval = _equalAlterRoleSlaveReplicationStmt(a,b);
 			break;
 		case T_DropRoleStmt:
 			retval = _equalDropRoleStmt(a, b);

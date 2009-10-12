@@ -1,0 +1,1 @@
+SELECT * FROM tab1 ORDER BY id;

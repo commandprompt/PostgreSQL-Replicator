@@ -20,11 +20,14 @@
 #include "access/nbtree.h"
 #include "access/subtrans.h"
 #include "access/twophase.h"
+#include "mammoth_r/mcp_queue.h"
+#include "mammoth_r/txlog.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgwriter.h"
 #include "postmaster/postmaster.h"
+#include "postmaster/replication.h"
 #include "storage/freespace.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
@@ -34,6 +37,7 @@
 #include "storage/spin.h"
 
 
+extern bool ForwarderEnable;
 static Size total_addin_request = 0;
 static bool addin_request_allowed = true;
 
@@ -114,6 +118,9 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 		size = add_size(size, AutoVacuumShmemSize());
 		size = add_size(size, BTreeShmemSize());
 		size = add_size(size, SyncScanShmemSize());
+		size = add_size(size, ReplicationShmemSize());
+		size = add_size(size, MCPQueueShmemSize());
+		size = add_size(size, TXLOGShmemSize());
 #ifdef EXEC_BACKEND
 		size = add_size(size, ShmemBackendArraySize());
 #endif
@@ -183,6 +190,11 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	TwoPhaseShmemInit();
 	MultiXactShmemInit();
 	InitBufferPool();
+
+	/* initialize various Replicator shared structs */
+	MCPQueueShmemInit();
+	TXLOGShmemInit();
+	ReplicationShmemInit();
 
 	/*
 	 * Set up lock manager

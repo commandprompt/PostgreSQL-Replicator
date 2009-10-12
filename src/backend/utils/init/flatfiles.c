@@ -42,6 +42,7 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/repl_forwarder.h"
 #include "commands/trigger.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
@@ -55,6 +56,7 @@
 /* Actual names of the flat files (within $PGDATA) */
 #define DATABASE_FLAT_FILE	"global/pg_database"
 #define AUTH_FLAT_FILE		"global/pg_auth"
+#define FORWARDER_FLAT_FILE	"global/pg_forwarder"
 
 /* Info bits in a flatfiles 2PC record */
 #define FF_BIT_DATABASE 1
@@ -75,6 +77,7 @@
  */
 static SubTransactionId database_file_update_subid = InvalidSubTransactionId;
 static SubTransactionId auth_file_update_subid = InvalidSubTransactionId;
+static SubTransactionId forw_file_update_subid = InvalidSubTransactionId;
 
 
 /*
@@ -98,6 +101,12 @@ auth_file_update_needed(void)
 		auth_file_update_subid = GetCurrentSubTransactionId();
 }
 
+void
+forw_file_update_needed(void)
+{
+	if (forw_file_update_subid == InvalidSubTransactionId)
+		forw_file_update_subid = GetCurrentSubTransactionId();
+}
 
 /*
  * database_getflatfilename --- get pathname of database file
@@ -125,6 +134,18 @@ auth_getflatfilename(void)
 	return pstrdup(AUTH_FLAT_FILE);
 }
 
+/*
+ * auth_getflatfilename --- get pathname of auth file
+ *
+ * Note that result string is palloc'd, and should be freed by the caller.
+ * (This convention is not really needed anymore, since the relative path
+ * is fixed.)
+ */
+char *
+forw_getflatfilename(void)
+{
+	return pstrdup(FORWARDER_FLAT_FILE);
+}
 
 /*
  *	fputs_quote
@@ -290,6 +311,120 @@ write_database_file(Relation drel, bool startup)
 	 */
 	if (oldest_datfrozenxid != InvalidTransactionId)
 		SetTransactionIdLimit(oldest_datfrozenxid, &oldest_datname);
+}
+
+static void
+write_forwarder_file(Relation frel)
+{
+	bool 		empty = true;
+	char	   *filename,
+			   *tempname;
+	int			bufsize;
+	FILE	   *fp;
+	mode_t		oumask;
+	HeapScanDesc scan;
+	HeapTuple	tuple;
+	TupleDesc	tupdesc = RelationGetDescr(frel);
+
+	/*
+	 * Create a temporary filename to be renamed later.  This prevents the
+	 * backend from clobbering the flat file while the postmaster might be
+	 * reading from it.
+	 */
+	filename = forw_getflatfilename();
+	bufsize = strlen(filename) + 12;
+	tempname = (char *) palloc(bufsize);
+	snprintf(tempname, bufsize, "%s.%d", filename, MyProcPid);
+
+	oumask = umask((mode_t) 077);
+	fp = AllocateFile(tempname, "w");
+	umask(oumask);
+	if (fp == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write to temporary file \"%s\": %m",
+						tempname)));
+
+	/*
+	 * Read pg_forwarder and write the file.
+	 */
+	scan = heap_beginscan(frel, SnapshotNow, 0, NULL);
+	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Datum		named;
+		Name		name;
+		Datum		host;
+		Datum		port;
+		Datum		authkey;
+		Datum		ssl;
+		bool		isnull;
+
+		named = heap_getattr(tuple, Anum_repl_forwarder_name, tupdesc, &isnull);
+		if (isnull)
+			elog(ERROR, "invalid null forwarder name in repl_forwarder");
+		name = DatumGetName(named);
+
+		/*
+		 * Check for illegal characters in the name.
+		 */
+		if (!name_okay(NameStr(*name)))
+		{
+			ereport(LOG,
+					(errmsg("invalid forwarder name \"%s\"", NameStr(*name))));
+			continue;
+		}
+
+		host = heap_getattr(tuple, Anum_repl_forwarder_host, tupdesc, &isnull);
+		if (isnull)
+			elog(ERROR, "invalid null host address in repl_forwarder");
+		host = DirectFunctionCall1(inet_out, host);
+		port = heap_getattr(tuple, Anum_repl_forwarder_port, tupdesc, &isnull);
+		if (isnull)
+			elog(ERROR, "invalid null port in repl_forwarder");
+		authkey = heap_getattr(tuple, Anum_repl_forwarder_authkey, tupdesc, &isnull);
+		if (isnull)
+			elog(ERROR, "invalid null authkey in repl_forwarder");
+		authkey = DirectFunctionCall1(textout, authkey);
+		ssl = heap_getattr(tuple, Anum_repl_forwarder_ssl, tupdesc, &isnull);
+		if (isnull)
+			elog(ERROR, "invalid null SSL bit in repl_forwarder");
+
+		/*
+		 * The file format is: "name" addr port "authkey" ssl
+		 */
+		fputs_quote(NameStr(*name), fp);
+		fprintf(fp, " %s", DatumGetCString(host));
+		fprintf(fp, " %u ", DatumGetInt32(port));
+		fputs_quote(DatumGetCString(authkey), fp);
+		fprintf(fp, " %d", DatumGetBool(ssl) ? 1 : 0);
+		fprintf(fp, "\n");
+
+		pfree(DatumGetPointer(authkey));
+		pfree(DatumGetPointer(host));
+		
+		empty = false;
+	}
+	heap_endscan(scan);
+
+	if (FreeFile(fp))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write to temporary file \"%s\": %m",
+						tempname)));
+
+	/*
+	 * Rename the temp file to its final name, deleting the old flat file. We
+	 * expect that rename(2) is an atomic action.
+	 */
+	if (rename(tempname, filename))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not rename file \"%s\" to \"%s\": %m",
+						tempname, filename)));
+						
+	/* Send a signal to postmaster to re-read the forwarder flat file */
+	if (!empty)
+		SendPostmasterSignal(PMSIGNAL_READ_FORWARDER_FLAT_FILE);
 }
 
 
@@ -695,6 +830,7 @@ BuildFlatFiles(bool database_only)
 	ResourceOwner owner;
 	RelFileNode rnode;
 	Relation	rel_db,
+				rel_fw,
 				rel_authid,
 				rel_authmem;
 
@@ -734,6 +870,18 @@ BuildFlatFiles(bool database_only)
 		write_auth_file(rel_authid, rel_authmem);
 	}
 
+	/* hard-wired path to repl_forwarder */
+	rnode.spcNode = GLOBALTABLESPACE_OID;
+	rnode.dbNode = 0;
+	rnode.relNode = ReplForwarderId;
+	rel_fw = XLogOpenRelation(rnode);
+	/*
+	 * XLogOpenRelation does not build a descriptor, but
+	 * write_forwarder_file needs it, so we need to construct one manually.
+	 */
+	rel_fw->rd_att = GetReplForwarderDescriptor();
+	write_forwarder_file(rel_fw);
+
 	CurrentResourceOwner = NULL;
 	ResourceOwnerDelete(owner);
 
@@ -761,15 +909,18 @@ AtEOXact_UpdateFlatFiles(bool isCommit)
 	Relation	drel = NULL;
 	Relation	arel = NULL;
 	Relation	mrel = NULL;
+	Relation	frel = NULL;
 
 	if (database_file_update_subid == InvalidSubTransactionId &&
-		auth_file_update_subid == InvalidSubTransactionId)
+		auth_file_update_subid == InvalidSubTransactionId &&
+		forw_file_update_subid == InvalidSubTransactionId)
 		return;					/* nothing to do */
 
 	if (!isCommit)
 	{
 		database_file_update_subid = InvalidSubTransactionId;
 		auth_file_update_subid = InvalidSubTransactionId;
+		forw_file_update_subid = InvalidSubTransactionId;
 		return;
 	}
 
@@ -798,6 +949,9 @@ AtEOXact_UpdateFlatFiles(bool isCommit)
 		mrel = heap_open(AuthMemRelationId, AccessShareLock);
 	}
 
+	if (forw_file_update_subid != InvalidSubTransactionId)
+		frel = heap_open(ReplForwarderId, AccessShareLock);
+
 	/*
 	 * Obtain special locks to ensure that two transactions don't try to write
 	 * the same flat file concurrently.  Quite aside from any direct risks of
@@ -823,6 +977,10 @@ AtEOXact_UpdateFlatFiles(bool isCommit)
 		LockSharedObject(AuthIdRelationId, InvalidOid, 0,
 						 AccessExclusiveLock);
 
+	if (forw_file_update_subid != InvalidSubTransactionId)
+		LockSharedObject(ReplForwarderId, InvalidOid, 0,
+						 AccessExclusiveLock);
+
 	/* Okay to write the files */
 	if (database_file_update_subid != InvalidSubTransactionId)
 	{
@@ -837,6 +995,13 @@ AtEOXact_UpdateFlatFiles(bool isCommit)
 		write_auth_file(arel, mrel);
 		heap_close(arel, NoLock);
 		heap_close(mrel, NoLock);
+	}
+
+	if (forw_file_update_subid != InvalidSubTransactionId)
+	{
+		forw_file_update_subid = InvalidSubTransactionId;
+		write_forwarder_file(frel);
+		heap_close(frel, NoLock);
 	}
 
 	/*
@@ -903,6 +1068,9 @@ AtEOSubXact_UpdateFlatFiles(bool isCommit,
 
 		if (auth_file_update_subid == mySubid)
 			auth_file_update_subid = parentSubid;
+
+		if (forw_file_update_subid == mySubid)
+			forw_file_update_subid = parentSubid;
 	}
 	else
 	{
@@ -911,6 +1079,9 @@ AtEOSubXact_UpdateFlatFiles(bool isCommit,
 
 		if (auth_file_update_subid == mySubid)
 			auth_file_update_subid = InvalidSubTransactionId;
+
+		if (forw_file_update_subid == mySubid)
+			forw_file_update_subid = InvalidSubTransactionId;
 	}
 }
 
@@ -943,6 +1114,9 @@ flatfile_update_trigger(PG_FUNCTION_ARGS)
 		case AuthIdRelationId:
 		case AuthMemRelationId:
 			auth_file_update_needed();
+			break;
+		case ReplForwarderId:
+			forw_file_update_needed();
 			break;
 		default:
 			elog(ERROR, "flatfile_update_trigger was called for wrong table");

@@ -1,0 +1,2 @@
+psql:.*:1: ERROR:  cannot modify sequence "test1_id_seq"
+DETAIL:  Sequence is being replicated.

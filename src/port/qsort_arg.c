@@ -12,7 +12,7 @@
  *	$PostgreSQL$
  */
 
-/*	$NetBSD$	*/
+/*	$NetBSD: qsort.c,v 1.13 2003/08/07 16:43:42 agc Exp $	*/
 
 /*-
  * Copyright (c) 1992, 1993

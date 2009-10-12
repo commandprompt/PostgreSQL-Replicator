@@ -1121,8 +1121,7 @@ pgstat_initstats(Relation rel)
 	/* We only count stats for things that have storage */
 	if (!(relkind == RELKIND_RELATION ||
 		  relkind == RELKIND_INDEX ||
-		  relkind == RELKIND_TOASTVALUE ||
-		  relkind == RELKIND_SEQUENCE))
+		  relkind == RELKIND_TOASTVALUE))
 	{
 		rel->pgstat_info = NULL;
 		return;

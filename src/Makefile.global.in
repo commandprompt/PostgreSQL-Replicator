@@ -30,6 +30,7 @@ all:
 
 # PostgreSQL version number
 VERSION = @PACKAGE_VERSION@
+MAMMOTH_VERSION = @MAMMOTH_VERSION@
 
 # Support for VPATH builds
 vpath_build = @vpath_build@
@@ -166,6 +167,7 @@ enable_nls	= @enable_nls@
 enable_debug	= @enable_debug@
 enable_dtrace	= @enable_dtrace@
 enable_thread_safety	= @enable_thread_safety@
+enable_replication = @enable_replication@
 
 python_includespec	= @python_includespec@
 python_libdir		= @python_libdir@
@@ -257,6 +259,7 @@ MSGMERGE = @MSGMERGE@
 PYTHON	= @PYTHON@
 TAR	= @TAR@
 XGETTEXT = @XGETTEXT@
+EGREP = @EGREP@
 
 GZIP	= gzip
 BZIP2	= bzip2

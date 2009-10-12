@@ -116,6 +116,7 @@ static void info_cb(const SSL *ssl, int type, int args);
 static void initialize_SSL(void);
 static void destroy_SSL(void);
 static int	open_server_SSL(Port *);
+static int open_client_SSL(Port *port);
 static void close_SSL(Port *);
 static const char *SSLerrmessage(void);
 #endif
@@ -238,6 +239,18 @@ secure_open_server(Port *port)
 
 #ifdef USE_SSL
 	r = open_server_SSL(port);
+#endif
+
+	return r;
+}
+
+int
+secure_open_client(Port *port)
+{
+	int			r = 0;
+
+#ifdef USE_SSL
+	r = open_client_SSL(port);
 #endif
 
 	return r;
@@ -944,6 +957,91 @@ aloop:
 	}
 	ereport(DEBUG2,
 			(errmsg("SSL connection from \"%s\"", port->peer_cn)));
+
+	/* set up debugging/info callback */
+	SSL_CTX_set_info_callback(SSL_context, info_cb);
+
+	return 0;
+}
+
+static int
+open_client_SSL(Port *port)
+{
+	int		r;
+	int		err;
+
+	Assert(!port->ssl);
+	Assert(!port->peer);
+
+	if (!(port->ssl = SSL_new(SSL_context)))
+	{
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("could not initialize SSL connection: %s",
+						SSLerrmessage())));
+		close_SSL(port);
+		return -1;
+	}
+	if (!my_SSL_set_fd(port->ssl, port->sock))
+	{
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("could not set SSL socket: %s",
+						SSLerrmessage())));
+		close_SSL(port);
+		return -1;
+	}
+
+aloop:
+	r = SSL_connect(port->ssl);
+	if (r <= 0)
+	{
+		err = SSL_get_error(port->ssl, r);
+		switch (err)
+		{
+			case SSL_ERROR_WANT_READ:
+			case SSL_ERROR_WANT_WRITE:
+#ifdef WIN32
+				pgwin32_waitforsinglesocket(SSL_get_fd(port->ssl),
+											(err == SSL_ERROR_WANT_READ) ?
+					   FD_READ | FD_CLOSE | FD_ACCEPT : FD_WRITE | FD_CLOSE);
+#endif
+				goto aloop;
+			case SSL_ERROR_SYSCALL:
+				if (r < 0)
+					ereport(COMMERROR,
+							(errcode_for_socket_access(),
+							 errmsg("could not accept SSL connection: %m")));
+				else
+					ereport(COMMERROR,
+							(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					errmsg("could not accept SSL connection: EOF detected")));
+				break;
+			case SSL_ERROR_SSL:
+				ereport(COMMERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("could not accept SSL connection: %s",
+								SSLerrmessage())));
+				break;
+			case SSL_ERROR_ZERO_RETURN:
+				ereport(COMMERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				   errmsg("could not accept SSL connection: EOF detected")));
+				break;
+			default:
+				ereport(COMMERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("unrecognized SSL error code: %d",
+								err)));
+				break;
+		}
+		close_SSL(port);
+		return -1;
+	}
+
+	port->count = 0;
+
+	/* XXX should we get the server certificate here? */
 
 	/* set up debugging/info callback */
 	SSL_CTX_set_info_callback(SSL_context, info_cb);

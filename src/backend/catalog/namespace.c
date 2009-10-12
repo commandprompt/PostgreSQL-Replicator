@@ -186,6 +186,9 @@ static void RemoveTempRelations(Oid tempNamespaceId);
 static void RemoveTempRelationsCallback(int code, Datum arg);
 static void NamespaceCallback(Datum arg, Oid relid);
 
+static Oid 
+ReplLookupExplicitNamespace(const char *nspname, AclResult *aclresult);
+
 /* These don't really need to appear in any header file */
 Datum		pg_table_is_visible(PG_FUNCTION_ARGS);
 Datum		pg_type_is_visible(PG_FUNCTION_ARGS);
@@ -259,6 +262,82 @@ RangeVarGetRelid(const RangeVar *relation, bool failOK)
 		relId = RelnameGetRelid(relation->relname);
 	}
 
+	if (!OidIsValid(relId) && !failOK)
+	{
+		if (relation->schemaname)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("relation \"%s.%s\" does not exist",
+							relation->schemaname, relation->relname)));
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("relation \"%s\" does not exist",
+							relation->relname)));
+	}
+	return relId;
+}
+
+/* Mammoth equivalent for RangeVarGetRelid, call ReplLookupExplicitNamespace
+ * instead of LookupExplicitNamespace.
+ */
+Oid
+ReplRangeVarGetRelid(const RangeVar *relation, bool failOK)
+{
+	Oid			namespaceId;
+	Oid			relId;
+
+	relId = InvalidOid; /* making the compiler silent */
+
+	/*
+	 * We check the catalog name and then ignore it.
+	 */
+	if (relation->catalogname)
+	{
+		if (strcmp(relation->catalogname, get_database_name(MyDatabaseId)) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cross-database references are not implemented: \"%s.%s.%s\"",
+							relation->catalogname, relation->schemaname,
+							relation->relname)));
+	}
+
+	if (relation->schemaname)
+	{
+		AclResult	aclresult = ACLCHECK_OK;
+
+		/* use exact schema given */
+		namespaceId = ReplLookupExplicitNamespace(relation->schemaname, &aclresult);
+
+		/* If the previous call returned InvalidOid - we ask for non-existent
+		 * namespace and should throw ERROR or return InvalidOid depending on
+		 * the failOK. Otherwise - use the obtained oid to get a relation oid
+		 */
+		if (OidIsValid(namespaceId))
+			relId = get_relname_relid(relation->relname, namespaceId);		
+		else if (!failOK)
+		{
+			if (aclresult != ACLCHECK_OK)
+				aclcheck_error(aclresult, ACL_KIND_NAMESPACE,
+					   			relation->schemaname);
+			ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("schema \"%s\" does not exist", relation->schemaname)));
+		}
+		else
+			relId = InvalidOid;
+			
+	}
+	else
+	{
+		/* search the namespace path */
+		relId = RelnameGetRelid(relation->relname);
+	}
+
+	/* Don't have to check namespaceId here, because if failOK is
+	 * false and namespaceId is invalid - we already emmitted error 
+	 * in the code above
+	 */
 	if (!OidIsValid(relId) && !failOK)
 	{
 		if (relation->schemaname)
@@ -1467,6 +1546,45 @@ TSParserIsVisible(Oid prsId)
 	ReleaseSysCache(tup);
 
 	return visible;
+}
+
+/*
+ * ReplLookupExplicitNamespace
+ *		Process an explicitly-specified schema name: look up the schema
+ *		and verify we have USAGE (lookup) rights in it. Let the caller
+ *		deal with errors while lookup instead of using elog(ERROR) here.
+ *
+ * Returns the namespace OID or InvalidOid on any problem.
+ */
+static Oid
+ReplLookupExplicitNamespace(const char *nspname, AclResult *aclresult)
+{
+	Oid			namespaceId;
+
+	/* check for pg_temp alias */
+	if (strcmp(nspname, "pg_temp") == 0)
+	{
+		if (OidIsValid(myTempNamespace))
+			return myTempNamespace;
+		/*
+		 * Since this is used only for looking up existing objects, there
+		 * is no point in trying to initialize the temp namespace here;
+		 * and doing so might create problems for some callers.
+		 * Just fall through and give the "does not exist" error.
+		 */
+	}
+
+	namespaceId = GetSysCacheOid(NAMESPACENAME,
+								 CStringGetDatum(nspname),
+								 0, 0, 0);
+	if (OidIsValid(namespaceId))
+	{
+		*aclresult = pg_namespace_aclcheck(namespaceId, GetUserId(), ACL_USAGE);
+		if (*aclresult != ACLCHECK_OK)
+			namespaceId = InvalidOid;
+	}
+
+	return namespaceId;
 }
 
 /*

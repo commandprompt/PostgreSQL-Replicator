@@ -1,0 +1,138 @@
+#!/bin/sh
+
+my_name=`basename $0`
+my_version="8.3"
+grep="@EGREP@"
+LN_S="@LN_S@"
+
+MAMMOTH_DIR=
+
+while [ "$#" -gt 0 ]
+do
+    case "$1" in
+    -D)
+		PGDATA=$2
+        shift;;
+	-D*)
+		PGDATA=`echo "$1" | sed 's/^-D//'`
+		;;
+	-X)
+		MAMMOTH_DIR=$2
+		shift;;
+	-X*)
+		MAMMOTH_DIR=`echo "$1" | sed 's/^-X//'`
+		;;
+	*)
+		DATABASE=$1
+		;;
+    esac
+    shift
+done
+
+if [ -z "$PGDATA" -o -z "$DATABASE"  ]; then
+	cat >&2 << EOF
+Usage: $my_name -D DATADIR [-X QUEUEDIR] DATABASE
+
+DATADIR    is where the database files are stored
+QUEUEDIR   is the path where replication logs are to be stored
+           (defaults to DATADIR/mammoth)
+DATABASE   is the name of the database on which Replicator catalog's are
+           to be installed
+EOF
+	exit 1
+fi;
+
+basedir=`dirname $0`/..
+
+for pg_command in pg_config postgres; do
+	if [ ! -x "$basedir/bin/$pg_command" ]; then 
+		echo "$my_name: can't find $basedir/bin/$pg_command executable" >&2
+		exit 1
+	fi;
+done
+
+if [ ! -f "$PGDATA/PG_VERSION" ]; then
+	echo "$my_name: \"$PGDATA\" is not a valid PostgreSQL data directory" >&2
+	exit 1
+fi
+
+pg_version=`cat "$PGDATA/PG_VERSION"`
+if [ $pg_version != $my_version ]; then
+	echo "\"$PGDATA\" is not a $my_version PostgreSQL installation" >&2
+	exit 1
+fi
+
+share_dir=`$basedir/bin/pg_config --sharedir 2>/dev/null`
+if [ $? -ne 0 ]; then
+	echo "$basedir does not seem to be a Mammoth Replicator $my_version installation" >&2
+	exit 1
+fi
+
+PGOPTIONS="-c statement_timeout=0 -c replication_enable=0 -c lc_messages=C"
+
+temp=`mktemp /tmp/$my_name.XXXXXX`
+trap 'rm $temp' 0 1 3 15
+
+createdir() {
+	mkdir "$1"
+	if [ $? -ne 0 ]; then
+		exit $?
+	fi
+}
+
+# create our data directory
+# Note: these paths are hardcoded in mcp_queue.h too.
+base="$PGDATA"/mammoth
+
+if [ ! -z "$MAMMOTH_DIR" ]; then
+	createdir "$MAMMOTH_DIR"
+	$LN_S "$MAMMOTH_DIR" "$base" 
+else
+	createdir "$base"
+fi
+
+for role in backend forward; do
+	createdir "$base"/$role
+	createdir "$base"/$role/txlog
+	createdir "$base"/$role/queue
+done
+
+# create the catalogs
+$basedir/bin/postgres --boot -x99 -D "$PGDATA" $PGOPTIONS "$DATABASE" < $share_dir/mammoth.bki 2> $temp > $temp
+if [ $? -ne 0 ] || $grep 'ERROR|FATAL' $temp >/dev/null 2>&1; then
+	cat $temp >&2
+	exit $?
+fi
+
+# change indexes to primary keys
+$basedir/bin/postgres --single -D "$PGDATA" $PGOPTIONS "$DATABASE" < $share_dir/mammoth_pk_indexes.sql 2>$temp > $temp
+if [ $? -ne 0 ] || $grep 'ERROR|FATAL' $temp >/dev/null 2>&1; then
+	cat $temp >&2
+	exit $?
+fi
+    
+# reindex the database
+echo "REINDEX DATABASE \"$DATABASE\"" | $basedir/bin/postgres --single -D "$PGDATA" $PGOPTIONS -O -P "$DATABASE" 2>$temp > $temp
+if [ $? -ne 0 ] || $grep 'ERROR|FATAL' $temp >/dev/null 2>&1; then
+	cat $temp >&2
+	exit $?
+fi
+
+# reset the NOT NULL from our nullable columns
+{
+	echo "alter table pg_catalog.repl_relations alter relid drop not null";
+	echo "alter table pg_catalog.repl_slave_relations alter relid drop not null"
+} | $basedir/bin/postgres --single -D "$PGDATA" $PGOPTIONS -O -P "$DATABASE" 2>$temp > $temp
+if [ $? -ne 0 ] || $grep 'ERROR|FATAL' $temp >/dev/null 2>&1; then
+	cat $temp >&2
+	exit $?
+fi
+
+# create the triggers
+$basedir/bin/postgres --single -D "$PGDATA" $PGOPTIONS -O "$DATABASE" < $share_dir/globals-install.sql 2>$temp > $temp
+if [ $? -ne 0 ] || $grep 'ERROR|FATAL' $temp >/dev/null 2>&1; then
+	cat $temp >&2
+	exit $?
+fi
+
+echo "Database \"$DATABASE\" ready for Mammoth Replicator"

@@ -600,3 +600,16 @@ deleteLOfd(int fd)
 {
 	cookies[fd] = NULL;
 }
+
+/*
+ * No-op function for large objects.  This just creates the LO private memory
+ * context.  This is needed for Mammoth Replicator, because it messes up with
+ * internal structs without going through the regular code paths.  Calling this
+ * function makes it possible for our AtEOXact callback to clean up properly
+ * after them.
+ */
+void
+lo_noop(void)
+{
+	CreateFSContext();
+}

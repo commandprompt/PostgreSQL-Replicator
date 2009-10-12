@@ -14,6 +14,7 @@
 #include "access/rmgr.h"
 #include "access/xlogdefs.h"
 #include "lib/stringinfo.h"
+#include "catalog/pg_control.h"
 #include "storage/buf.h"
 #include "utils/pg_crc.h"
 #include "utils/timestamp.h"
@@ -134,6 +135,11 @@ typedef struct XLogRecData
 extern TimeLineID ThisTimeLineID;		/* current TLI */
 extern bool InRecovery;
 extern XLogRecPtr XactLastRecEnd;
+
+/*
+ * We maintain an image of pg_control in shared memory.
+ */
+extern ControlFileData *ControlFile;
 
 /* these variables are GUC parameters related to XLOG */
 extern int	CheckPointSegments;

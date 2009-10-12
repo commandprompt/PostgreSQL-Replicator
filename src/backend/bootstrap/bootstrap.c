@@ -27,10 +27,13 @@
 #include "catalog/index.h"
 #include "catalog/pg_type.h"
 #include "libpq/pqsignal.h"
+#include "mammoth_r/mcp_queue.h"
+#include "mammoth_r/txlog.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "postmaster/bgwriter.h"
 #include "postmaster/walwriter.h"
+#include "postmaster/replication.h"
 #include "storage/freespace.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
@@ -48,7 +51,7 @@ extern char *optarg;
 #define ALLOC(t, c)		((t *) calloc((unsigned)(c), sizeof(t)))
 
 static void CheckerModeMain(void);
-static void BootstrapModeMain(void);
+static void BootstrapModeMain(char *dbname);
 static void bootstrap_signals(void);
 static void ShutdownAuxiliaryProcess(int code, Datum arg);
 static hashnode *AddStr(char *str, int strlength, int mderef);
@@ -207,6 +210,7 @@ AuxiliaryProcessMain(int argc, char *argv[])
 	int			flag;
 	AuxProcType auxType = CheckerProcess;
 	char	   *userDoption = NULL;
+	char       *dbname = NULL;
 
 	/*
 	 * initialize globals
@@ -313,7 +317,9 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		}
 	}
 
-	if (argc != optind)
+	if (auxType == MammothBootstrapProcess && argc - optind + 1)
+		dbname = argv[optind++]; 
+	else if (argc != optind || auxType == MammothBootstrapProcess)
 	{
 		write_stderr("%s: invalid command-line arguments\n", progname);
 		proc_exit(1);
@@ -337,6 +343,8 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			case WalWriterProcess:
 				statmsg = "wal writer process";
 				break;
+			case MammothBootstrapProcess:
+				statmsg = "mammoth bootstrap process";
 			default:
 				statmsg = "??? process";
 				break;
@@ -410,7 +418,15 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			bootstrap_signals();
 			BootStrapXLOG();
 			StartupXLOG();
-			BootstrapModeMain();
+			BootstrapModeMain(NULL);
+			proc_exit(1);		/* should never return */
+
+		case MammothBootstrapProcess:
+			bootstrap_signals();
+			BootstrapTXLOG();
+			BootStrapMCPQueue();
+			StartupXLOG();
+			BootstrapModeMain(dbname);
 			proc_exit(1);		/* should never return */
 
 		case StartupProcess:
@@ -469,19 +485,22 @@ CheckerModeMain(void)
  *	 commands in a special bootstrap language.
  */
 static void
-BootstrapModeMain(void)
+BootstrapModeMain(char *dbname)
 {
 	int			i;
 
 	Assert(!IsUnderPostmaster);
 
+	if (dbname == NULL)
 	SetProcessingMode(BootstrapProcessing);
+	else
+		SetProcessingMode(MammothBootstrapProcessing);
 
 	/*
 	 * Do backend-like initialization for bootstrap mode
 	 */
 	InitProcess();
-	InitPostgres(NULL, InvalidOid, NULL, NULL);
+	InitPostgres(dbname, InvalidOid, NULL, NULL);
 
 	/* Initialize stuff for bootstrap-file processing */
 	for (i = 0; i < MAXATTR; i++)

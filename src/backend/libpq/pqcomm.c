@@ -144,6 +144,15 @@ pq_init(void)
 	on_proc_exit(pq_close, 0);
 }
 
+/* pq_reset -- completely reset the buffer, dropping any bytes in it */
+void
+pq_reset(void)
+{
+	PqSendPointer = PqRecvPointer = PqRecvLength = 0;
+	PqCommBusy = false;
+	DoingCopyOut = false;
+}
+
 /* --------------------------------
  *		pq_comm_reset - reset libpq during error recovery
  *
@@ -234,13 +243,17 @@ StreamDoUnlink(int code, Datum arg)
  * Successfully opened sockets are added to the ListenSocket[] array,
  * at the first position that isn't -1.
  *
+ * if isForwarder is true, set the corresponding element of ListenSocketIsForw
+ * to true.
+ *
  * RETURNS: STATUS_OK or STATUS_ERROR
  */
 
 int
 StreamServerPort(int family, char *hostName, unsigned short portNumber,
 				 char *unixSocketName,
-				 int ListenSocket[], int MaxListen)
+				 int ListenSocket[], int MaxListen, bool ListenSocketIsForw[],
+				 bool isForwarder)
 {
 	int			fd,
 				err;
@@ -455,6 +468,7 @@ StreamServerPort(int family, char *hostName, unsigned short portNumber,
 			continue;
 		}
 		ListenSocket[listen_index] = fd;
+		ListenSocketIsForw[listen_index] = isForwarder;
 		added++;
 	}
 
@@ -813,6 +827,12 @@ pq_peekbyte(void)
 			return EOF;			/* Failed to recv data */
 	}
 	return (unsigned char) PqRecvBuffer[PqRecvPointer];
+}
+
+bool
+pq_arebytes(void)
+{
+	return PqRecvLength > PqRecvPointer;
 }
 
 /* --------------------------------

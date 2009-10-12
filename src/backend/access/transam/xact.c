@@ -32,11 +32,16 @@
 #include "commands/trigger.h"
 #include "executor/spi.h"
 #include "libpq/be-fsstubs.h"
+#include "mammoth_r/agents.h"
+#include "mammoth_r/pgr.h"
+#include "mammoth_r/txlog.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "pgstat.h"
+#include "postmaster/replication.h"
 #include "storage/fd.h"
 #include "storage/lmgr.h"
+#include "storage/pmsignal.h"
 #include "storage/procarray.h"
 #include "storage/sinvaladt.h"
 #include "storage/smgr.h"
@@ -137,6 +142,7 @@ typedef struct TransactionStateData
 	Oid			prevUser;		/* previous CurrentUserId setting */
 	bool		prevSecDefCxt;	/* previous SecurityDefinerContext setting */
 	bool		prevXactReadOnly;		/* entry-time xact r/o state */
+	off_t		txlocal_offset;		/* offset of txlocal when subtrans starts */
 	struct TransactionStateData *parent;		/* back link to parent */
 } TransactionStateData;
 
@@ -165,6 +171,7 @@ static TransactionStateData TopTransactionStateData = {
 	InvalidOid,					/* previous CurrentUserId setting */
 	false,						/* previous SecurityDefinerContext setting */
 	false,						/* entry-time xact r/o state */
+	0,							/* offset of txlocal at entry */
 	NULL						/* link to parent state block */
 };
 
@@ -266,12 +273,15 @@ static void AtSubAbort_ResourceOwner(void);
 static void AtSubCommit_Memory(void);
 static void AtSubStart_Memory(void);
 static void AtSubStart_ResourceOwner(void);
+static void AtSubStart_Replication(void);
+static void AtSubAbort_Replication(void);
 
 static void ShowTransactionState(const char *str);
 static void ShowTransactionStateRec(TransactionState state);
 static const char *BlockStateAsString(TBlockState blockState);
 static const char *TransStateAsString(TransState state);
 
+static void repl_finish_tx(void);
 
 /* ----------------------------------------------------------------
  *	transaction state accessors
@@ -800,6 +810,23 @@ AtSubStart_ResourceOwner(void)
 	CurrentResourceOwner = s->curTransactionOwner;
 }
 
+/*
+ * Save the current recno from the local queue, so we can truncate it
+ * to this position if the subtransaction aborts later.
+ */
+static void
+AtSubStart_Replication(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	if (replication_enable && replication_master)
+	{
+		s->txlocal_offset = PGRGetCurrentLocalOffset();
+		elog(DEBUG5, "setting local offset to "UNI_LLU, 
+			(ullong) s->txlocal_offset);
+	}
+}
+
 /* ----------------------------------------------------------------
  *						CommitTransaction stuff
  * ----------------------------------------------------------------
@@ -991,6 +1018,14 @@ RecordTransactionCommit(void)
 		MyProc->inCommit = false;
 		END_CRIT_SECTION();
 	}
+
+	/* Enqueue transaction data file and record transaction commit in TXLOG. */
+	/* XXX: this is probably broken for async commits since XLogFlush is not
+	 * called at all, thus we can't guarantee that the data that is 
+	 * replicated to the slaves is committed on the master process
+	 */
+	if (replication_enable && replication_master && !IsReplicatorProcess())
+		repl_finish_tx();
 
 	/* Compute latestXid while we have the child XIDs handy */
 	latestXid = TransactionIdLatest(xid, nchildren, children);
@@ -1316,11 +1351,49 @@ RecordTransactionAbort(bool isSubXact)
 	if (!isSubXact)
 		XactLastRecEnd.xrecoff = 0;
 
+	/* Enqueue transaction data file and record transaction commit in TXLOG. 
+	 * Note that this should be done only on the outer transaction abort to 
+	 * replicate data from the sequences.
+	 */
+	if (replication_enable && replication_master && !IsReplicatorProcess() && !isSubXact)
+		repl_finish_tx();
+
 	/* And clean up local data */
 	if (rels)
 		pfree(rels);
 
 	return latestXid;
+}
+
+static void
+repl_finish_tx(void)
+{
+	ssize_t		size;
+	MCPFile	   *file;
+	MemoryContext 	oldcxt;
+
+	oldcxt = MemoryContextSwitchTo(ReplRollbackContext);
+
+	/* Check if transaction contains data to replicate */
+	file = MCPLocalQueueGetFile(MasterLocalQueue);
+	size = MCPFileSeek(file, 0, SEEK_END);
+
+	if (size > sizeof(TxDataHeader))
+	{
+		ullong	recno;
+
+		/* Give the local queue file to commit */
+		recno = MCPQueueCommit(MasterMCPQueue, file, InvalidRecno);
+		TXLOGSetCommitted(recno);
+
+		/* Inform MQP about the commit */
+		SendPostmasterSignal(PMSIGNAL_REPLICATOR);
+
+		/* The queue file was taken by QueueCommit, make a new one. */
+		MCPLocalQueueSwitchFile(MasterLocalQueue);
+	}
+
+	MemoryContextSwitchTo(oldcxt);
 }
 
 /*
@@ -1399,6 +1472,19 @@ AtSubAbort_childXids(void)
 	s->childXids = NULL;
 	s->nChildXids = 0;
 	s->maxChildXids = 0;
+}
+
+/*
+ * Signal Replicator to truncate the local queue to what it was at the start
+ * of this subtransaction.
+ */
+static void
+AtSubAbort_Replication(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	if (replication_enable && replication_master)
+		PGRAbortSubTransaction(s->txlocal_offset);
 }
 
 /* ----------------------------------------------------------------
@@ -1588,6 +1674,10 @@ StartTransaction(void)
 	 */
 	s->state = TRANS_INPROGRESS;
 
+	/* Emit the replication BEGIN message. */
+ 	if (replication_enable && replication_master)
+		PGRCollectTxBegin();
+
 	ShowTransactionState("StartTransaction");
 }
 
@@ -1671,6 +1761,17 @@ CommitTransaction(void)
 	s->state = TRANS_COMMIT;
 
 	/*
+	 * Emit the replication COMMIT message.  Don't do it in the replicator
+	 * process!
+	 */
+ 	if (replication_enable && replication_master && !IsReplicatorProcess())
+	{
+		LWLockAcquire(ReplicationCommitLock, LW_SHARED);
+
+		PGRCollectTxCommit(CommitNoDump);
+	}
+
+	/*
 	 * Here is where we really truly commit.
 	 */
 	latestXid = RecordTransactionCommit();
@@ -1683,6 +1784,9 @@ CommitTransaction(void)
 	 * RecordTransactionCommit.
 	 */
 	ProcArrayEndTransaction(MyProc, latestXid);
+
+ 	if (replication_enable && replication_master && !IsReplicatorProcess())
+		LWLockRelease(ReplicationCommitLock);
 
 	/*
 	 * This is all post-commit cleanup.  Note that if an error is raised here,
@@ -1862,6 +1966,20 @@ PrepareTransaction(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot PREPARE a transaction that has operated on temporary tables")));
+
+	/* Do not allow PREPARE TRANSACTION if this transaction is being replicated */
+	if (replication_enable && replication_master)
+	{
+		MCPFile    *lq_file = MCPLocalQueueGetFile(MasterLocalQueue);
+		ssize_t 	size = MCPFileSeek(lq_file, 0, SEEK_END);
+		
+		if (size > sizeof(TxDataHeader))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 	 errmsg("cannot PREPARE a transaction that changes a table being replicated")));
+		}
+	}
 
 	/* Prevent cancel/die interrupt while cleaning up */
 	HOLD_INTERRUPTS();
@@ -2078,6 +2196,13 @@ AbortTransaction(void)
 	AtEOXact_LargeObject(false);	/* 'false' means it's abort */
 	AtAbort_Notify();
 	AtEOXact_UpdateFlatFiles(false);
+
+	/*
+	 * Emit the replication ABORT message.  Don't do it in the replicator
+	 * process!
+	 */
+	if (replication_enable && replication_master && !IsReplicatorProcess())
+		PGRCollectTxAbort();
 
 	/*
 	 * Advertise the fact that we aborted in pg_clog (assuming that we got as
@@ -3753,6 +3878,7 @@ StartSubTransaction(void)
 	AtSubStart_ResourceOwner();
 	AtSubStart_Inval();
 	AtSubStart_Notify();
+	AtSubStart_Replication();
 	AfterTriggerBeginSubXact();
 
 	s->state = TRANS_INPROGRESS;
@@ -3961,6 +4087,8 @@ AbortSubTransaction(void)
 						  s->parent->subTransactionId);
 		AtEOSubXact_HashTables(false, s->nestingLevel);
 		AtEOSubXact_PgStat(false, s->nestingLevel);
+
+		AtSubAbort_Replication();
 	}
 
 	/*

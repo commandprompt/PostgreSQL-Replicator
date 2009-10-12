@@ -1,0 +1,1 @@
+SELECT * FROM pg_authid ORDER BY rolname;

@@ -47,6 +47,8 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_rewrite.h"
 #include "catalog/pg_type.h"
+#include "catalog/repl_forwarder.h"
+#include "catalog/replication.h"
 #include "commands/trigger.h"
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
@@ -54,6 +56,7 @@
 #include "optimizer/prep.h"
 #include "optimizer/var.h"
 #include "rewrite/rewriteDefine.h"
+#include "postmaster/replication.h"
 #include "storage/fd.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
@@ -81,6 +84,7 @@ static FormData_pg_attribute Desc_pg_attribute[Natts_pg_attribute] = {Schema_pg_
 static FormData_pg_attribute Desc_pg_proc[Natts_pg_proc] = {Schema_pg_proc};
 static FormData_pg_attribute Desc_pg_type[Natts_pg_type] = {Schema_pg_type};
 static FormData_pg_attribute Desc_pg_index[Natts_pg_index] = {Schema_pg_index};
+static FormData_pg_attribute Desc_repl_forwarder[Natts_repl_forwarder] = {Schema_repl_forwarder};
 
 /*
  *		Hash tables that index the relation cache
@@ -130,7 +134,8 @@ do { \
 	RelIdCacheEnt *idhentry; bool found; \
 	idhentry = (RelIdCacheEnt*)hash_search(RelationIdCache, \
 										   (void *) &(RELATION->rd_id), \
-										   HASH_ENTER, &found); \
+										   HASH_ENTER, \
+										   &found); \
 	/* used to give notice if found -- now just keep quiet */ \
 	idhentry->reldesc = RELATION; \
 } while(0)
@@ -139,8 +144,7 @@ do { \
 do { \
 	RelIdCacheEnt *hentry; \
 	hentry = (RelIdCacheEnt*)hash_search(RelationIdCache, \
-										 (void *) &(ID), \
-										 HASH_FIND, NULL); \
+										 (void *) &(ID), HASH_FIND,NULL); \
 	if (hentry) \
 		RELATION = hentry->reldesc; \
 	else \
@@ -869,6 +873,20 @@ RelationBuildDesc(Oid targetRelId, Relation oldrelation)
 		relation->trigdesc = NULL;
 
 	/*
+	 * Do we need to replicate this relation?
+	 *
+	 * This only needs to be done for RELKIND_RELATION and RELKIND_SEQUENCE
+	 * relations; we don't replicate anything else (particularly, not toast
+	 * tables!)
+	 */
+	if (replication_enable &&
+		(relation->rd_rel->relkind == RELKIND_RELATION ||
+		 relation->rd_rel->relkind == RELKIND_SEQUENCE))
+		relation->rd_replicate = RelationNeedsReplication(relation);
+	else
+		relation->rd_replicate = false;
+
+	/*
 	 * if it's an index, initialize index-related information
 	 */
 	if (OidIsValid(relation->rd_rel->relam))
@@ -1395,9 +1413,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 	 *
 	 * The data we insert here is pretty incomplete/bogus, but it'll serve to
 	 * get us launched.  RelationCacheInitializePhase2() will read the real
-	 * data from pg_class and replace what we've done here.  Note in particular
-	 * that relowner is left as zero; this cues RelationCacheInitializePhase2
-	 * that the real data isn't there yet.
+	 * data from pg_class and replace what we've done here.
 	 */
 	relation->rd_rel = (Form_pg_class) palloc0(CLASS_TUPLE_SIZE);
 
@@ -2596,31 +2612,17 @@ RelationCacheInitializePhase2(void)
 	 * rows and replace the fake entries with them. Also, if any of the
 	 * relcache entries have rules or triggers, load that info the hard way
 	 * since it isn't recorded in the cache file.
-	 *
-	 * Whenever we access the catalogs to read data, there is a possibility
-	 * of a shared-inval cache flush causing relcache entries to be removed.
-	 * Since hash_seq_search only guarantees to still work after the *current*
-	 * entry is removed, it's unsafe to continue the hashtable scan afterward.
-	 * We handle this by restarting the scan from scratch after each access.
-	 * This is theoretically O(N^2), but the number of entries that actually
-	 * need to be fixed is small enough that it doesn't matter.
 	 */
 	hash_seq_init(&status, RelationIdCache);
 
 	while ((idhentry = (RelIdCacheEnt *) hash_seq_search(&status)) != NULL)
 	{
 		Relation	relation = idhentry->reldesc;
-		bool		restart = false;
-
-		/*
-		 * Make sure *this* entry doesn't get flushed while we work with it.
-		 */
-		RelationIncrementReferenceCount(relation);
 
 		/*
 		 * If it's a faked-up entry, read the real pg_class tuple.
 		 */
-		if (relation->rd_rel->relowner == InvalidOid)
+		if (needNewCacheFile && relation->rd_isnailed)
 		{
 			HeapTuple	htup;
 			Form_pg_class relp;
@@ -2637,6 +2639,7 @@ RelationCacheInitializePhase2(void)
 			 * Copy tuple to relation->rd_rel. (See notes in
 			 * AllocateRelationDesc())
 			 */
+			Assert(relation->rd_rel != NULL);
 			memcpy((char *) relation->rd_rel, (char *) relp, CLASS_TUPLE_SIZE);
 
 			/* Update rd_options while we have the tuple */
@@ -2645,57 +2648,22 @@ RelationCacheInitializePhase2(void)
 			RelationParseRelOptions(relation, htup);
 
 			/*
-			 * Check the values in rd_att were set up correctly.  (We cannot
-			 * just copy them over now: formrdesc must have set up the
-			 * rd_att data correctly to start with, because it may already
-			 * have been copied into one or more catcache entries.)
+			 * Also update the derived fields in rd_att.
 			 */
-			Assert(relation->rd_att->tdtypeid == relp->reltype);
-			Assert(relation->rd_att->tdtypmod == -1);
-			Assert(relation->rd_att->tdhasoid == relp->relhasoids);
+			relation->rd_att->tdtypeid = relp->reltype;
+			relation->rd_att->tdtypmod = -1;	/* unnecessary, but... */
+			relation->rd_att->tdhasoid = relp->relhasoids;
 
 			ReleaseSysCache(htup);
-
-			/* relowner had better be OK now, else we'll loop forever */
-			if (relation->rd_rel->relowner == InvalidOid)
-				elog(ERROR, "invalid relowner in pg_class entry for \"%s\"",
-					 RelationGetRelationName(relation));
-
-			restart = true;
 		}
 
 		/*
 		 * Fix data that isn't saved in relcache cache file.
-		 *
-		 * relhasrules or reltriggers could possibly be wrong or out of
-		 * date.  If we don't actually find any rules or triggers, clear the
-		 * local copy of the flag so that we don't get into an infinite loop
-		 * here.  We don't make any attempt to fix the pg_class entry, though.
 		 */
 		if (relation->rd_rel->relhasrules && relation->rd_rules == NULL)
-		{
 			RelationBuildRuleLock(relation);
-			if (relation->rd_rules == NULL)
-				relation->rd_rel->relhasrules = false;
-			restart = true;
-		}
 		if (relation->rd_rel->reltriggers > 0 && relation->trigdesc == NULL)
-		{
 			RelationBuildTriggers(relation);
-			if (relation->trigdesc == NULL)
-				relation->rd_rel->reltriggers = 0;
-			restart = true;
-		}
-
-		/* Release hold on the relation */
-		RelationDecrementReferenceCount(relation);
-
-		/* Now, restart the hashtable scan if needed */
-		if (restart)
-		{
-			hash_seq_term(&status);
-			hash_seq_init(&status, RelationIdCache);
-		}
 	}
 
 	/*
@@ -2784,6 +2752,22 @@ GetPgIndexDescriptor(void)
 											   false);
 
 	return pgindexdesc;
+}
+
+TupleDesc
+GetReplForwarderDescriptor(void)
+{
+	static TupleDesc replforwdesc = NULL;
+
+	if (replforwdesc == NULL)
+	{
+		CreateCacheMemoryContext();		/* XXX crock */
+		replforwdesc = BuildHardcodedDescriptor(Natts_repl_forwarder,
+												Desc_repl_forwarder,
+												false);
+	}
+
+	return replforwdesc;
 }
 
 static void

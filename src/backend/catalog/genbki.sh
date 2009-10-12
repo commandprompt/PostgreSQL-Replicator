@@ -392,6 +392,22 @@ inside == 1 {
 	next;
 }
 
+/^OPEN\(/ { 
+# ----
+#  end any prior catalog data insertions before starting a new one..
+# ----
+	if (reln_open == 1) {
+		print "close " catalog;
+		reln_open = 0;
+	}
+
+	catalog = substr($1, 6, length($1)-6);
+
+	print "open " catalog;
+	reln_open = 1;
+}
+
+
 END {
 	if (reln_open == 1) {
 		print "close " catalog;
@@ -411,18 +427,18 @@ sed -e '/^[ 	]*$/d' \
 # that the files are of reasonable size.  The numbers here are arbitrary,
 # but are much smaller than the actual expected sizes as of Postgres 7.2.
 #
-if [ `wc -c < ${OUTPUT_PREFIX}.bki.$$` -lt 100000 ]; then
-    echo "$CMDNAME: something seems to be wrong with the .bki file" >&2
-    exit 1
-fi
-if [ `wc -c < ${OUTPUT_PREFIX}.description.$$` -lt 10000 ]; then
-    echo "$CMDNAME: something seems to be wrong with the .description file" >&2
-    exit 1
-fi
-if [ `wc -c < ${OUTPUT_PREFIX}.shdescription.$$` -lt 10 ]; then
-    echo "$CMDNAME: something seems to be wrong with the .shdescription file" >&2
-    exit 1
-fi
+# if [ `wc -c < ${OUTPUT_PREFIX}.bki.$$` -lt 100000 ]; then
+#     echo "$CMDNAME: something seems to be wrong with the .bki file" >&2
+#     exit 1
+# fi
+# if [ `wc -c < ${OUTPUT_PREFIX}.description.$$` -lt 10000 ]; then
+#     echo "$CMDNAME: something seems to be wrong with the .description file" >&2
+#     exit 1
+# fi
+# if [ `wc -c < ${OUTPUT_PREFIX}.shdescription.$$` -lt 10 ]; then
+#     echo "$CMDNAME: something seems to be wrong with the .shdescription file" >&2
+#     exit 1
+# fi
 
 # Looks good, commit ...
 

@@ -1,0 +1,2 @@
+CREATE TABLE jedi(LIKE rebels, force INTEGER);
+ALTER TABLE jedi ADD PRIMARY KEY(id);

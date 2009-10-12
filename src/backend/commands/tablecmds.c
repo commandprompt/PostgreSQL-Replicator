@@ -23,6 +23,7 @@
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
+#include "catalog/mammoth_indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_depend.h"
@@ -33,6 +34,10 @@
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/toasting.h"
+#include "catalog/repl_relations.h"
+#include "catalog/repl_slave_relations.h"
+#include "catalog/repl_lo_columns.h"
+#include "catalog/replication.h"
 #include "commands/cluster.h"
 #include "commands/defrem.h"
 #include "commands/tablecmds.h"
@@ -40,6 +45,8 @@
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
 #include "executor/executor.h"
+#include "mammoth_r/collcommon.h"
+#include "mammoth_r/pgr.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
@@ -56,6 +63,7 @@
 #include "parser/parse_utilcmd.h"
 #include "parser/parser.h"
 #include "rewrite/rewriteDefine.h"
+#include "postmaster/replication.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/smgr.h"
 #include "utils/acl.h"
@@ -224,6 +232,7 @@ static void ATExecSetStatistics(Relation rel, const char *colName,
 					Node *newValue);
 static void ATExecSetStorage(Relation rel, const char *colName,
 				 Node *newValue);
+static void ATExecSetLO(Relation rel, const char *colName, bool enable);
 static void ATExecDropColumn(Relation rel, const char *colName,
 				 DropBehavior behavior,
 				 bool recurse, bool recursing);
@@ -249,6 +258,8 @@ static void change_owner_recurse_to_sequences(Oid relationOid,
 								  Oid newOwnerId);
 static void ATExecClusterOn(Relation rel, const char *indexName);
 static void ATExecDropCluster(Relation rel);
+static void ATExecSetReplication(Relation rel, bool enable);
+static void ATExecSetSlaveReplication(Relation rel, bool enable, int slave);
 static void ATPrepSetTableSpace(AlteredTableInfo *tab, Relation rel,
 					char *tablespacename);
 static void ATExecSetTableSpace(Oid tableOid, Oid newTableSpace);
@@ -260,6 +271,9 @@ static void ATExecEnableDisableRule(Relation rel, char *rulename,
 static void ATExecAddInherit(Relation rel, RangeVar *parent);
 static void ATExecDropInherit(Relation rel, RangeVar *parent);
 static void copy_relation_data(Relation rel, SMgrRelation dst);
+static void ReplicationVerifyPK(Relation rel);
+static void ReplicationVerifyNotChild(Relation rel);
+static void ATCheckReplication(Relation rel, AlterTableType subtype);
 
 
 /* ----------------------------------------------------------------
@@ -607,6 +621,9 @@ ExecuteTruncate(TruncateStmt *stmt)
 		Oid			heap_relid;
 		Oid			toast_relid;
 
+		if (replication_enable && rel->rd_replicate && replication_master)
+			PGRCollectTruncate(rel, GetCurrentCommandId(false));
+
 		/*
 		 * Create a new empty storage file for the relation, and assign it as
 		 * the relfilenode value.	The old storage file is scheduled for
@@ -684,6 +701,29 @@ truncate_check_rel(Relation rel)
 	 * including open scans and pending AFTER trigger events.
 	 */
 	CheckTableNotInUse(rel, "TRUNCATE");
+	/* Disable truncating tables on slaves */
+	if (replication_enable && rel->rd_replicate && replication_slave)
+		ereport(ERROR,
+				(errmsg("cannot truncate table \"%s\"",
+						RelationGetRelationName(rel)),
+				 errdetail("Relation is being replicated.")));
+	/* 
+	 * Forbid truncating a relation with a column that holds large object
+	 * references.
+	 */
+	if (replication_enable && rel->rd_replicate)
+	{
+		List *lo_columns = get_relation_lo_columns(rel);
+		if (lo_columns != NIL)
+		{
+			list_free(lo_columns);
+			ereport(ERROR, 
+					(errmsg("cannot truncate table \"%s\"", 
+							RelationGetRelationName(rel)),
+					 errdetail("LO replication is enabled for this relation"),
+					 errhint("Disable LO replication for columns of this relation")));
+		}
+	}
 }
 
 /*----------
@@ -835,6 +875,12 @@ MergeAttributes(List *schema, List *supers, bool istemp,
 			aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
 						   RelationGetRelationName(relation));
 
+		/* New relations cannot inherit from replicated relations */
+		if (relation->rd_replicate)
+			ereport(ERROR,
+					(errmsg("cannot inherit from replicated relation \"%s\"",
+							parent->relname)));	
+			
 		/*
 		 * Reject duplications in the list of parents.
 		 */
@@ -1884,6 +1930,9 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 	 */
 	cmd = copyObject(cmd);
 
+	/* Check the command for replicated status */
+	ATCheckReplication(rel, cmd->subtype);
+
 	/*
 	 * Do permissions checking, recursion to child tables if needed, and any
 	 * additional phase-1 processing needed.
@@ -1933,6 +1982,15 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			/* No command-specific prep needed */
 			pass = AT_PASS_COL_ATTRS;
 			break;
+		case AT_EnableLO:	/* ALTER COLUMN ENABLE LO */
+		case AT_DisableLO:	/* ALTER COLUMN DISABLE LO */
+				/* These commands never recurse */
+				if (!superuser())
+					ereport(ERROR,
+							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 	errmsg("must be superuser to change lo state of a column")));
+				pass = AT_PASS_MISC;
+				break;
 		case AT_DropColumn:		/* DROP COLUMN */
 			ATSimplePermissions(rel, false);
 			/* Recursion occurs during execution phase */
@@ -2004,6 +2062,28 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			}
 			pass = AT_PASS_DROP;
 			break;
+		case AT_DisableReplication:	/* DISABLE REPLICATION */
+		case AT_DisableReplicationSlave:/* DISABLE REPLICATION ON SLAVE */
+			if (!recursing)
+				ReplicationVerifyNotChild(rel);
+			/* fall through */
+		case AT_EnableReplication:	/* ENABLE REPLICATION */
+		case AT_EnableReplicationSlave:	/* ENABLE REPLICATION ON SLAVE */
+			ATSimpleRecursion(wqueue, rel, cmd, recurse);
+			/* ensure it's a table or sequence */
+			if (rel->rd_rel->relkind != RELKIND_RELATION &&
+				rel->rd_rel->relkind != RELKIND_SEQUENCE)
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("\"%s\" is not a table or sequence",
+								RelationGetRelationName(rel))));
+			if (!superuser())
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("must be superuser to change replication status of a table")));
+			ReplicationVerifyPK(rel);
+			pass = AT_PASS_MISC;
+			break;
 		case AT_SetTableSpace:	/* SET TABLESPACE */
 			ATSimplePermissionsRelationOrIndex(rel);
 			/* This command never recurses */
@@ -2045,6 +2125,114 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 
 	/* Add the subcommand to the appropriate list for phase 2 */
 	tab->subcmds[pass] = lappend(tab->subcmds[pass], cmd);
+}
+
+/*
+ * Verify replication status of the relation.
+ *
+ * Mainly, disallow executing commands that cause a slave's copy to be
+ * invalid.
+ */
+static void
+ATCheckReplication(Relation rel, AlterTableType subtype)
+{
+	if (!replication_enable)
+		return;
+
+	if (!rel->rd_replicate)
+		return;
+
+	switch (subtype)
+	{
+		case AT_AddColumn:		/* ADD COLUMN */
+			/* must be the same in master and slave */
+			elog(ERROR, "cannot ADD COLUMN to a replicated table");
+			break;
+		case AT_ColumnDefault:	/* ALTER COLUMN DEFAULT */
+			/* no problem */
+			break;
+		case AT_DropNotNull:	/* ALTER COLUMN DROP NOT NULL */
+			/* OK on slave actually */
+			elog(ERROR, "cannot DROP NOT NULL on a replicated table");
+			break;
+		case AT_SetNotNull:		/* ALTER COLUMN SET NOT NULL */
+			/* OK on master */
+			elog(ERROR, "cannot SET NOT NULL on a replicated table");
+			break;
+		case AT_SetStatistics:	/* ALTER COLUMN STATISTICS */
+			/* no problem */
+			break;
+		case AT_SetStorage:		/* ALTER COLUMN STORAGE */
+			/* no problem */
+			break;
+		case AT_EnableLO:	/* ALTER COLUMN ENABLE LO */
+		case AT_DisableLO:	/* ALTER COLUMN DISABLE LO */
+			/* OK on master */
+			if (replication_master)
+				break;
+			elog(ERROR, "cannot ENABLE/DISABLE LO on a replication slave");
+			break;
+		case AT_DropColumn:		/* DROP COLUMN */
+			elog(ERROR, "cannot DROP COLUMN on a replicated table");
+			break;
+		case AT_AddIndex:		/* ADD INDEX */
+			/* no problem */
+			break;
+		case AT_AddConstraint:	/* ADD CONSTRAINT */
+			/* OK on master actually */
+			elog(ERROR, "cannot ADD CONSTRAINT on a replicated table");
+			break;
+		case AT_DropConstraint:	/* DROP CONSTRAINT */
+			/* OK on slave actually */
+			elog(ERROR, "cannot DROP CONSTRAINT on a replicated table");
+			break;
+		case AT_DropConstraintQuietly:	/* DROP CONSTRAINT for child */
+			/* should not happen */
+			elog(ERROR, "cannot DROP CONSTRAINT QUIETLY on a replicated table");
+			break;
+		case AT_AddInherit:		/* ADD INHERIT */
+			/* no problem */
+			break;
+		case AT_DropInherit:	/* DROP INHERIT */
+			/* no problem */
+			break;
+		case AT_AlterColumnType:		/* ALTER COLUMN TYPE */
+			/* impossible */
+			elog(ERROR, "cannot ALTER COLUMN TYPE on a replicated table");
+			break;
+		case AT_ChangeOwner:	/* ALTER OWNER */
+			/* no problem */
+			break;
+		case AT_ClusterOn:		/* CLUSTER ON */
+		case AT_DropCluster:	/* SET WITHOUT CLUSTER */
+			/* no problem */
+			break;
+		case AT_DropOids:		/* SET WITHOUT OIDS */
+			elog(ERROR, "cannot SET WITHOUT OIDS on a replicated table");
+			break;
+		case AT_DisableReplication:	/* DISABLE REPLICATION */
+		case AT_DisableReplicationSlave:/* DISABLE REPLICATION ON SLAVE */
+		case AT_EnableReplication:	/* ENABLE REPLICATION */
+		case AT_EnableReplicationSlave:	/* ENABLE REPLICATION ON SLAVE */
+			if (replication_slave)
+				elog(ERROR, "cannot ENABLE/DISABLE REPLICATION on a replication slave");
+			break;
+		case AT_SetTableSpace:	/* SET TABLESPACE */
+			/* no problem */
+			break;
+		case AT_EnableTrig:		/* ENABLE TRIGGER variants */
+		case AT_EnableTrigAll:
+		case AT_EnableTrigUser:
+		case AT_DisableTrig:	/* DISABLE TRIGGER variants */
+		case AT_DisableTrigAll:
+		case AT_DisableTrigUser:
+			/* no problem */
+			break;
+		default:				/* oops */
+			elog(ERROR, "unrecognized alter table type: %d",
+				 (int) subtype);
+			break;
+	}
 }
 
 /*
@@ -2142,6 +2330,12 @@ ATExecCmd(AlteredTableInfo *tab, Relation rel, AlterTableCmd *cmd)
 		case AT_SetStorage:		/* ALTER COLUMN STORAGE */
 			ATExecSetStorage(rel, cmd->name, cmd->def);
 			break;
+		case AT_EnableLO:
+			ATExecSetLO(rel, cmd->name, true); /* ALTER COLUMN ENABLE LO */
+			break;
+		case AT_DisableLO:
+			ATExecSetLO(rel, cmd->name, false); /* ALTER COLUMN DISABLE LO */
+			break;
 		case AT_DropColumn:		/* DROP COLUMN */
 			ATExecDropColumn(rel, cmd->name, cmd->behavior, false, false);
 			break;
@@ -2183,6 +2377,18 @@ ATExecCmd(AlteredTableInfo *tab, Relation rel, AlterTableCmd *cmd)
 			 * Nothing to do here; we'll have generated a DropColumn
 			 * subcommand to do the real work
 			 */
+			break;
+		case AT_EnableReplication:
+			ATExecSetReplication(rel, true);
+			break;
+		case AT_DisableReplication:
+			ATExecSetReplication(rel, false);
+			break;
+		case AT_EnableReplicationSlave:
+			ATExecSetSlaveReplication(rel, true, intVal(cmd->def));
+			break;
+		case AT_DisableReplicationSlave:
+			ATExecSetSlaveReplication(rel, false, intVal(cmd->def));
 			break;
 		case AT_SetTableSpace:	/* SET TABLESPACE */
 
@@ -3616,6 +3822,207 @@ ATExecSetStorage(Relation rel, const char *colName, Node *newValue)
 	heap_close(attrelation, RowExclusiveLock);
 }
 
+/*
+ * ALTER TABLE ALTER COLUMN ENABLE/DISABLE LO
+ */
+static void
+ATExecSetLO(Relation rel, const char *colName, bool enable)
+{
+	ScanKeyData	keys[2];
+	Relation	repl_lo_columns,
+				attrelation;
+	HeapTuple	tuple,
+				scantuple,
+				newtuple;
+	Oid			relid,
+				nspid;
+	int			i,
+				j,
+				non_dropped_colNo,
+				colNo;
+	SysScanDesc scan;
+	Form_pg_attribute 	attrtuple;
+	Form_pg_index 		pk_index_form;
+	Relation 	pk_index_rel;
+	TupleDesc	tupDesc;
+
+	/*
+	 * Refuse to work when replication is disabled, because we can't be
+	 * sure that the pg_catalog.repl_* catalogs have been installed.
+	 */
+	if (!replication_enable)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot change table replication status"),
+				 errdetail("Replication must be active.")));
+
+	if (rel->rd_rel->relkind != RELKIND_RELATION)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a table",
+						RelationGetRelationName(rel))));
+
+	/* Current command alters replication state */
+	current_is_tablecmd = true;
+
+	repl_lo_columns = heap_open(ReplLoColumnsId, RowExclusiveLock);
+	attrelation = heap_open(AttributeRelationId, RowExclusiveLock);
+
+	/* find the column number by the column name */
+	relid = RelationGetRelid(rel);
+	nspid = RelationGetNamespace(rel);
+	tupDesc = RelationGetDescr(rel);
+
+	tuple = SearchSysCacheAttName(relid, colName);
+
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_COLUMN),
+				 errmsg("column \"%s\" of relation \"%s\" does not exist",
+						colName, RelationGetRelationName(rel))));
+
+	attrtuple = (Form_pg_attribute) GETSTRUCT(tuple);
+
+	/* The column must have oid type */
+	if (attrtuple->atttypid != OIDOID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("cannot set large object replication for column \"%s\"",
+						colName),
+				 errdetail("Column is not of type Oid.")));
+	
+	colNo = attrtuple->attnum;
+	ReleaseSysCache(tuple);
+
+	/* get the attribute number, consider all non-dropped attributes */				
+	for (i = 0, j = 0; i < colNo; i++)
+	{
+		if (tupDesc->attrs[i]->attisdropped)
+			continue;
+		j++;
+	}
+	non_dropped_colNo = j;
+
+	/* Check whether the column is a part of primary key */
+	pk_index_rel = PGRFindPK(rel, AccessShareLock);
+	pk_index_form = pk_index_rel->rd_index;
+	
+	/* Traverse the list of primary key attributes */
+	for (i = 0; i < pk_index_form->indnatts; i++)
+	{
+		if (pk_index_form->indkey.values[i] == colNo)
+		{
+			ereport(ERROR, 
+					(errmsg("cannot set large object replication for column \"%s\"",
+							colName),
+					 errdetail("Column is a part of primary key.")));
+		}
+	}
+	relation_close(pk_index_rel, AccessShareLock);
+
+	if (!enable)
+	{
+		ObjectAddress	obj;
+
+		/*
+		 * The user issued a DISABLE LO.  Perform the deletion via the
+		 * dependency mechanism, to be sure we don't leave the pg_depend tuple
+		 * behind.  Note this also gets rid of the pg_catalog.repl_lo_columns
+		 * tuple automatically, by calling StopLoReplication().
+		 */
+		obj.objectId = relid;
+		obj.objectSubId = non_dropped_colNo;
+		obj.classId = ReplLoColumnsId;
+
+		performDeletion(&obj, DROP_RESTRICT);
+	}
+	else
+	{
+		char	   *nspname;
+		char	   *relname;
+		Datum		values[Natts_repl_lo_columns];
+		char		nulls[Natts_repl_lo_columns];
+		bool		register_dependency = false;
+
+		relname = get_rel_name(relid);
+		nspname = get_namespace_name(nspid);
+
+		/*
+		 * Create a new tuple for lo_columns -- it'll either replace an existing
+		 * one, or, if there isn't one already, will be newly inserted.
+		 */
+		MemSet(nulls, ' ', sizeof(nulls));
+		values[Anum_repl_lo_columns_relid - 1] =  ObjectIdGetDatum(relid);
+		values[Anum_repl_lo_columns_namespace - 1] =
+			NameGetDatum(DirectFunctionCall1(namein,
+											 CStringGetDatum(nspname)));
+		values[Anum_repl_lo_columns_relation - 1] =
+			NameGetDatum(DirectFunctionCall1(namein,
+											 CStringGetDatum(relname)));
+		values[Anum_repl_lo_columns_attnum - 1] = 
+										Int32GetDatum(non_dropped_colNo);
+		values[Anum_repl_lo_columns_lo - 1] = BoolGetDatum(enable);
+
+		newtuple = heap_formtuple(RelationGetDescr(repl_lo_columns),
+								  values, nulls);
+
+		/* Fetch the original tuple from lo_columns, if any */
+		ScanKeyInit(&keys[0],
+					Anum_repl_lo_columns_relid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(relid));
+		ScanKeyInit(&keys[1],
+					Anum_repl_lo_columns_attnum,
+					BTEqualStrategyNumber, F_INT4EQ,
+					Int32GetDatum(non_dropped_colNo));
+		scan = systable_beginscan(repl_lo_columns,
+								  ReplLoColumnsRelidAttnumIndexId, true,
+								  SnapshotNow, 2, keys);
+		scantuple = systable_getnext(scan);
+
+		/* Put the new tuple in, or replace an existing one */
+		if (HeapTupleIsValid(scantuple))
+			simple_heap_update(repl_lo_columns, &scantuple->t_self, newtuple);
+		else
+		{
+			register_dependency = true;
+			simple_heap_insert(repl_lo_columns, newtuple);
+		}
+
+		/* Register dependency on the replication status, if needed */
+		if (register_dependency)
+		{
+			ObjectAddress	depender;
+			ObjectAddress	referenced;
+
+			depender.classId = ReplLoColumnsId;
+			depender.objectId = RelationGetRelid(rel);
+			depender.objectSubId = non_dropped_colNo;
+
+			referenced.classId = RelationRelationId;
+			referenced.objectId = RelationGetRelid(rel);
+			referenced.objectSubId = 0;
+
+			recordDependencyOn(&depender, &referenced, DEPENDENCY_NORMAL);
+		}
+
+		/* keep indexes current */
+		CatalogUpdateIndexes(repl_lo_columns, newtuple);
+
+		/* Clean up. */
+		systable_endscan(scan);
+
+		heap_freetuple(newtuple);
+		pfree(relname);
+		pfree(nspname);
+	}
+
+	/* turn off replication related alter table command indicator */
+	current_is_tablecmd = false;
+
+	heap_close(attrelation, RowExclusiveLock);
+	heap_close(repl_lo_columns, RowExclusiveLock);
+}
 
 /*
  * ALTER TABLE DROP COLUMN
@@ -5708,6 +6115,382 @@ ATExecDropCluster(Relation rel)
 }
 
 /*
+ * ALTER TABLE ENABLE/DISABLE REPLICATION
+ */
+static void
+ATExecSetReplication(Relation rel, bool enable)
+{
+	HeapTuple	tuple;
+	Relation	repl_rels;
+	SysScanDesc	scan;
+	ScanKeyData	key[1];
+
+	/*
+	 * Refuse to work when replication is disabled, because we can't be
+	 * sure that the pg_catalog.repl_* catalogs have been installed.
+	 */
+	if (!replication_enable)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot change table replication status"),
+				 errdetail("Replication must be active.")));
+
+	/* Refuse to work on tables in the pg_catalog schema */
+	if (RelationGetNamespace(rel) == PG_CATALOG_NAMESPACE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot enable/disable replication for system catalogs")));
+
+	/* current command alters replication state */
+	current_is_tablecmd = true;
+
+	/*
+	 * Get the pg_catalog.repl_relations tuple for this table, if any.  We'll
+	 * update it if it exists, or insert a new one otherwise.
+	 */
+	repl_rels = heap_open(ReplRelationsId, RowExclusiveLock);
+
+	ScanKeyInit(&key[0],
+				Anum_repl_relations_relid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationGetRelid(rel)));
+
+	scan = systable_beginscan(repl_rels, ReplRelationsRelidIndexId, true,
+							  SnapshotNow, 1, key);
+	tuple = systable_getnext(scan);
+
+	if (!enable)
+	{
+		ObjectAddress	obj;
+
+		/*
+		 * The user issued a DISABLE REPLICATION.  Perform the deletion via the
+		 * dependency mechanism, to be sure we don't leave the pg_depend tuple
+		 * behind.  Note this also gets rid of the pg_catalog.repl_relations
+		 * tuple automatically, by calling StopReplicationMaster().
+		 */
+		obj.classId = ReplRelationsId;
+		obj.objectId = RelationGetRelid(rel);
+		obj.objectSubId = 0;
+
+		/* There shouldn't be any further dependency, so use DROP_RESTRICT. */
+		performDeletion(&obj, DROP_RESTRICT);
+	}
+	else
+	{
+		/* In the enable case, update an existing tuple or insert a new one */
+		HeapTuple	newtup;
+		Datum		values[Natts_repl_relations];
+		char		nulls[Natts_repl_relations];
+		char	   *nspname;
+		bool		register_dependency = false;
+
+		nspname = get_namespace_name(RelationGetNamespace(rel));
+
+		/* Form the new tuple */
+		values[Anum_repl_relations_relid - 1] =
+			ObjectIdGetDatum(RelationGetRelid(rel));
+		values[Anum_repl_relations_enable - 1] =
+			BoolGetDatum(enable);
+		values[Anum_repl_relations_namespace - 1] =
+			NameGetDatum(DirectFunctionCall1(namein, CStringGetDatum(nspname)));
+		values[Anum_repl_relations_relation - 1] =
+			NameGetDatum(DirectFunctionCall1(namein,
+											 CStringGetDatum(RelationGetRelationName(rel))));
+
+		MemSet(nulls, ' ', sizeof(nulls));
+
+		newtup = heap_formtuple(RelationGetDescr(repl_rels),
+								values, nulls);
+
+		if (HeapTupleIsValid(tuple))
+			simple_heap_update(repl_rels, &tuple->t_self, newtup);
+		else
+		{
+			register_dependency = true;
+			simple_heap_insert(repl_rels, newtup);
+		}
+
+		/* keep indexes current */
+		CatalogUpdateIndexes(repl_rels, newtup);
+
+		heap_freetuple(newtup);
+		pfree(nspname);
+
+		/* Register dependency on the replication status, if needed */
+		if (register_dependency)
+		{
+			ObjectAddress	depender;
+			ObjectAddress	referenced;
+
+			depender.classId = ReplRelationsId;
+			depender.objectId = RelationGetRelid(rel);
+			depender.objectSubId = 0;
+
+			referenced.classId = RelationRelationId;
+			referenced.objectId = RelationGetRelid(rel);
+			referenced.objectSubId = 0;
+
+			recordDependencyOn(&depender, &referenced, DEPENDENCY_NORMAL);
+		}
+	}
+
+	/*
+	 * Flush this relation from the caches, so the replication status is
+	 * updated on all backends.  This needs to be done only in the master.
+	 */
+	if (replication_master)
+		CacheInvalidateRelcache(rel);
+
+	/* Clean up. */
+	systable_endscan(scan);
+	heap_close(repl_rels, RowExclusiveLock);
+
+	if (replication_master)
+	{
+		/* Add this relation to the MasterTableList to send on MCP */
+		AddRelationToMasterTableList(rel, enable);
+	}
+
+	current_is_tablecmd = false;
+
+	/* If this table has SERIAL columns, recurse to the associated sequences */
+	{
+		Relation		depRel;
+		ScanKeyData		key[2];
+		SysScanDesc		sysscan;
+
+		depRel = heap_open(DependRelationId, AccessShareLock);
+
+		ScanKeyInit(&key[0],
+					Anum_pg_depend_refclassid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(RelationRelationId));
+		ScanKeyInit(&key[1],
+					Anum_pg_depend_refobjid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(RelationGetRelid(rel)));
+
+		sysscan = systable_beginscan(depRel, DependReferenceIndexId, true,
+									 SnapshotNow, 2, key);
+
+		/*
+		 * We identify sequences because they are automatic dependencies with
+		 * classid = pg_class
+		 */
+		while (HeapTupleIsValid(tuple = systable_getnext(sysscan)))
+		{
+			Form_pg_depend	depForm;
+			Relation		depender;
+
+			depForm = (Form_pg_depend) GETSTRUCT(tuple);
+
+			if (depForm->deptype != DEPENDENCY_AUTO)
+				continue;
+			if (depForm->classid != RelationRelationId)
+				continue;
+
+			depender = relation_open(depForm->objid, RowExclusiveLock);
+
+			if (depender->rd_rel->relkind == RELKIND_SEQUENCE)
+				ATExecSetReplication(depender, enable);
+
+			relation_close(depender, RowExclusiveLock);
+		}
+		systable_endscan(sysscan);
+		heap_close(depRel, AccessShareLock);
+	}
+}
+
+/*
+ * ALTER TABLE ENABLE/DISABLE REPLICATION ON SLAVE n
+ */
+static void
+ATExecSetSlaveReplication(Relation rel, bool enable, int slave)
+{
+	HeapTuple	tuple;
+	Relation	repl_slave_rels;
+	SysScanDesc	scan;
+	ScanKeyData	key[2];
+
+	/*
+	 * Refuse to work when replication is disabled, because we can't be
+	 * sure that the pg_catalog.repl_* catalogs have been installed.
+	 */
+	if (!replication_enable)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot change table replication status"),
+				 errdetail("Replication must be active.")));
+
+	/* Refuse to work on tables in the pg_catalog schema */
+	if (RelationGetNamespace(rel) == PG_CATALOG_NAMESPACE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot enable/disable replication for system catalogs")));
+
+	/* current command alters table replication status */
+	current_is_tablecmd = true;
+
+	repl_slave_rels = heap_open(ReplSlaveRelationsId, RowExclusiveLock);
+
+	ScanKeyInit(&key[0],
+				Anum_repl_slave_relations_slave,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(slave));
+	ScanKeyInit(&key[1],
+				Anum_repl_slave_relations_relid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationGetRelid(rel)));
+
+	scan = systable_beginscan(repl_slave_rels, ReplSlaveRelationsSlaveRelidIndexId,
+							  true, SnapshotNow, 2, key);
+
+	tuple = systable_getnext(scan);
+
+	/* In the disable case, delete the tuple if it exists */
+	if (!enable)
+	{
+		ObjectAddress	obj;
+
+		/*
+		 * The user issued a DISABLE REPLICATION.  Perform the deletion via the
+		 * dependency mechanism, to be sure we don't leave the pg_depend tuple
+		 * behind.  this also gets rid of the pg_catalog.repl_slave_relations
+		 * tuple automatically, by calling StopReplicationSlave().
+		 */
+		obj.classId = ReplSlaveRelationsId;
+		obj.objectId = RelationGetRelid(rel);
+		obj.objectSubId = slave;
+
+		/* There shouldn't be any further dependency, so use DROP_RESTRICT. */
+		performDeletion(&obj, DROP_RESTRICT);
+	}
+	else
+	{
+		HeapTuple	newtup;
+		Datum		values[Natts_repl_slave_relations];
+		char		nulls[Natts_repl_slave_relations];
+		char	   *nspname;
+		bool		register_dependency = false;
+
+		nspname = get_namespace_name(RelationGetNamespace(rel));
+
+		/* Form the new tuple */
+		values[Anum_repl_slave_relations_slave - 1] =
+			Int32GetDatum(slave);
+		values[Anum_repl_slave_relations_relid - 1] =
+			ObjectIdGetDatum(RelationGetRelid(rel));
+		values[Anum_repl_slave_relations_enable - 1] =
+			BoolGetDatum(enable);
+		values[Anum_repl_slave_relations_namespace - 1] =
+			NameGetDatum(DirectFunctionCall1(namein, CStringGetDatum(nspname)));
+		values[Anum_repl_slave_relations_relation - 1] =
+			NameGetDatum(DirectFunctionCall1(namein,
+											 CStringGetDatum(RelationGetRelationName(rel))));
+
+		MemSet(nulls, ' ', sizeof(nulls));
+
+		newtup = heap_formtuple(RelationGetDescr(repl_slave_rels),
+								values, nulls);
+
+		if (HeapTupleIsValid(tuple))
+			simple_heap_update(repl_slave_rels, &tuple->t_self, newtup);
+		else
+		{
+			register_dependency = true;
+			simple_heap_insert(repl_slave_rels, newtup);
+		}
+
+		/* keep indexes current */
+		CatalogUpdateIndexes(repl_slave_rels, newtup);
+
+		heap_freetuple(newtup);
+		pfree(nspname);
+
+		/* Register dependency on the replication status, if needed */
+		if (register_dependency)
+		{
+			ObjectAddress	depender;
+			ObjectAddress	referenced;
+
+			/*
+			 * objectSubId here indicates which slave this slave_relations
+			 * entry is for
+			 */
+			depender.classId = ReplSlaveRelationsId;
+			depender.objectId = RelationGetRelid(rel);
+			depender.objectSubId = slave;
+
+			referenced.classId = RelationRelationId;
+			referenced.objectId = RelationGetRelid(rel);
+			referenced.objectSubId = 0;
+
+			recordDependencyOn(&depender, &referenced, DEPENDENCY_NORMAL);
+		}
+	}
+	current_is_tablecmd = false;
+
+	/*
+	 * No need to flush the caches: this info is for the slaves, it doesn't
+	 * have any importance in the master.
+	 *
+	 * XXX Maybe the caches needs to be flushed during promotion?
+	 */
+
+	/* Clean up. */
+	systable_endscan(scan);
+	heap_close(repl_slave_rels, RowExclusiveLock);
+
+	/* If this table has SERIAL columns, recurse to the associated sequences */
+	{
+		Relation		depRel;
+		ScanKeyData		key[2];
+		SysScanDesc		sysscan;
+
+		depRel = heap_open(DependRelationId, AccessShareLock);
+
+		ScanKeyInit(&key[0],
+					Anum_pg_depend_refclassid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(RelationRelationId));
+		ScanKeyInit(&key[1],
+					Anum_pg_depend_refobjid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(RelationGetRelid(rel)));
+
+		sysscan = systable_beginscan(depRel, DependReferenceIndexId, true,
+		   							 SnapshotNow, 2, key);
+
+		/*
+		 * We identify sequences because they are internal dependencies with
+		 * classid = pg_class
+		 */
+		while (HeapTupleIsValid(tuple = systable_getnext(sysscan)))
+		{
+			Form_pg_depend	depForm;
+			Relation		depender;
+
+			depForm = (Form_pg_depend) GETSTRUCT(tuple);
+
+			if (depForm->deptype != DEPENDENCY_AUTO)
+				continue;
+			if (depForm->classid != RelationRelationId)
+				continue;
+
+			depender = relation_open(depForm->objid, RowExclusiveLock);
+
+			if (depender->rd_rel->relkind == RELKIND_SEQUENCE)
+				ATExecSetSlaveReplication(depender, enable, slave);
+
+			relation_close(depender, RowExclusiveLock);
+		}
+		systable_endscan(sysscan);
+		heap_close(depRel, AccessShareLock);
+	}
+}
+
+/*
  * ALTER TABLE SET TABLESPACE
  */
 static void
@@ -6131,6 +6914,72 @@ ATExecAddInherit(Relation child_rel, RangeVar *parent)
 				 errmsg("table \"%s\" without OIDs cannot inherit from table \"%s\" with OIDs",
 						RelationGetRelationName(child_rel),
 						RelationGetRelationName(parent_rel))));
+
+	if (replication_enable && parent_rel->rd_replicate)
+	{
+		Relation 	repl_slave_rels;
+		HeapTuple 	tuple;
+		SysScanDesc scan;
+		List		*child_slaves = NIL;
+
+		/* 
+		 * Check whether the parent relation is replicated to a set of slaves
+		 * which is a subset of a set the child relation is replicated to.
+		 */
+		if (!child_rel->rd_replicate)
+			ereport(ERROR, (errmsg("cannon inherit from replicated relation"
+								   " \"%s\"",
+								   RelationGetRelationName(parent_rel)),
+							errhint("enable replication for relation \"%s\"", 
+									RelationGetRelationName(child_rel))));
+		
+		/* Check whether parent is replicated to a subset of child's slaves */
+		repl_slave_rels = heap_open(ReplSlaveRelationsId, AccessShareLock);
+		
+		scan = systable_beginscan(repl_slave_rels, 
+								  InvalidOid,
+							  	  false, SnapshotNow, 0, NULL);
+	   
+		while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+		{
+		 	Form_repl_slave_relations replslaveForm = 
+				(Form_repl_slave_relations) GETSTRUCT(tuple);
+			/* Add slave to the list of slaves where child is replicated to */
+			if (replslaveForm->relid == RelationGetRelid(child_rel) && 
+				replslaveForm->enable)
+				child_slaves = lappend_int(child_slaves, replslaveForm->slave);
+		}
+		systable_endscan(scan);
+
+		/* Get each of the slaves that replicate parent */
+							
+		scan = systable_beginscan(repl_slave_rels, 
+								  InvalidOid,
+							  	  false, SnapshotNow, 0, NULL);
+	   
+		while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+		{
+		 	Form_repl_slave_relations replslaveForm = 
+				(Form_repl_slave_relations) GETSTRUCT(tuple);
+			/* Add slave to the list of slaves where parent is replicated to */
+			if (replslaveForm->relid == RelationGetRelid(parent_rel) && 
+				replslaveForm->enable)
+			{
+				/* The child should be also replicated by this slave */
+				if (!list_member_int(child_slaves, replslaveForm->slave))
+					ereport(ERROR, (errmsg("cannot inherit from replicated" 
+										   " relation \"%s\"", 
+									RelationGetRelationName(parent_rel)),
+									errdetail("slave %d replicates \"%s\""
+											  " but not \"%s\"",
+											  replslaveForm->slave,
+									RelationGetRelationName(parent_rel),
+									RelationGetRelationName(child_rel))));
+			}
+		}
+		systable_endscan(scan);
+		relation_close(repl_slave_rels, AccessShareLock);
+	}
 
 	/* Match up the columns and bump attinhcount and attislocal */
 	MergeAttributesIntoExisting(child_rel, parent_rel);
@@ -6976,4 +7825,96 @@ AtEOSubXact_on_commit_actions(bool isCommit, SubTransactionId mySubid,
 			cur_item = lnext(prev_item);
 		}
 	}
+}
+
+/*
+ * ReplicationVerifyPK
+ *
+ * Make sure a table we are going to replicate has a primary key.
+ */
+static void
+ReplicationVerifyPK(Relation rel)
+{
+	List	   *indexes;
+	ListCell   *cell;
+
+	/* Only verify plain tables */
+	if (rel->rd_rel->relkind == RELKIND_SEQUENCE)
+		return;
+
+	/*
+	 * Make sure it is a plain table.  This is not an user error message,
+	 * because supposedly we already checked the relkind elsewhere.
+	 */
+	if (rel->rd_rel->relkind != RELKIND_RELATION)
+		elog(ERROR, "invalid relkind '%c' in relation %s",
+			 rel->rd_rel->relkind, RelationGetRelationName(rel));
+
+	/* This function does all the work */
+	indexes = RelationGetIndexList(rel);
+	foreach(cell, indexes)
+	{
+		Oid			indid = lfirst_oid(cell);
+		Relation	index = index_open(indid, NoLock);
+
+		if (index->rd_index->indisprimary)
+		{
+			index_close(index, NoLock);
+			pfree(indexes);
+			return;
+		}
+
+		index_close(index, NoLock);
+	}
+
+	if (indexes)
+		pfree(indexes);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("table \"%s\" does not have a primary key",
+					RelationGetRelationName(rel))));
+}
+
+/*
+ * ReplicationVerifyNotChild
+ *
+ * Make sure a table we're going to stop replicating is not a child table.
+ */
+static void
+ReplicationVerifyNotChild(Relation rel)
+{
+	Relation	relinh;
+	SysScanDesc	scan;
+	ScanKeyData key[1];
+	HeapTuple	tuple;
+
+
+	relinh = heap_open(InheritsRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0], 
+				Anum_pg_inherits_inhrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationGetRelid(rel)));
+
+	scan = systable_beginscan(relinh, InheritsRelidSeqnoIndexId, true,
+							  SnapshotNow, 1, key);
+
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		Form_pg_inherits inhForm = (Form_pg_inherits) GETSTRUCT(tuple);
+		Relation		parent = heap_open(inhForm->inhparent, AccessShareLock);
+
+		if (RelationNeedsReplication(parent))
+			ereport(ERROR,
+					(errmsg("cannot disable replication for table \"%s\"",
+						   RelationGetRelationName(rel)),
+					 errdetail("Relation \"%s\" inherits from replicated relation \"%s\".",
+							   RelationGetRelationName(rel),
+							   RelationGetRelationName(parent))));
+		heap_close(parent, AccessShareLock);
+	}
+	
+	systable_endscan(scan);
+	heap_close(relinh, AccessShareLock);
 }

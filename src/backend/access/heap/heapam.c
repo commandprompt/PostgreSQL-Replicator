@@ -48,8 +48,10 @@
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
+#include "mammoth_r/pgr.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "postmaster/replication.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/datum.h"
@@ -1789,6 +1791,13 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	HeapTuple	heaptup;
 	Buffer		buffer;
 
+	if (replication_enable && relation->rd_replicate && replication_slave &&
+		!IsReplicatorProcess())
+		ereport(ERROR,
+				(errmsg("cannot insert into table \"%s\"",
+						RelationGetRelationName(relation)),
+				 errdetail("Table is being replicated.")));
+
 	if (relation->rd_rel->relhasoids)
 	{
 #ifdef NOT_USED
@@ -1820,6 +1829,9 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	HeapTupleHeaderSetCmin(tup->t_data, cid);
 	HeapTupleHeaderSetXmax(tup->t_data, 0);		/* for cleanliness */
 	tup->t_tableOid = RelationGetRelid(relation);
+
+	if (replication_enable && relation->rd_replicate && replication_master)
+		PGRCollectInsert(relation, tup, cid, false);
 
 	/*
 	 * If the new tuple is too big for storage or contains already toasted
@@ -2001,6 +2013,13 @@ heap_delete(Relation relation, ItemPointer tid,
 	bool		iscombo;
 
 	Assert(ItemPointerIsValid(tid));
+
+	if (replication_enable && relation->rd_replicate && replication_slave &&
+		!IsReplicatorProcess())
+		ereport(ERROR,
+				(errmsg("cannot delete from table %s",
+						RelationGetRelationName(relation)),
+				 errdetail("Relation is being replicated.")));
 
 	buffer = ReadBuffer(relation, ItemPointerGetBlockNumber(tid));
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
@@ -2210,6 +2229,9 @@ l1:
 	 */
 	CacheInvalidateHeapTuple(relation, &tp);
 
+	if (replication_enable && relation->rd_replicate && replication_master)
+		PGRCollectDelete(relation, &tp, cid);
+
 	/* Now we can release the buffer */
 	ReleaseBuffer(buffer);
 
@@ -2319,6 +2341,13 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 	bool		use_hot_update = false;
 
 	Assert(ItemPointerIsValid(otid));
+
+	if (replication_enable && relation->rd_replicate && replication_slave &&
+		!IsReplicatorProcess())
+		ereport(ERROR,
+				(errmsg("cannot update table \"%s\"",
+						RelationGetRelationName(relation)),
+				 errdetail("Table is being replicated.")));
 
 	/*
 	 * Fetch the list of attributes to be checked for HOT update.  This is
@@ -2710,6 +2739,9 @@ l2:
 	}
 
 	END_CRIT_SECTION();
+
+	if (replication_enable && relation->rd_replicate && replication_master)
+		PGRCollectUpdate(relation, newtup, &oldtup, cid);
 
 	if (newbuf != buffer)
 		LockBuffer(newbuf, BUFFER_LOCK_UNLOCK);

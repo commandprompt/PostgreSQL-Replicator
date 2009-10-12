@@ -1,0 +1,2 @@
+CREATE ROLE admin LOGIN;
+CREATE ROLE admins;

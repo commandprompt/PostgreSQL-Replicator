@@ -45,6 +45,10 @@
 #include "catalog/pg_ts_parser.h"
 #include "catalog/pg_ts_template.h"
 #include "catalog/pg_type.h"
+#include "catalog/repl_lo_columns.h"
+#include "catalog/repl_relations.h"
+#include "catalog/repl_slave_relations.h"
+#include "catalog/replication.h"
 #include "commands/comment.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
@@ -1004,6 +1008,18 @@ doDeletion(const ObjectAddress *object)
 			RemoveSchemaById(object->objectId);
 			break;
 
+		case OCLASS_REPLIC:
+			StopReplicationMaster(object->objectId);
+			break;
+
+		case OCLASS_SLAVE_REPLIC:
+			StopReplicationSlave(object->objectId, object->objectSubId);
+			break;
+
+		case OCLASS_LO_REPLIC:
+			StopLoReplication(object->objectId, object->objectSubId);
+			break;
+
 		case OCLASS_TSPARSER:
 			RemoveTSParserById(object->objectId);
 			break;
@@ -1780,6 +1796,18 @@ getObjectClass(const ObjectAddress *object)
 		case TableSpaceRelationId:
 			Assert(object->objectSubId == 0);
 			return OCLASS_TBLSPACE;
+
+		case ReplRelationsId:
+			Assert(object->objectSubId == 0);
+			return OCLASS_REPLIC;
+
+		case ReplSlaveRelationsId:
+			/* Caller must check objectSubId */
+			return OCLASS_SLAVE_REPLIC;
+			
+		case ReplLoColumnsId:
+			/* objectSubId is an attribute number */
+			return OCLASS_LO_REPLIC;
 	}
 
 	/* shouldn't get here */
@@ -2251,6 +2279,26 @@ getObjectDescription(const ObjectAddress *object)
 					elog(ERROR, "cache lookup failed for tablespace %u",
 						 object->objectId);
 				appendStringInfo(&buffer, _("tablespace %s"), tblspace);
+				break;
+			}
+
+		case OCLASS_REPLIC:
+			{
+				appendStringInfo(&buffer, gettext("replication on master"));
+				break;
+			}
+
+		case OCLASS_SLAVE_REPLIC:
+			{
+				appendStringInfo(&buffer, gettext("replication to slave %u"),
+								 object->objectSubId);
+				break;
+			}
+
+		case OCLASS_LO_REPLIC:
+			{
+				appendStringInfo(&buffer, gettext("large object replication on column %d"),
+								 object->objectSubId);
 				break;
 			}
 

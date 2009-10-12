@@ -32,6 +32,7 @@
 #include "catalog/pg_authid.h"
 #include "miscadmin.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/replication.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
@@ -40,7 +41,6 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/syscache.h"
-
 
 #define DIRECTORY_LOCK_FILE		"postmaster.pid"
 
@@ -505,7 +505,8 @@ void
 InitializeSessionUserIdStandalone(void)
 {
 	/* This function should only be called in a single-user backend. */
-	AssertState(!IsUnderPostmaster || IsAutoVacuumWorkerProcess());
+	AssertState(!IsUnderPostmaster || IsAutoVacuumWorkerProcess() ||
+				IsReplicatorProcess());
 
 	/* call only once */
 	AssertState(!OidIsValid(AuthenticatedUserId));

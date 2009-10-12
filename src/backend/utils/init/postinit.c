@@ -26,11 +26,13 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_tablespace.h"
 #include "libpq/hba.h"
+#include "mammoth_r/txlog.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/postmaster.h"
+#include "postmaster/replication.h"
 #include "storage/backendid.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
@@ -48,7 +50,6 @@
 #include "utils/syscache.h"
 
 
-static bool FindMyDatabase(const char *name, Oid *db_id, Oid *db_tablespace);
 static bool FindMyDatabaseByOid(Oid dbid, char *dbname, Oid *db_tablespace);
 static void CheckMyDatabase(const char *name, bool am_superuser);
 static void InitCommunication(void);
@@ -73,7 +74,7 @@ static bool ThereIsAtLeastOneRole(void);
  * transaction infrastructure started, we have to recheck the information;
  * see InitPostgres.
  */
-static bool
+bool
 FindMyDatabase(const char *name, Oid *db_id, Oid *db_tablespace)
 {
 	bool		result = false;
@@ -238,6 +239,23 @@ CheckMyDatabase(const char *name, bool am_superuser)
 					PGC_BACKEND, PGC_S_DEFAULT);
 
 	/*
+	 * check whether replication_use_utf8_encoding is used with SQL_ASCII DB.
+	 * Note that the ideal place to do this is during the assignment in GUC,
+	 * but there is no way to read the database encoding at that stage.
+	 */
+	if (ReplicationActive() && replication_use_utf8_encoding)
+	{
+		/* Avoid touching GUC variable, set backend-specific flag. We should
+		 * complain here, but instead we do it only for replication processes in
+		 * ReplicationMain to avoid clobbering the log on each backend startup.
+		 */
+		if (GetDatabaseEncoding() == PG_SQL_ASCII)
+			replication_encoding_conversion_enable = false;
+		else
+			replication_encoding_conversion_enable = true;
+	}
+	
+	/*
 	 * Lastly, set up any database-specific configuration variables.
 	 */
 	if (IsUnderPostmaster)
@@ -343,6 +361,8 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 {
 	bool		bootstrap = IsBootstrapProcessingMode();
 	bool		autovacuum = IsAutoVacuumWorkerProcess();
+	bool		replicator = IsReplicatorProcess();
+	bool		mammoth_bootstrapper = IsMammothBootstrapProcessingMode();
 	bool		am_superuser;
 	char	   *fullpath;
 	char		dbname[NAMEDATALEN];
@@ -354,7 +374,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 * We take a shortcut in the bootstrap case, otherwise we have to look up
 	 * the db name in pg_database.
 	 */
-	if (bootstrap)
+	if (bootstrap && !mammoth_bootstrapper)
 	{
 		MyDatabaseId = TemplateDbOid;
 		MyDatabaseTableSpace = DEFAULTTABLESPACE_OID;
@@ -457,6 +477,16 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 */
 	on_shmem_exit(ShutdownPostgres, 0);
 
+	/* Disable replication for backend process if it is connected to the
+	 * non-replicated database
+	 */	
+	if (!replicator && strcmp(dbname, replication_database))
+		replication_enable = false;
+
+	/* Initialize the MCP queue.  Needs to be done before StartTransaction. */
+	SelectActiveTxlog(false);
+	InitializeMCPQueue();
+
 	/*
 	 * Start a new transaction here before first access to db, and get a
 	 * snapshot.  We don't have a use for the snapshot itself, but we're
@@ -547,7 +577,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 * In standalone mode and in the autovacuum process, we use a fixed id,
 	 * otherwise we figure it out from the authenticated user name.
 	 */
-	if (bootstrap || autovacuum)
+	if (bootstrap || autovacuum || replicator)
 	{
 		InitializeSessionUserIdStandalone();
 		am_superuser = true;

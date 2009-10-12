@@ -1,0 +1,23 @@
+These tests are used to stress test replicator. They are reasonably brutal
+and designed to be a foot gun. E.g., the point is to break stuff because
+that is what a customer is going to do, break things.
+
+To run the test without updating repo:
+
+starttest.sh
+
+To just build the tests (update the repo):
+
+buildrepo.sh
+
+To stop and report on the tests:
+
+stoptest.sh
+
+To run everything as a single test:
+
+runtest.sh
+
+There are variablies at the top of each file that need to be changed.
+
+You will also need to change the user name in all psql/pgbench calls.

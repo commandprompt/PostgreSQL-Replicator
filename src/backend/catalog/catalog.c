@@ -24,6 +24,7 @@
 #include "access/transam.h"
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
+#include "catalog/mammoth_indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
@@ -33,6 +34,7 @@
 #include "catalog/pg_shdepend.h"
 #include "catalog/pg_shdescription.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/repl_forwarder.h"
 #include "catalog/toasting.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
@@ -282,6 +284,10 @@ IsSharedRelation(Oid relationId)
 		relationId == PgDatabaseToastIndex ||
 		relationId == PgShdescriptionToastTable ||
 		relationId == PgShdescriptionToastIndex)
+		return true;
+	/* These are Mammoth Replicator shared relations and their indexes */
+	if (relationId == ReplForwarderId ||
+		relationId == ReplForwarderNameIndexId)
 		return true;
 	return false;
 }

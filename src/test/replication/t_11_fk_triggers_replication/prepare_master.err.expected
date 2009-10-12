@@ -1,0 +1,4 @@
+psql:.*:5: ERROR:  table "test5" does not have a primary key
+psql:.*:10: ERROR:  table "test5" does not have a primary key
+psql:.*:15: ERROR:  table "test5" does not have a primary key
+psql:.*:20: ERROR:  table "test5" does not have a primary key

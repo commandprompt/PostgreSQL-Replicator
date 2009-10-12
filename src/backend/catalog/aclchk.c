@@ -20,9 +20,11 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/xact.h"
+#include "access/genam.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/mammoth_indexing.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
@@ -37,11 +39,16 @@
 #include "catalog/pg_ts_config.h"
 #include "catalog/pg_ts_dict.h"
 #include "commands/dbcommands.h"
+#include "catalog/repl_acl.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "parser/parse_func.h"
+#include "postmaster/replication.h"
 #include "utils/acl.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/relcache.h"
 #include "utils/syscache.h"
 
 
@@ -62,6 +69,8 @@ static AclMode restrict_and_check_grant(bool is_grant, AclMode avail_goptions,
 static AclMode pg_aclmask(AclObjectKind objkind, Oid table_oid, Oid roleid,
 		   AclMode mask, AclMaskHow how);
 
+static void replicate_grant(char *namespace, char *relname, Acl *new_acl);
+static void escape_equal_sign(char *input, char *output);
 
 #ifdef ACLDEBUG
 static void
@@ -699,6 +708,17 @@ ExecGrant_Relation(InternalGrant *istmt)
 
 		newtuple = heap_modifytuple(tuple, RelationGetDescr(relation), values, nulls, replaces);
 
+	    if (replication_enable && replication_master)
+		{
+			char *namespace;
+
+			namespace = get_namespace_name(pg_class_tuple->relnamespace);
+			if (namespace == NULL)
+				elog(ERROR, "cache lookup failed for namespace %u",
+					 pg_class_tuple->relnamespace);
+			replicate_grant(namespace, NameStr(pg_class_tuple->relname), new_acl);
+		}
+
 		simple_heap_update(relation, &newtuple->t_self, newtuple);
 
 		/* keep the catalog indexes up to date */
@@ -719,6 +739,249 @@ ExecGrant_Relation(InternalGrant *istmt)
 	}
 
 	heap_close(relation, RowExclusiveLock);
+}
+
+/*
+ * return an escaped version of a string, according to the rules
+ * in pgr_acl.c::parse_aclitem(), i.e. escape \ and = with \.
+ */
+static void
+escape_equal_sign(char *input, char *output)
+{
+	int	len;
+	int	i, j;
+
+	if (input == NULL || input[0] == '\0')
+		elog(ERROR, "string NULL or too short");
+	len = strlen(input);
+
+	for (i = 0, j = 0; i < len; )
+	{
+		if (input[i] == '\\' || input[i] == '=')
+			output[j++] = '\\';
+
+		output[j++] = input[i++];
+	}
+	output[j] = '\0';
+}
+
+/*
+ * replicate_grant_internal
+ *
+ * Workhorse for replicate_grant and replicate_grants_on_role_rename.
+ *
+ * acl_rel is repl_acl, suitably locked (at least a writer's lock).  schema and
+ * relname are the Datum representation of the Name of the involved relation.
+ * new_acl is the new ACL of the table, in the format that pg_class keeps it.
+ */
+static void
+replicate_grant_internal(Relation acl_rel, Datum nspname, Datum relname,
+						 Acl *new_acl)
+{
+	char		nulls[Natts_repl_acl];
+	Datum		values[Natts_repl_acl];
+	Datum	   *array_vals;
+	HeapTuple	itup;
+	HeapTuple	newtup;
+	int			i;
+	ScanKeyData	key[2];
+	SysScanDesc	scan;
+
+	/* XXX what do we do in this case? is it even possible? */
+	if (new_acl == NULL)
+		elog(ERROR, "NULL acl not implemented yet");
+
+	ScanKeyInit(&key[0],
+				Anum_repl_acl_schema,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				nspname);
+	ScanKeyInit(&key[1],
+				Anum_repl_acl_relname,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				relname);
+	scan = systable_beginscan(acl_rel, ReplAclSchemaRelnameIndexId, true,
+							  SnapshotNow, 2, key);
+	itup = systable_getnext(scan);
+	/* the test for validity of the tuple is postponed */
+
+	array_vals = (Datum *) palloc(sizeof(Datum) * ACL_NUM(new_acl));
+
+	/* Need to fiddle a bit to form the new ACL to insert into the tuple */
+	for (i = 0; i < ACL_NUM(new_acl); i++)
+	{
+		char		tmpl[NAMEDATALEN * 2 + 64];
+		AclItem	   *item = &(ACL_DAT(new_acl)[i]);
+		char	   *grantee;
+		HeapTuple	grantor;
+		Form_pg_authid shadowForm;
+
+		if (item->ai_grantee == ACL_ID_PUBLIC)
+			grantee = pstrdup("special PUBLIC");
+		else
+		{
+			HeapTuple	gtup;
+			Form_pg_authid	sForm;
+			char		escaped_name[NAMEDATALEN * 2];
+			
+			grantee = palloc(5 + NAMEDATALEN * 2);
+
+			gtup = SearchSysCache(AUTHOID,
+								  ObjectIdGetDatum(item->ai_grantee),
+								  0, 0, 0);
+			if (!HeapTupleIsValid(gtup))
+				elog(ERROR, "cache lookup failure for role %d",
+					 item->ai_grantee);
+
+			sForm = (Form_pg_authid) GETSTRUCT(gtup);
+			escape_equal_sign(NameStr(sForm->rolname), escaped_name);
+			sprintf(grantee, "user %s", escaped_name);
+			ReleaseSysCache(gtup);
+		}
+
+		grantor = SearchSysCache(AUTHOID,
+								 ObjectIdGetDatum(item->ai_grantor),
+								 0, 0, 0);
+		Assert(HeapTupleIsValid(grantor));
+
+		shadowForm = (Form_pg_authid) GETSTRUCT(grantor);
+
+		/*
+		 * Note we don't quote the grantee's username, because it has special
+		 * rules anyway.
+		 */
+		sprintf(tmpl, "%s=%u/%s",
+				grantee, item->ai_privs,
+				quote_identifier(NameStr(shadowForm->rolname)));
+
+		array_vals[i] = DirectFunctionCall1(textin,
+											CStringGetDatum(tmpl));
+
+		ReleaseSysCache(grantor);
+	}
+
+	/* Form the new tuple for repl_acl */
+	values[0] = nspname;
+	values[1] = relname;
+	values[2] = PointerGetDatum(construct_array(array_vals,
+												ACL_NUM(new_acl),
+												TEXTOID, -1, false, 'i'));
+	for (i = 0; i < 3; i++)
+		nulls[i] = ' ';
+
+	newtup = heap_formtuple(RelationGetDescr(acl_rel),
+							values, nulls);
+
+	/* If the tuple is found, update it.  Else insert a new one. */
+	if (HeapTupleIsValid(itup))
+		simple_heap_update(acl_rel, &itup->t_self, newtup);
+	else
+		simple_heap_insert(acl_rel, newtup);
+
+	/* Keep indexes current */
+	CatalogUpdateIndexes(acl_rel, newtup);
+	heap_freetuple(newtup);
+
+	systable_endscan(scan);
+}
+
+static void
+replicate_grant(char *namespace, char *table, Acl *new_acl)
+{
+	Relation	acl_rel;
+	Datum		nspname;
+	Datum		relname;
+
+	/*
+	 * Lock pg_catalog.repl_acl with a writer's lock.  Concurrent access to a
+	 * relation's tuple is protected by GRANT's lock on the table itself.
+	 */
+	acl_rel = heap_open(ReplAclRelationId, RowExclusiveLock);
+
+	/*
+	 * Form the Datum values for the namespace and relname, which we need
+	 * for searching the replicate_acl table.
+	 */
+	nspname = DirectFunctionCall1(namein,
+								  CStringGetDatum(namespace));
+	relname = DirectFunctionCall1(namein,
+								  CStringGetDatum(table));
+
+	/* do the actual work */
+	replicate_grant_internal(acl_rel, nspname, relname, new_acl);
+
+	/* all done, clean up */
+	heap_close(acl_rel, RowExclusiveLock);
+}
+
+void
+replicate_grants_on_role_rename(Oid roleid)
+{
+	List	   *rels;
+	ListCell   *cell;
+	Relation	repl_acl;
+
+	/* get a writer's lock on repl_acl */
+	repl_acl = heap_open(ReplAclRelationId, RowExclusiveLock);
+
+	rels = shdepGetTablesDependingOnRole(roleid);
+	foreach (cell, rels)
+	{
+		Oid		relid = lfirst_oid(cell);
+		HeapTuple reltup;
+		HeapTuple nsptup;
+		bool	isNull;
+		Acl	   *acl;
+		Datum	aclDatum;
+		Datum	schemaname;
+		Datum	relname;
+		Form_pg_class classForm;
+		Form_pg_namespace nspForm;
+
+		/*
+		 * All this fiddling below is just to get the Datum value of the
+		 * relname and schema name
+		 *
+		 * XXX do we need more locking on the relation?
+		 */
+		reltup = SearchSysCache(RELOID,
+								ObjectIdGetDatum(relid),
+								0, 0, 0);
+		if (!HeapTupleIsValid(reltup))
+			elog(ERROR, "relation %u went away", relid);
+
+		classForm = (Form_pg_class) GETSTRUCT(reltup);
+
+		nsptup = SearchSysCache(NAMESPACEOID,
+								ObjectIdGetDatum(classForm->relnamespace),
+								0, 0, 0);
+		if (!HeapTupleIsValid(nsptup))
+			elog(ERROR, "namespace %u went away", classForm->relnamespace);
+		nspForm = (Form_pg_namespace) GETSTRUCT(nsptup);
+
+		relname = NameGetDatum(&(classForm->relname));
+		schemaname = NameGetDatum(&(nspForm->nspname));
+
+		/* now get the new ACL of the relation */
+		aclDatum = SysCacheGetAttr(RELOID, reltup, Anum_pg_class_relacl,
+								   &isNull);
+		if (isNull)
+			acl = NULL;
+		else
+		{
+			/* detoast rel's ACL if necessary */
+			acl = DatumGetAclP(aclDatum);
+		}
+
+		/* do the actual work */
+		replicate_grant_internal(repl_acl, schemaname, relname, acl);
+
+		ReleaseSysCache(reltup);
+		ReleaseSysCache(nsptup);
+	}
+
+	heap_close(repl_acl, RowExclusiveLock);
+	if (rels != NIL)
+		pfree(rels);
 }
 
 static void

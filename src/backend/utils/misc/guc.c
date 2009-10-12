@@ -38,6 +38,7 @@
 #include "funcapi.h"
 #include "libpq/auth.h"
 #include "libpq/pqformat.h"
+#include "mammoth_r/forwarder.h"
 #include "miscadmin.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
@@ -54,6 +55,7 @@
 #include "postmaster/postmaster.h"
 #include "postmaster/syslogger.h"
 #include "postmaster/walwriter.h"
+#include "postmaster/replication.h"
 #include "storage/fd.h"
 #include "storage/freespace.h"
 #include "tcop/tcopprot.h"
@@ -157,6 +159,9 @@ static const char *assign_log_error_verbosity(const char *newval, bool doit,
 static const char *assign_log_statement(const char *newval, bool doit,
 					 GucSource source);
 static const char *show_num_temp_buffers(void);
+static const char *assign_replication_mode(const char *newval, bool doit,
+						GucSource source);
+
 static bool assign_phony_autocommit(bool newval, bool doit, GucSource source);
 static const char *assign_custom_variable_classes(const char *newval, bool doit,
 							   GucSource source);
@@ -268,6 +273,7 @@ static int	max_index_keys;
 static int	max_identifier_length;
 static int	block_size;
 static bool integer_datetimes;
+static char *replication_mode_str;
 
 /* should be static, but commands/variable.c needs to get at these */
 char	   *role_string;
@@ -384,6 +390,10 @@ const char *const config_group_names[] =
 	gettext_noop("Preset Options"),
 	/* CUSTOM_OPTIONS */
 	gettext_noop("Customized Options"),
+	/* REPLICATION */
+	gettext_noop("Replicator Options"),
+	/* REPLICATION_FORWARDER */
+	gettext_noop("Replicator Forwarder Options"),
 	/* DEVELOPER_OPTIONS */
 	gettext_noop("Developer Options"),
 	/* help_config wants this array to be null-terminated */
@@ -892,6 +902,75 @@ static struct config_bool ConfigureNamesBool[] =
 		&phony_autocommit,
 		true, assign_phony_autocommit, NULL
 	},
+	
+	{
+		{"replication_enable", PGC_POSTMASTER, REPLICATION,
+			gettext_noop("Enables replication."),
+			NULL,
+			GUC_SUPERUSER_ONLY
+	   	}, 
+		&replication_enable,
+		false, NULL, NULL
+	},
+
+	{
+		{"replication_compression", PGC_USERSET, REPLICATION,
+			gettext_noop("Enables data compression during replication"),
+			NULL,
+			GUC_SUPERUSER_ONLY
+		},
+		&replication_compression,
+		true, NULL, NULL
+	},
+	
+	{
+		{"replication_slave_batch_mode", PGC_POSTMASTER, REPLICATION,
+			gettext_noop("Enables batch mode for the slave."),
+			NULL,
+			GUC_SUPERUSER_ONLY
+		}, 
+		&replication_slave_batch_mode,
+		false, NULL, NULL
+	},
+
+	{
+		{"replication_use_utf8_encoding", PGC_POSTMASTER, REPLICATION,
+			gettext_noop("Converts data from master's encoding to UTF8 on "
+						 "master and from UTF8 to slave's encoding on slave"),
+			NULL,
+			GUC_SUPERUSER_ONLY,
+		},
+		&replication_use_utf8_encoding,
+		true, NULL, NULL
+	},
+
+	{
+		{"forwarder", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Starts the replication forwarder process."),
+			NULL
+		},
+		&ForwarderEnable,
+		false, NULL, NULL
+	},
+
+	{
+		{"forwarder_acl", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Determines whether ACLs are used to restrict replication master and slaves."),
+			NULL
+		},
+		&ForwarderACLenable,
+		true, NULL, NULL
+	},
+
+	{
+		{"forwarder_require_ssl", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Enables mandatory SSL connection from replication clients."),
+			NULL
+		},
+		&ForwarderRequireSSL,
+		false, NULL, NULL
+	},
+	   		   	
 	{
 		{"default_transaction_read_only", PGC_USERSET, CLIENT_CONN_STATEMENT,
 			gettext_noop("Sets the default read-only status of new transactions."),
@@ -1256,6 +1335,53 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"forwarder_port", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Sets the TCP port the replication forwarder listens on."),
+			NULL
+		},
+		&ForwarderPortNumber,
+		DEF_FORWARDER_PORT, 1, 65535, NULL, NULL
+	},
+
+	{
+		{"forwarder_echo_timeout", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Sets the time to wait before assuming that the replication master is dead."),
+			NULL
+		},
+		&ForwarderEchoTimeout,
+		60, 1, INT_MAX, NULL, NULL
+	},
+	
+	{
+		{"forwarder_optimizer_rounds", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Sets number of optimizer cycles between optimization attempts"),
+			NULL
+		},
+		&ForwarderOptimizerRounds,
+		10, 1, INT_MAX, NULL, NULL
+	},
+	
+	{
+		{"forwarder_optimizer_naptime", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Sets the sleep time between optimizer rounds"),
+			NULL,
+			GUC_UNIT_S
+		},
+		&ForwarderOptimizerNaptime,
+		10, 0, INT_MAX, NULL, NULL
+	},
+	
+	{
+		{"forwarder_dump_cache_max_size", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Defined the maximum size of the data cached in the forwarder queue"),
+			NULL,
+			GUC_UNIT_KB
+		},
+		&ForwarderDumpCacheMaxSize,
+		100000, 1, MAX_KILOBYTES, NULL, NULL
+	},
+
+	{
 		{"unix_socket_permissions", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
 			gettext_noop("Sets the access permissions of the Unix-domain socket."),
 			gettext_noop("Unix-domain sockets use the usual Unix file system "
@@ -1542,6 +1668,27 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&CommitSiblings,
 		5, 1, 1000, NULL, NULL
+	},
+
+	{
+		{"replication_slave_no", PGC_POSTMASTER, REPLICATION,
+			gettext_noop("Sets positive integer id of the slave, not used on master."),
+			NULL,
+			GUC_SUPERUSER_ONLY
+		}, 
+		&replication_slave_no,
+		0, 0, INT_MAX, NULL, NULL
+	},
+	
+	{
+		{"replication_slave_batch_mode_timeout", PGC_POSTMASTER, REPLICATION,
+			gettext_noop("Sets timeout for slaves in batch mode."),
+			gettext_noop("Slave would automatically disconnect from MCP if no data received "
+						 "during timeout."),
+			GUC_SUPERUSER_ONLY
+		}, 
+		&replication_slave_batch_mode_timeout,
+		60, 0, INT_MAX, NULL, NULL
 	},
 
 	{
@@ -2352,6 +2499,54 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
+		{"forwarder_listen_addresses", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Sets the host name or IP address(es) that the replication forwarder listens to."),
+			NULL,
+			GUC_LIST_INPUT
+		},
+		&ForwarderListenAddresses,
+		"localhost", NULL, NULL
+	},
+
+	{
+		{"forwarder_promote_acl", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Defines the list of replication slaves allowed to promote."),
+			NULL,
+			GUC_LIST_INPUT
+		},
+		&ForwarderPromoteACL,
+		"0", NULL, NULL
+	},
+
+	{
+		{"forwarder_master_address", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Defines the accepted address for the replication master."),
+			NULL
+		},
+		&ForwarderMasterAddress,
+		"localhost", NULL, NULL
+	},
+
+	{
+		{"forwarder_slave_addresses", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Defines the list of accepted addresses for replication slaves."),
+			NULL,
+			GUC_LIST_INPUT
+		},
+		&ForwarderSlaveAddresses,
+		"0:localhost", NULL, NULL
+	},
+
+	{
+		{"forwarder_auth_key", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Authentication key for replication clients."),
+			NULL
+		},
+		&ForwarderAuthKey,
+		"", NULL, NULL
+	},
+
+	{
 		{"wal_sync_method", PGC_SIGHUP, WAL_SETTINGS,
 			gettext_noop("Selects the method used for forcing WAL updates to disk."),
 			NULL
@@ -2418,6 +2613,26 @@ static struct config_string ConfigureNamesString[] =
 		},
 		&external_pid_file,
 		NULL, assign_canonical_path, NULL
+	},
+
+	{
+		{"replication_mode", PGC_POSTMASTER, REPLICATION,
+			gettext_noop("Sets replication mode."),
+			gettext_noop("Valid values are either \"master\" or \"slave\"."),
+			GUC_SUPERUSER_ONLY
+		},
+		&replication_mode_str,
+		NULL, assign_replication_mode, NULL
+	},
+
+	{
+    	{"replication_database", PGC_POSTMASTER, REPLICATION,
+			gettext_noop("Specifies a name of the database to replicate."),
+			NULL,
+			GUC_LIST_INPUT | GUC_LIST_QUOTE | GUC_SUPERUSER_ONLY
+		},
+		&replication_database,
+		"", NULL, NULL
 	},
 
 	{
@@ -7140,6 +7355,24 @@ show_tcp_keepalives_count(void)
 
 	snprintf(nbuf, sizeof(nbuf), "%d", pq_getkeepalivescount(MyProcPort));
 	return nbuf;
+}
+
+static const char *
+assign_replication_mode(const char *newval, bool doit, GucSource source)
+{
+	if (pg_strcasecmp(newval, "master") == 0)
+	{
+		if (doit)
+			replication_mode = REPLICATION_MODE_MASTER;
+	}
+	else if (pg_strcasecmp(newval, "slave") == 0)
+	{
+		if (doit)
+			replication_mode = REPLICATION_MODE_SLAVE;
+	}
+	else
+		return NULL;			/* fail */
+	return newval;				/* OK */
 }
 
 static bool

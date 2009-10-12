@@ -886,6 +886,8 @@ typedef enum AlterTableType
 	AT_SetNotNull,				/* alter column set not null */
 	AT_SetStatistics,			/* alter column statistics */
 	AT_SetStorage,				/* alter column storage */
+	AT_EnableLO,				/* alter column enable lo */
+	AT_DisableLO,				/* alter column disable lo */
 	AT_DropColumn,				/* drop column */
 	AT_DropColumnRecurse,		/* internal to commands/tablecmds.c */
 	AT_AddIndex,				/* add index */
@@ -901,6 +903,10 @@ typedef enum AlterTableType
 	AT_ClusterOn,				/* CLUSTER ON */
 	AT_DropCluster,				/* SET WITHOUT CLUSTER */
 	AT_DropOids,				/* SET WITHOUT OIDS */
+	AT_EnableReplication,		/* ENABLE REPLICATION */
+	AT_DisableReplication,		/* DISABLE REPLICATION */
+	AT_EnableReplicationSlave,	/* ENABLE REPLICATION ON SLAVE n */
+	AT_DisableReplicationSlave,	/* DISABLE REPLICATION ON SLAVE n */
 	AT_SetTableSpace,			/* SET TABLESPACE */
 	AT_SetRelOptions,			/* SET (...) -- AM specific parameters */
 	AT_ResetRelOptions,			/* RESET (...) -- AM specific parameters */
@@ -1302,6 +1308,15 @@ typedef struct AlterRoleSetStmt
 	char	   *role;			/* role name */
 	VariableSetStmt *setstmt;	/* SET or RESET subcommand */
 } AlterRoleSetStmt;
+
+typedef struct AlterRoleSlaveReplicationStmt
+{
+	NodeTag 	type;
+	char 	   *role; 			/* role name */
+	bool 		enable;			/* whether this command enables or disables
+								 * the role replication */
+	int			slaveno;		/* slave ID */
+} AlterRoleSlaveReplicationStmt;
 
 typedef struct DropRoleStmt
 {
@@ -1859,6 +1874,47 @@ typedef struct VacuumStmt
 	RangeVar   *relation;		/* single table to process, or NULL */
 	List	   *va_cols;		/* list of column names, or NIL for all */
 } VacuumStmt;
+
+/*
+ * MCP and PROMOTE statements
+ */
+typedef enum
+{
+	McpBatchUpdate
+} McpKind;
+
+typedef struct McpStmt
+{
+	NodeTag		type;
+	McpKind		kind;
+} McpStmt;
+
+typedef struct PromoteStmt
+{
+	NodeTag		type;
+	bool		force;
+	bool		back;
+} PromoteStmt;
+
+typedef struct CreateForwarderStmt
+{
+	NodeTag		type;
+	char	   *name;
+	List	   *parameters;
+} CreateForwarderStmt;
+
+typedef struct DropForwarderStmt
+{
+	NodeTag		type;
+	char	   *name;
+} DropForwarderStmt;
+
+typedef struct AlterForwarderStmt
+{
+	NodeTag		type;
+	char	   *name;
+	List	   *options;
+} AlterForwarderStmt;
 
 /* ----------------------
  *		Explain Statement

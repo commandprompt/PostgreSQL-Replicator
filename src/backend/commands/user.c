@@ -17,11 +17,17 @@
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/mammoth_indexing.h"
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
+#include "catalog/repl_slave_roles.h"
 #include "commands/comment.h"
+#include "catalog/repl_authid.h"
+#include "catalog/repl_auth_members.h"
 #include "commands/user.h"
 #include "libpq/md5.h"
+#include "postmaster/replication.h"
+#include "mammoth_r/pgr.h"
 #include "miscadmin.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -29,6 +35,7 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/relcache.h"
 #include "utils/syscache.h"
 
 
@@ -42,6 +49,8 @@ static void DelRoleMems(const char *rolename, Oid roleid,
 			List *memberNames, List *memberIds,
 			bool admin_opt);
 
+static bool get_role_replicated_status(const char *rolename, 
+									   int slaveno, bool anyslave);
 
 /* Check if current user has createrole privileges */
 static bool
@@ -318,7 +327,8 @@ CreateRole(CreateRoleStmt *stmt)
 								encrypted_password))
 				elog(ERROR, "password encryption failed");
 			new_record[Anum_pg_authid_rolpassword - 1] =
-				DirectFunctionCall1(textin, CStringGetDatum(encrypted_password));
+				DirectFunctionCall1(textin,
+				 					CStringGetDatum(encrypted_password));
 		}
 	}
 	else
@@ -388,7 +398,6 @@ CreateRole(CreateRoleStmt *stmt)
 	auth_file_update_needed();
 }
 
-
 /*
  * ALTER ROLE
  *
@@ -429,6 +438,15 @@ AlterRole(AlterRoleStmt *stmt)
 	DefElem    *dvalidUntil = NULL;
 	Oid			roleid;
 
+	bool 		act_on_replication = replication_enable && replication_master;
+	
+	if (replication_enable && replication_slave && 
+		RoleIsReplicatedBySlave(stmt->role, replication_slave_no))
+	{
+		ereport(ERROR, (errmsg("cannot alter role \"%s\"", stmt->role),
+						errdetail("Role is being replicated")));
+	}
+	
 	/* Extract options from the statement node tree */
 	foreach(option, stmt->options)
 	{
@@ -676,6 +694,10 @@ AlterRole(AlterRoleStmt *stmt)
 	/* Update indexes */
 	CatalogUpdateIndexes(pg_authid_rel, new_tuple);
 
+	if (act_on_replication && RoleIsReplicated(stmt->role))
+		CollectAlterRole(pg_authid_rel, tuple, 
+						 new_tuple, GetCurrentCommandId(true));
+
 	ReleaseSysCache(tuple);
 	heap_freetuple(new_tuple);
 
@@ -707,7 +729,6 @@ AlterRole(AlterRoleStmt *stmt)
 	auth_file_update_needed();
 }
 
-
 /*
  * ALTER ROLE ... SET
  */
@@ -722,6 +743,15 @@ AlterRoleSet(AlterRoleSetStmt *stmt)
 	char		repl_null[Natts_pg_authid];
 	char		repl_repl[Natts_pg_authid];
 
+	bool 		act_on_replication = replication_enable && replication_master;
+
+	if (replication_enable && replication_slave && 
+		RoleIsReplicatedBySlave(stmt->role, replication_slave_no))
+	{
+		ereport(ERROR, (errmsg("cannot alter role \"%s\"", stmt->role),
+						errdetail("Role is being replicated")));
+	}
+	
 	valuestr = ExtractSetVariableArgs(stmt->setstmt);
 
 	rel = heap_open(AuthIdRelationId, RowExclusiveLock);
@@ -793,11 +823,194 @@ AlterRoleSet(AlterRoleSetStmt *stmt)
 	simple_heap_update(rel, &oldtuple->t_self, newtuple);
 	CatalogUpdateIndexes(rel, newtuple);
 
+	if (act_on_replication && RoleIsReplicated(stmt->role))
+		CollectAlterRole(rel, oldtuple, newtuple, GetCurrentCommandId(true));
+		
 	ReleaseSysCache(oldtuple);
 	/* needn't keep lock since we won't be updating the flat file */
 	heap_close(rel, RowExclusiveLock);
 }
 
+void
+AlterRoleSetSlaveReplication(AlterRoleSlaveReplicationStmt *stmt)
+{	
+	Relation 	slave_roles_rel,
+				auth_members_rel;
+	TupleDesc 	slave_roles_desc;
+	Datum 		rolename;
+	SysScanDesc scan;
+	HeapScanDesc heap_scan;
+	ScanKeyData entry[2];
+	HeapTuple 	roletuple, 
+				scantuple;
+	
+	if (!replication_enable)
+		ereport(ERROR, (errmsg("cannot change role replication status"),
+					    errdetail("Replication must be active")));
+	else if (replication_slave)
+		elog(ERROR, "cannot change role replication status on a slave");
+		
+	rolename = DirectFunctionCall1(namein, CStringGetDatum(stmt->role));
+	
+	/* Lock pg_authid relation to make sure the role data won't get away */
+	LockRelationOid(AuthIdRelationId, AccessShareLock);
+	
+	/* Make a syscache lookup for the target role data */
+	roletuple = SearchSysCache(AUTHNAME, 
+							   CStringGetDatum(stmt->role), 
+							   0, 0, 0 );
+	
+	if (!HeapTupleIsValid(roletuple))
+		ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+						errmsg("Role \"%s\" doesn't exist", stmt->role)));
+	
+	/* Look for the role's record in repl_slave_roles */
+	slave_roles_rel = heap_open(ReplSlaveRolesRelationId, RowExclusiveLock);
+	slave_roles_desc = RelationGetDescr(slave_roles_rel);
+
+	ScanKeyInit(&entry[0], Anum_repl_slave_roles_rolename, 
+				BTEqualStrategyNumber, F_NAMEEQ, rolename);
+	ScanKeyInit(&entry[1], Anum_repl_slave_roles_slave,
+				BTEqualStrategyNumber, F_INT4EQ, stmt->slaveno);
+	scan = systable_beginscan(slave_roles_rel, 
+							  ReplSlaveRolesRolenameSlaveIndexId, 
+							  true, SnapshotNow, 2, entry);
+	scantuple = systable_getnext(scan);
+	
+	if (HeapTupleIsValid(scantuple))
+	{
+		Form_repl_slave_roles roleForm;
+		HeapTuple 	newtup;
+		Datum 		values[Natts_repl_slave_roles];
+		bool 		nulls[Natts_repl_slave_roles];
+		bool 		replace[Natts_repl_slave_roles];
+		
+		MemSet(values, 0, Natts_repl_slave_roles);
+		MemSet(nulls, 0, Natts_repl_slave_roles);
+		MemSet(replace, 0, Natts_repl_slave_roles);
+		
+		roleForm = (Form_repl_slave_roles) GETSTRUCT(scantuple);
+		
+		if (roleForm->enable == stmt->enable)
+			elog(WARNING, "Role \"%s\" is %s by slave %d",
+				 stmt->role,
+				 stmt->enable ? "already replicated" : "not replicated",
+				 stmt->slaveno);
+		else
+		{
+			values[Anum_repl_slave_roles_enable - 1] = 
+											BoolGetDatum(stmt->enable);
+			nulls[Anum_repl_slave_roles_enable - 1] = false;
+			replace[Anum_repl_slave_roles_enable - 1] = true;
+			
+			newtup = heap_modify_tuple(scantuple, slave_roles_desc, 
+									   values, nulls, replace);
+			simple_heap_update(slave_roles_rel, &scantuple->t_self, newtup);
+			
+			CatalogUpdateIndexes(slave_roles_rel, newtup);
+			
+			CommandCounterIncrement();	
+		}
+	}
+	else
+	{
+		HeapTuple 	newtup;
+		Datum 		values[Natts_repl_slave_roles];
+		bool 		nulls[Natts_repl_slave_roles];
+		
+		MemSet(nulls, 0, Natts_repl_slave_roles);
+			
+		values[Anum_repl_slave_roles_enable - 1] = BoolGetDatum(stmt->enable);
+		values[Anum_repl_slave_roles_slave - 1] = UInt32GetDatum(stmt->slaveno);
+		values[Anum_repl_slave_roles_rolename - 1] = rolename;
+		
+		newtup = heap_form_tuple(slave_roles_desc, values, nulls);
+		simple_heap_insert(slave_roles_rel, newtup);
+		CatalogUpdateIndexes(slave_roles_rel, newtup);
+		CommandCounterIncrement();
+				
+	}
+	systable_endscan(scan);
+
+	/* If replication is enabled - add role and membership data */
+	if (stmt->enable)
+	{
+		Relation authidRel = RelationIdGetRelation(AuthIdRelationId);
+		Assert(RelationIsValid(authidRel));
+		
+		CollectNewRole(authidRel, roletuple, GetCurrentCommandId(true));
+		
+		RelationClose(authidRel);
+				
+		/* Open pg_auth_members */
+		auth_members_rel = heap_open(AuthMemRelationId, AccessShareLock);
+		heap_scan = heap_beginscan(auth_members_rel, SnapshotNow, 0, NULL);
+		scantuple = heap_getnext(heap_scan, ForwardScanDirection);
+	
+		/* Scan all tuples, examine both roles, members and grantors */
+		while (HeapTupleIsValid(scantuple))
+		{
+			Oid 	roleid;
+			Form_pg_auth_members membersForm;
+		
+			/* Convert the target role name to oid */
+			roleid = HeapTupleGetOid(roletuple);
+		
+			membersForm = (Form_pg_auth_members)GETSTRUCT(scantuple);
+			if (membersForm->roleid == roleid || 
+				membersForm->member == roleid ||
+				membersForm->grantor == roleid)
+			{
+				CollectGrantRole(auth_members_rel, scantuple,
+				 				 GetCurrentCommandId(true));
+			}
+			scantuple = heap_getnext(heap_scan, ForwardScanDirection);
+		}
+		heap_endscan(heap_scan);
+	
+		/* Close relations and release cache tuples and locks */
+		ReleaseSysCache(roletuple);
+		heap_close(auth_members_rel, AccessShareLock);
+	}
+	heap_close(slave_roles_rel, RowExclusiveLock);
+	UnlockRelationOid(AuthIdRelationId, AccessShareLock);
+			
+	elog(DEBUG3, "ALTER ROLE %s %s REPLICATION ON SLAVE %d called",
+		 stmt->role, (stmt->enable) ? "ENABLE" : "DISABLE", stmt->slaveno);
+}
+
+/* 
+ * Collect the queue data to replicate the 'drop role' command. Note that
+ * there is no special command for role removal - instead it will be removed
+ * with the removal of the corresponding tuple on the slave.
+ */
+void
+ReplicateDropRole(const char *rolename)
+{
+	Relation 	slave_roles_rel;
+	SysScanDesc scan;
+	ScanKeyData   entry[1];
+	HeapTuple 	  scantuple;
+		
+	/* Remove records with the rolename from repl_roles relation */
+	slave_roles_rel = heap_open(ReplSlaveRolesRelationId, RowExclusiveLock);
+	
+	ScanKeyInit(&entry[0], Anum_repl_slave_roles_rolename,
+				BTEqualStrategyNumber, F_NAMEEQ, 
+				DirectFunctionCall1(namein, CStringGetDatum(rolename)));
+				
+	scan = systable_beginscan(slave_roles_rel,
+							  ReplSlaveRolesRolenameSlaveIndexId,
+							  true, SnapshotNow, 1, entry);
+
+	while (HeapTupleIsValid(scantuple = systable_getnext(scan)))
+	{
+		simple_heap_delete(slave_roles_rel, &scantuple->t_self);
+	}
+	
+	systable_endscan(scan);	
+	heap_close(slave_roles_rel, RowExclusiveLock);
+}
 
 /*
  * DROP ROLE
@@ -808,6 +1021,9 @@ DropRole(DropRoleStmt *stmt)
 	Relation	pg_authid_rel,
 				pg_auth_members_rel;
 	ListCell   *item;
+	bool		act_on_replication;
+
+	act_on_replication = replication_enable && replication_master;
 
 	if (!have_createrole_privilege())
 		ereport(ERROR,
@@ -866,6 +1082,17 @@ DropRole(DropRoleStmt *stmt)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_IN_USE),
 					 errmsg("session user cannot be dropped")));
+
+		/*
+		 * Check whether drop role was requested on the slave for a replicated
+		 * role 
+		 */
+		if (replication_enable && replication_slave && !IsReplicatorProcess() &&
+			RoleIsReplicatedBySlave(role, replication_slave_no))
+			ereport(ERROR,
+					(errmsg("Cannot remove role \"%s\"", role),
+					 errdetail("Role is being replicated")));
+		
 
 		/*
 		 * For safety's sake, we allow createrole holders to drop ordinary
@@ -950,6 +1177,10 @@ DropRole(DropRoleStmt *stmt)
 		 * itself.)
 		 */
 		CommandCounterIncrement();
+
+		/* if role is replicated - send the role removal command to slaves */
+		if (act_on_replication && RoleIsReplicated(role))
+			ReplicateDropRole(role);
 	}
 
 	/*
@@ -982,6 +1213,8 @@ RenameRole(const char *oldname, const char *newname)
 	char		repl_repl[Natts_pg_authid];
 	int			i;
 	Oid			roleid;
+
+	bool 		act_on_replication = replication_enable && replication_master;
 
 	rel = heap_open(AuthIdRelationId, RowExclusiveLock);
 	dsc = RelationGetDescr(rel);
@@ -1072,6 +1305,68 @@ RenameRole(const char *oldname, const char *newname)
 
 	CatalogUpdateIndexes(rel, newtuple);
 
+	if (act_on_replication && RoleIsReplicated(oldname))
+	{
+		/* 
+		 * We have to do 2 things here:
+		 * - replicate the actual data.
+		 * - update rolname attribute in repl_slave_roles 
+		 */
+		Relation 		replSlaveRolesRel;
+		SysScanDesc 	scan;
+		ScanKeyData		entry[1];
+		
+		HeapTuple 		scantuple,
+						uptuple;
+		TupleDesc		tupdesc;
+		bool 			*nulls;
+		bool 			*replace;
+		Datum 			*values;
+		
+		/* Collect the data for renaming */
+		CollectAlterRole(rel, oldtuple, newtuple, GetCurrentCommandId(true));
+		
+		/* Look for the 'oldname' role tuple in repl_slave_roles */
+		replSlaveRolesRel = heap_open(ReplSlaveRolesRelationId,
+									  RowExclusiveLock);
+		
+		tupdesc = RelationGetDescr(replSlaveRolesRel);
+		
+		values = palloc0(sizeof(Datum) * Natts_repl_slave_roles);
+		nulls = palloc0(sizeof(bool) * Natts_repl_slave_roles);
+		replace = palloc0(sizeof(bool) * Natts_repl_slave_roles);
+		
+		values[Anum_repl_slave_roles_rolename - 1] = 
+						DirectFunctionCall1(namein, CStringGetDatum(newname));
+		nulls[Anum_repl_slave_roles_rolename - 1] = false;
+		replace[Anum_repl_slave_roles_rolename - 1] = true;			
+		
+		
+		ScanKeyInit(&entry[0], Anum_repl_slave_roles_rolename, 
+					BTEqualStrategyNumber, F_NAMEEQ, 
+					DirectFunctionCall1(namein, CStringGetDatum(oldname)));
+	
+		scan = systable_beginscan(replSlaveRolesRel, 
+								  ReplSlaveRolesRolenameSlaveIndexId, 
+								  true, SnapshotNow, 1, entry);
+								
+		while (HeapTupleIsValid((scantuple = systable_getnext(scan))))
+		{		
+			/* Update rolename attribute of repl_slave_roles tuple */
+			uptuple = heap_modify_tuple(scantuple, tupdesc, 
+										values, nulls, replace);
+										
+			simple_heap_update(replSlaveRolesRel, &scantuple->t_self, uptuple);
+			CatalogUpdateIndexes(replSlaveRolesRel, uptuple);
+			
+			CommandCounterIncrement();
+			
+			heap_freetuple(uptuple);
+		}
+		systable_endscan(scan);
+		heap_close(replSlaveRolesRel, RowExclusiveLock);
+	}
+		
 	ReleaseSysCache(oldtuple);
 
 	/*
@@ -1247,6 +1542,9 @@ AddRoleMems(const char *rolename, Oid roleid,
 	TupleDesc	pg_authmem_dsc;
 	ListCell   *nameitem;
 	ListCell   *iditem;
+	bool		act_on_replication;
+
+	act_on_replication = replication_enable && replication_master;
 
 	Assert(list_length(memberNames) == list_length(memberIds));
 
@@ -1254,6 +1552,11 @@ AddRoleMems(const char *rolename, Oid roleid,
 	if (!memberIds)
 		return;
 
+	if (replication_enable && replication_slave && 
+		RoleIsReplicatedBySlave(rolename, replication_slave_no))
+		ereport(ERROR, 
+				(errmsg("cannot add role members to role \"%s\"", rolename),
+				 errdetail("Role is being replicated")));
 	/*
 	 * Check permissions: must have createrole or admin option on the role to
 	 * be changed.	To mess with a superuser role, you gotta be superuser.
@@ -1284,6 +1587,7 @@ AddRoleMems(const char *rolename, Oid roleid,
 	pg_authmem_rel = heap_open(AuthMemRelationId, RowExclusiveLock);
 	pg_authmem_dsc = RelationGetDescr(pg_authmem_rel);
 
+
 	forboth(nameitem, memberNames, iditem, memberIds)
 	{
 		const char *membername = strVal(lfirst(nameitem));
@@ -1294,6 +1598,11 @@ AddRoleMems(const char *rolename, Oid roleid,
 		char		new_record_nulls[Natts_pg_auth_members];
 		char		new_record_repl[Natts_pg_auth_members];
 
+		if (replication_enable && replication_slave && 
+			RoleIsReplicatedBySlave(membername, replication_slave_no))
+			ereport(ERROR, 
+					(errmsg("cannot add membership of role \"%s\"", membername),
+					 errdetail("Role is being replicated")));
 		/*
 		 * Refuse creation of membership loops, including the trivial case
 		 * where a role is made a member of itself.  We do this by checking to
@@ -1357,6 +1666,17 @@ AddRoleMems(const char *rolename, Oid roleid,
 
 		/* CCI after each change, in case there are duplicates in list */
 		CommandCounterIncrement();
+
+		/* 
+		 * Replicate grant role.
+		 * XXX: The code below doesn't deal with updating admin option only yet.
+		 */
+		if (act_on_replication && 
+			(RoleIsReplicated(rolename) || RoleIsReplicated(membername)))
+		{
+			CollectGrantRole(pg_authmem_rel, tuple, GetCurrentCommandId(true));	
+		}
+		
 	}
 
 	/*
@@ -1386,12 +1706,22 @@ DelRoleMems(const char *rolename, Oid roleid,
 	TupleDesc	pg_authmem_dsc;
 	ListCell   *nameitem;
 	ListCell   *iditem;
+	bool		act_on_replication;
+
+	act_on_replication = replication_enable && replication_master;
 
 	Assert(list_length(memberNames) == list_length(memberIds));
 
 	/* Skip permission check if nothing to do */
 	if (!memberIds)
 		return;
+
+	if (replication_enable && replication_slave && 
+		RoleIsReplicatedBySlave(rolename, replication_slave_no))
+		ereport(ERROR, 
+				(errmsg("cannot revoke role members from role \"%s\"",
+				 		rolename),
+				 errdetail("Role is being replicated")));
 
 	/*
 	 * Check permissions: must have createrole or admin option on the role to
@@ -1423,6 +1753,12 @@ DelRoleMems(const char *rolename, Oid roleid,
 		Oid			memberid = lfirst_oid(iditem);
 		HeapTuple	authmem_tuple;
 
+		if (replication_enable && replication_slave && 
+			RoleIsReplicatedBySlave(membername, replication_slave_no))
+			ereport(ERROR, 
+					(errmsg("cannot revoke membership of role \"%s\"",
+					 		membername),
+					 errdetail("Role is being replicated")));
 		/*
 		 * Find entry for this role/member
 		 */
@@ -1442,6 +1778,14 @@ DelRoleMems(const char *rolename, Oid roleid,
 		{
 			/* Remove the entry altogether */
 			simple_heap_delete(pg_authmem_rel, &authmem_tuple->t_self);
+		
+			/* Collect revoke role commnad */
+			if (act_on_replication &&
+				(RoleIsReplicated(rolename) || RoleIsReplicated(membername)))
+			{
+				CollectRevokeRole(pg_authmem_rel, authmem_tuple,
+				 				  GetCurrentCommandId(true), false);
+			}
 		}
 		else
 		{
@@ -1464,6 +1808,14 @@ DelRoleMems(const char *rolename, Oid roleid,
 									 new_record_nulls, new_record_repl);
 			simple_heap_update(pg_authmem_rel, &tuple->t_self, tuple);
 			CatalogUpdateIndexes(pg_authmem_rel, tuple);
+			
+			/* Process a case of revoking admin privileges */
+			if (act_on_replication &&
+				(RoleIsReplicated(rolename) || RoleIsReplicated(membername)))
+			{
+				CollectRevokeRole(pg_authmem_rel, tuple,
+					 			  GetCurrentCommandId(true), true);
+			}
 		}
 
 		ReleaseSysCache(authmem_tuple);
@@ -1477,4 +1829,61 @@ DelRoleMems(const char *rolename, Oid roleid,
 	 * prevent any risk of deadlock failure while updating flat file)
 	 */
 	heap_close(pg_authmem_rel, NoLock);
+
+}
+
+/* The following functions acquire AccessShareLock on repl_roles catalog */
+
+/* Check whether the role is replicated by any slave */
+bool
+RoleIsReplicated(const char *rolename)
+{
+	return get_role_replicated_status(rolename, -1, true);
+}
+
+/* Check whether the role is replicated by a specific slave */
+bool RoleIsReplicatedBySlave(const char *rolename, int slaveno)
+{
+	return get_role_replicated_status(rolename, slaveno, false);
+}
+
+/* A common code for RoleIsReplicated and RoleIsReplicatedBySlave */
+static bool
+get_role_replicated_status(const char *rolename, int slaveno, bool anyslave)
+{
+	Relation 	slave_roles_rel;
+	SysScanDesc scan;
+	ScanKeyData entry[2];
+	HeapTuple	scantuple;
+	bool 		result;
+	
+	result = false;
+	
+	slave_roles_rel = heap_open(ReplSlaveRolesRelationId, AccessShareLock);
+	
+	ScanKeyInit(&entry[0], Anum_repl_slave_roles_rolename, 
+				BTEqualStrategyNumber, F_NAMEEQ, CStringGetDatum(rolename));
+	if (!anyslave)
+		ScanKeyInit(&entry[1], Anum_repl_slave_roles_slave, 						
+					BTEqualStrategyNumber, F_INT4EQ, 			
+					Int32GetDatum(slaveno));
+				
+	scan = systable_beginscan(slave_roles_rel, 
+							  ReplSlaveRolesRolenameSlaveIndexId, 
+							  true, SnapshotNow, (anyslave) ? 1 : 2, entry);
+	while (HeapTupleIsValid(scantuple = systable_getnext(scan)))
+	{
+		Form_repl_slave_roles rolesForm = 
+								(Form_repl_slave_roles) GETSTRUCT(scantuple);
+		if (rolesForm->enable || !anyslave)
+		{
+			result = rolesForm->enable;
+			break;
+		}
+	}
+	
+	systable_endscan(scan);
+	heap_close(slave_roles_rel, AccessShareLock);
+	
+	return result;
 }

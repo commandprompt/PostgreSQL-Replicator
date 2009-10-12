@@ -1,0 +1,1 @@
+psql:.*:2: NOTICE:  ALTER TABLE / ADD PRIMARY KEY will create implicit index "jedi_pkey" for table "jedi"

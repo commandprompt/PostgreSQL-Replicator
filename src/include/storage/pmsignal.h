@@ -28,7 +28,11 @@ typedef enum
 	PMSIGNAL_ROTATE_LOGFILE,	/* send SIGUSR1 to syslogger to rotate logfile */
 	PMSIGNAL_START_AUTOVAC_LAUNCHER,	/* start an autovacuum launcher */
 	PMSIGNAL_START_AUTOVAC_WORKER,		/* start an autovacuum worker */
-
+	PMSIGNAL_REPLICATOR,		/* send a SIGUSR1 signal to replicator
+								 * process */
+	PMSIGNAL_READ_FORWARDER_FLAT_FILE, /* SIGUSR1 to re-read forwarder
+	 									* connection settings from a flat file.
+									 	*/
 	NUM_PMSIGNALS				/* Must be last value of enum! */
 } PMSignalReason;
 

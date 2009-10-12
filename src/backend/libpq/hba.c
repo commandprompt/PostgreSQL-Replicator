@@ -639,7 +639,6 @@ parse_hba_auth(ListCell **line_item, UserAuth *userauth_p,
 	}
 }
 
-
 /*
  *	Process one line from the hba config file.
  *
@@ -1043,6 +1042,68 @@ read_pg_database_line(FILE *fp, char *dbname, Oid *dboid,
 		elog(FATAL, "bad data in flat pg_database file");
 	return true;
 }
+
+/*
+ * We allow address, port, authkey and ssl to be NULL if the caller's not
+ * interested.  String types are allocated here and must be freed by the caller.
+ * */
+bool
+read_repl_forwarder_line(FILE *fp, char **name, char **address,
+						 int *port, char **authkey, bool *ssl)
+{
+	char		buf[MAX_TOKEN];
+
+	*name = NULL;
+
+	if (feof(fp))
+		return false;
+	if (!next_token(fp, buf, sizeof(buf)))
+		return false;
+
+	/* forwarder name */
+	if (strlen(buf) >= NAMEDATALEN)
+		elog(FATAL, "bad data in flat repl_forwarder file");
+	*name = palloc(strlen(buf) + 1);
+	strcpy(*name, buf);
+
+	/* address */
+	next_token(fp, buf, sizeof(buf));
+	if (address)
+	{
+		*address = palloc(strlen(buf) + 1);
+		strcpy(*address, buf);
+	}
+	/* port number */
+	next_token(fp, buf, sizeof(buf));
+	if (!isdigit((unsigned char) buf[0]))
+		elog(FATAL, "bad data in flat repl_forwarder file");
+	if (port)
+		*port = atoi(buf);
+
+	/* authkey */
+	next_token(fp, buf, sizeof(buf));
+	if (authkey)
+	{
+		*authkey = palloc(strlen(buf) + 1);
+		strcpy(*authkey, buf);
+	}
+
+	/* the SSL bit */
+	next_token(fp, buf, sizeof(buf));
+	if (ssl)
+	{
+		if (buf[0] == '1')
+			*ssl = true;
+		else
+			*ssl = false;
+	}
+
+	/* expect EOL next */
+	if (next_token(fp, buf, sizeof(buf)))
+		elog(FATAL, "bad data in flat repl_forwarder file");
+	return true;
+}
+
 
 /*
  *	Process one line from the ident config file.

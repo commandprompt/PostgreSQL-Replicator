@@ -109,6 +109,7 @@ typedef enum
 } GucAction;
 
 #define GUC_QUALIFIER_SEPARATOR '.'
+#define DEF_FORWARDER_PORT 7777
 
 /* GUC vars that are actually declared in guc.c, rather than elsewhere */
 extern bool log_duration;

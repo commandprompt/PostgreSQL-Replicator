@@ -1,0 +1,2 @@
+psql:.*:1: ERROR:  cannot inherit from replicated relation "rebels"
+DETAIL:  slave 0 replicates "rebels" but not "jedi"

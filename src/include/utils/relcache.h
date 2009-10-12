@@ -77,4 +77,7 @@ extern void RelationCacheInitFileRemove(const char *dbPath);
 /* should be used only by relcache.c and catcache.c */
 extern bool criticalRelcachesBuilt;
 
+/* hack to support repl_forwarder flatfile during WAL replay */
+extern TupleDesc GetReplForwarderDescriptor(void);
+
 #endif   /* RELCACHE_H */

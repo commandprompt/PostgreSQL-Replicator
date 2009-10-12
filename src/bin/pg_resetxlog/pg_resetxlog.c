@@ -40,12 +40,22 @@
 #include <getopt.h>
 #endif
 
+/*
+ * Mammoth Replicator note: we change xlog.h to export ControlFile (in order to
+ * be able to retrieve the system identifier), but we define ControlFile as an
+ * extern.  The problem is that this file defines it as a different kind of
+ * symbol; so here he rename the symbol defined in the header to avoid the 
+ * conflict.
+ */
+#define ControlFile ControlFileDummy
+#include "access/multixact.h"
 #include "access/transam.h"
 #include "access/tuptoaster.h"
 #include "access/multixact.h"
 #include "access/xlog_internal.h"
 #include "catalog/catversion.h"
 #include "catalog/pg_control.h"
+#undef ControlFile
 
 extern int	optind;
 extern char *optarg;

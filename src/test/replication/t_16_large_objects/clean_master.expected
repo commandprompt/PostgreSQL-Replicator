@@ -1,0 +1,3 @@
+psql:.*:1: ERROR:  cannot truncate table "test1"
+DETAIL:  LO replication is enabled for this relation
+HINT:  Disable LO replication for columns of this relation

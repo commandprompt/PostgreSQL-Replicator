@@ -100,12 +100,16 @@
 #include "libpq/ip.h"
 #include "libpq/libpq.h"
 #include "libpq/pqsignal.h"
+#include "mammoth_r/mcp_processes.h"
+#include "mammoth_r/forwarder.h"
+#include "mammoth_r/forwcmds.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/pgarch.h"
 #include "postmaster/postmaster.h"
+#include "postmaster/replication.h"
 #include "postmaster/syslogger.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
@@ -146,6 +150,16 @@ typedef struct bkend
 
 static Dllist *BackendList;
 
+/*
+ * List of active forwarder children.
+ */
+typedef struct ForwarderChild
+{
+	pid_t		pid;			/* process id of child */
+} ForwarderChild;
+
+static Dllist *ForwarderChildren;
+
 #ifdef EXEC_BACKEND
 /*
  * Number of entries in the shared-memory backend table.  This table is used
@@ -175,9 +189,13 @@ char	   *ListenAddresses;
  */
 int			ReservedBackends;
 
-/* The socket(s) we're listening to. */
+/*
+ * The socket(s) we're listening to, and flags for whether each one is
+ * for the replication forwarder.
+ */
 #define MAXLISTEN	64
 static int	ListenSocket[MAXLISTEN];
+static bool ListenSocketIsForw[MAXLISTEN];
 
 /*
  * Set by the -o option
@@ -214,7 +232,24 @@ static pid_t StartupPID = 0,
 			AutoVacPID = 0,
 			PgArchPID = 0,
 			PgStatPID = 0,
-			SysLoggerPID = 0;
+			SysLoggerPID = 0,
+			ReplicationPID = 0,
+			ForwarderHelperPID = 0;
+
+/* Replicator forwarder GUC options */
+bool ForwarderEnable;
+bool ForwarderRequireSSL;
+bool ForwarderACLenable;
+int ForwarderPortNumber;
+int ForwarderEchoTimeout;
+int ForwarderDumpCacheMaxSize;
+int ForwarderOptimizerRounds;
+int ForwarderOptimizerNaptime;
+char *ForwarderListenAddresses;
+char *ForwarderMasterAddress;
+char *ForwarderSlaveAddresses;
+char *ForwarderDataPath;
+char *ForwarderAuthKey;
 
 /* Startup/shutdown state */
 #define			NoShutdown		0
@@ -307,6 +342,7 @@ static void reaper(SIGNAL_ARGS);
 static void sigusr1_handler(SIGNAL_ARGS);
 static void dummy_handler(SIGNAL_ARGS);
 static void CleanupBackend(int pid, int exitstatus);
+static bool CleanupForwarderChild(int pid, int exitstatus);
 static void HandleChildCrash(int pid, int exitstatus, const char *procname);
 static void LogChildExit(int lev, const char *procname,
 			 int pid, int exitstatus);
@@ -316,6 +352,7 @@ static int	BackendRun(Port *port);
 static void ExitPostmaster(int status);
 static int	ServerLoop(void);
 static int	BackendStartup(Port *port);
+static int ForwarderChildStartup(Port *port);
 static int	ProcessStartupPacket(Port *port, bool SSLdone);
 static void processCancelRequest(Port *port, void *pkt);
 static int	initMasks(fd_set *rmask);
@@ -325,6 +362,7 @@ static long PostmasterRandom(void);
 static void RandomSalt(char *cryptSalt, char *md5Salt);
 static void signal_child(pid_t pid, int signal);
 static void SignalSomeChildren(int signal, bool only_autovac);
+static void SignalForwarderChildren(int signal);
 
 #define SignalChildren(sig)			SignalSomeChildren(sig, false)
 #define SignalAutovacWorkers(sig)	SignalSomeChildren(sig, true)
@@ -829,12 +867,12 @@ PostmasterMain(int argc, char *argv[])
 				status = StreamServerPort(AF_UNSPEC, NULL,
 										  (unsigned short) PostPortNumber,
 										  UnixSocketDir,
-										  ListenSocket, MAXLISTEN);
+										  ListenSocket, MAXLISTEN, ListenSocketIsForw, false);
 			else
 				status = StreamServerPort(AF_UNSPEC, curhost,
 										  (unsigned short) PostPortNumber,
 										  UnixSocketDir,
-										  ListenSocket, MAXLISTEN);
+										  ListenSocket, MAXLISTEN, ListenSocketIsForw, false);
 			if (status == STATUS_OK)
 				success++;
 			else
@@ -846,6 +884,52 @@ PostmasterMain(int argc, char *argv[])
 		if (!success && list_length(elemlist))
 			ereport(FATAL,
 					(errmsg("could not create any TCP/IP sockets")));
+
+		list_free(elemlist);
+		pfree(rawstring);
+	}
+
+	if (ForwarderEnable && ForwarderListenAddresses)
+	{
+		char	   *rawstring;
+		List	   *elemlist;
+		ListCell   *l;
+		int			success = 0;
+
+		/* Need a modifiable copy of ForwarderListenAddresses */
+		rawstring = pstrdup(ForwarderListenAddresses);
+
+		/* Parse string into list of identifies */
+		if (!SplitIdentifierString(rawstring, ',', &elemlist))
+		{
+			/* syntax error in list */
+			ereport(FATAL,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid list syntax for \"forwarder_listen_addresses\"")));
+		}
+
+		foreach(l, elemlist)
+		{
+			char	   *curhost = (char *) lfirst(l);
+
+			if (strcmp(curhost, "*") == 0)
+				status = StreamServerPort(AF_UNSPEC, NULL,
+										  (unsigned short) ForwarderPortNumber,
+										  UnixSocketDir,
+										  ListenSocket, MAXLISTEN, ListenSocketIsForw, true);
+			else
+				status = StreamServerPort(AF_UNSPEC, curhost,
+										  (unsigned short) ForwarderPortNumber,
+										  UnixSocketDir,
+										  ListenSocket, MAXLISTEN, ListenSocketIsForw, true);
+			if (status == STATUS_OK)
+				success++;
+			else
+				ereport(WARNING,
+						(errmsg("could not create forwarder listen socket for \"%s\"",
+								curhost)));
+
+		}
 
 		list_free(elemlist);
 		pfree(rawstring);
@@ -869,7 +953,7 @@ PostmasterMain(int argc, char *argv[])
 	status = StreamServerPort(AF_UNIX, NULL,
 							  (unsigned short) PostPortNumber,
 							  UnixSocketDir,
-							  ListenSocket, MAXLISTEN);
+							  ListenSocket, MAXLISTEN, ListenSocketIsForw, false);
 	if (status != STATUS_OK)
 		ereport(WARNING,
 				(errmsg("could not create Unix-domain socket")));
@@ -887,6 +971,10 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	reset_shared(PostPortNumber);
 
+	/* Load forwarder state file if necessary */
+	if (ForwarderEnable)
+		ReadForwarderStateFile();
+
 	/*
 	 * Estimate number of openable files.  This must happen after setting up
 	 * semaphores, because on some platforms semaphores count as open files.
@@ -900,9 +988,10 @@ PostmasterMain(int argc, char *argv[])
 	load_ident();
 
 	/*
-	 * Initialize the list of active backends.
+	 * Initialize the list of active backends and forwarder children.
 	 */
 	BackendList = DLNewList();
+	ForwarderChildren = DLNewList();
 
 #ifdef WIN32
 
@@ -1008,6 +1097,15 @@ PostmasterMain(int argc, char *argv[])
 	 * collector process!)
 	 */
 	pgstat_init();
+
+	/*
+	 * Initialize the replicator stuff
+	 */
+	if (ReplicationActive())
+		replication_init();
+
+	if (ForwarderEnable)
+		ForwarderInitialize();
 
 	/*
 	 * Initialize the autovacuum subsystem (again, no process start yet)
@@ -1270,6 +1368,28 @@ ServerLoop(void)
 				{
 					Port	   *port;
 
+					/*
+					 * If the socket is one we opened for the forwarder, act
+					 * accordingly.
+					 */
+					if (ListenSocketIsForw[i])
+					{
+						port = ConnCreate(ListenSocket[i]);
+						if (!port)
+						{
+							elog(WARNING, "could not create socket");
+							continue;
+						}
+
+						ForwarderChildStartup(port);
+
+						/* we no longer need the open socket in this process */
+						StreamClose(port->sock);
+						ConnFree(port);
+
+						continue;
+					}
+
 					port = ConnCreate(ListenSocket[i]);
 					if (port)
 					{
@@ -1330,6 +1450,20 @@ ServerLoop(void)
 			if (AutoVacPID != 0)
 				kill(AutoVacPID, SIGUSR1);
 		}
+
+		/*
+		 * If we have lost the replication process, try to start a new one.
+		 */
+		if (replication_enable && replication_process_enable &&
+			ReplicationPID == 0 && pmState == PM_RUN)
+			ReplicationPID = replication_start();
+
+		/*
+		 * If we have lost the forwarder helper process, try to start a new
+		 * one.
+		 */
+		if (ForwarderEnable && pmState == PM_RUN && ForwarderHelperPID == 0)
+			ForwarderHelperPID = forwarder_helper_start();
 
 		/*
 		 * Touch the socket and lock file every 58 minutes, to ensure that
@@ -1892,6 +2026,9 @@ reset_shared(int port)
 	 * objects if the postmaster crashes and is restarted.
 	 */
 	CreateSharedMemoryAndSemaphores(false, port);
+
+	if (ForwarderEnable)
+		forwarder_reset_shared();
 }
 
 
@@ -1922,6 +2059,8 @@ SIGHUP_handler(SIGNAL_ARGS)
 		if (SysLoggerPID != 0)
 			signal_child(SysLoggerPID, SIGHUP);
 		/* PgStatPID does not currently need SIGHUP */
+		/* ReplicationPID does not currently need SIGHUP */
+		SignalForwarderChildren(SIGHUP);
 
 		/* Reload authentication config files too */
 		load_hba();
@@ -1978,6 +2117,13 @@ pmdie(SIGNAL_ARGS)
 				/* and the walwriter too */
 				if (WalWriterPID != 0)
 					signal_child(WalWriterPID, SIGTERM);
+				/* and the replication process */
+				if (ReplicationPID != 0)
+					signal_child(ReplicationPID, SIGQUIT);
+				/* and the replication forwarder processes */
+				SignalForwarderChildren(SIGQUIT);
+				if (ForwarderHelperPID != 0)
+					signal_child(ForwarderHelperPID, SIGTERM);
 				pmState = PM_WAIT_BACKENDS;
 			}
 
@@ -2017,6 +2163,12 @@ pmdie(SIGNAL_ARGS)
 				/* and the walwriter too */
 				if (WalWriterPID != 0)
 					signal_child(WalWriterPID, SIGTERM);
+				if (ReplicationPID != 0)
+					signal_child(ReplicationPID, SIGQUIT);
+				/* and the forwarder children */
+				SignalForwarderChildren(SIGQUIT);
+				if (ForwarderHelperPID != 0)
+					signal_child(ForwarderHelperPID, SIGTERM);
 				pmState = PM_WAIT_BACKENDS;
 			}
 
@@ -2050,6 +2202,11 @@ pmdie(SIGNAL_ARGS)
 				signal_child(PgArchPID, SIGQUIT);
 			if (PgStatPID != 0)
 				signal_child(PgStatPID, SIGQUIT);
+			if (ReplicationPID != 0)
+				signal_child(ReplicationPID, SIGQUIT);
+			SignalForwarderChildren(SIGQUIT);
+				if (ForwarderHelperPID != 0)
+					signal_child(ForwarderHelperPID, SIGQUIT);
 			ExitPostmaster(0);
 			break;
 	}
@@ -2161,6 +2318,11 @@ reaper(SIGNAL_ARGS)
 				PgArchPID = pgarch_start();
 			if (PgStatPID == 0)
 				PgStatPID = pgstat_start();
+			if (replication_enable && replication_process_enable && 
+				ReplicationPID == 0)
+				ReplicationPID = replication_start();
+			if (ForwarderEnable && ForwarderHelperPID == 0)
+				ForwarderHelperPID = forwarder_helper_start();
 
 			/* at this point we are really open for business */
 			ereport(LOG,
@@ -2298,6 +2460,83 @@ reaper(SIGNAL_ARGS)
 			continue;
 		}
 
+		/* Was it the replicator process? */
+		if (ReplicationPID != 0 && pid == ReplicationPID)
+		{
+			ReplicationPID = 0;
+
+			/*
+			 * Under some circumstances, the replication process dies with
+			 * exit code 0.  We log these as normal.  During promotion, the
+			 * replication process dies with specific exit status; we act
+			 * on those so that the correct replication process is started
+			 * later in ServerLoop.  In case the replicator process detects
+			 * an incorrect pg_catalog.repl_* schema, it will exit with another
+			 * specific exit status; in this case, there's nothing we can do
+			 * but tell the user to fix it, so we abandon the current
+			 * postmaster process.  Finally, if the replication process dies
+			 * for some reason, we report that and cause a restart of the
+			 * whole system.
+			 *
+			 * Note that we don't start a new replication process here;
+			 * we leave that task to ServerLoop.
+			 */
+			if (EXIT_STATUS_0(exitstatus))
+			{
+				LogChildExit(LOG, gettext("replication process"),
+							 pid, exitstatus);
+				replication_stopped(false);
+			}
+			else if (WEXITSTATUS(exitstatus) == REPLICATOR_EXIT_WRONG_SCHEMA)
+				/*
+				 * The pg_catalog.repl_* schema is not O.K.,
+				 * so there's no point in continuing.
+				 */
+				ExitPostmaster(REPLICATOR_EXIT_WRONG_SCHEMA);
+			else if (WEXITSTATUS(exitstatus) == REPLICATOR_EXIT_SLAVE_PROMOTION)
+			{
+				/* The slave promoted */
+				Assert(replication_slave);
+				SetConfigOption("replication_mode", "master", 
+								PGC_POSTMASTER, PGC_S_OVERRIDE);
+				SignalChildren(SIGTERM);
+				replication_stopped(false);
+			}
+			else if (WEXITSTATUS(exitstatus) == REPLICATOR_EXIT_MASTER_DEMOTION)
+			{
+				/* The master demoted */
+				Assert(replication_master);
+				SetConfigOption("replication_mode", "slave", 
+								PGC_POSTMASTER, PGC_S_OVERRIDE);
+				SignalChildren(SIGTERM);
+				replication_stopped(false);
+			}
+			else
+			{
+				replication_stopped(true);
+				HandleChildCrash(pid, exitstatus,
+							 	 gettext("replication process"));
+			}
+			continue;
+		}
+
+		/* Was it the forwarder helper process?  Try to start a new one */
+		if (pid == ForwarderHelperPID)
+		{
+			ForwarderHelperPID = 0;
+			forwarder_helper_stopped();
+			if (!EXIT_STATUS_0(exitstatus))
+				LogChildExit(LOG, _("forwarder helper process"),
+							 pid, exitstatus);
+			ForwarderHelperPID = forwarder_helper_start();
+			continue;
+		}
+
+
+		/* Was it one of the replication forwarder children? */
+		if (CleanupForwarderChild(pid, exitstatus))
+			continue;
+
 		/*
 		 * Else do standard backend child cleanup.
 		 */
@@ -2308,6 +2547,7 @@ reaper(SIGNAL_ARGS)
 	 * After cleaning out the SIGCHLD queue, see if we have any state changes
 	 * or actions to make.
 	 */
+	/* XXX: PostMasterStateMachine should deal with Replication process */
 	PostmasterStateMachine();
 
 	/* Done with signal handler */
@@ -2361,8 +2601,44 @@ CleanupBackend(int pid,
 }
 
 /*
+ * CleanupForwarderChild -- cleanup after terminated forwarder child.
+ *
+ * This is basically the same as above, except that we return a boolean flag
+ * to tell whether we found a child to process here or not.
+ */
+static bool
+CleanupForwarderChild(int pid, int exitstatus)
+{
+	Dlelem	   *curr;
+
+	for (curr = DLGetHead(ForwarderChildren); curr; curr = DLGetSucc(curr))
+	{
+		ForwarderChild	*fp = (ForwarderChild *) DLE_VAL(curr);
+
+		if (pid == fp->pid)
+		{
+			LogChildExit(DEBUG2, _("replication forwarder child"), pid, exitstatus);
+
+			if (!EXIT_STATUS_0(exitstatus) && !EXIT_STATUS_1(exitstatus))
+			{
+				HandleChildCrash(pid, exitstatus, _("replication forwarder child"));
+			}
+			else
+			{
+				DLRemove(curr);
+				free(fp);
+				DLFreeElem(curr);
+			}
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
  * HandleChildCrash -- cleanup after failed backend, bgwriter, walwriter,
- * or autovacuum.
+ * autovacuum or replication process.
  *
  * The objectives here are to clean up our local state about the child
  * process, and to signal all other remaining children to quickdie.
@@ -2425,6 +2701,34 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 										 (SendStop ? "SIGSTOP" : "SIGQUIT"),
 										 (int) bp->pid)));
 				signal_child(bp->pid, (SendStop ? SIGSTOP : SIGQUIT));
+			}
+		}
+	}
+
+	/* Ditto, for forwarder children */
+	for (curr = DLGetHead(ForwarderChildren); curr; curr = next)
+	{
+		ForwarderChild	*fp;
+
+		next = DLGetSucc(curr);
+		fp = DLE_VAL(curr);
+		if (pid == fp->pid)
+		{
+			/* Found entry for freshly dead child; remove it */
+			DLRemove(curr);
+			free(fp);
+			DLFreeElem(curr);
+			/* Keep looping so we can signal remaining backends */
+		}
+		else
+		{
+			if (!FatalError)
+			{
+				ereport(DEBUG2,
+						(errmsg_internal("sending %s to process %d",
+										 (SendStop ? "SIGSTOP" : "SIGQUIT"),
+										 (int) fp->pid)));
+				signal_child(fp->pid, (SendStop ? SIGSTOP : SIGQUIT));
 			}
 		}
 	}
@@ -2494,6 +2798,30 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 								 (int) PgStatPID)));
 		signal_child(PgStatPID, SIGQUIT);
 		allow_immediate_pgstat_restart();
+	}
+
+	/* Take care of the replication process */
+	if (pid == ReplicationPID)
+		ReplicationPID = 0;
+	else if (ReplicationPID != 0 && !FatalError)
+	{
+		ereport(DEBUG2,
+				(errmsg_internal("sending %s to process %d",
+								 "SIGQUIT",
+								 (int) ReplicationPID)));
+		signal_child(ReplicationPID, SIGQUIT);
+	}
+
+	/* Take care of the forwarder helper process */
+	if (pid == ForwarderHelperPID)
+		ForwarderHelperPID = 0;
+	else if (ForwarderHelperPID != 0 && !FatalError)
+	{
+		ereport(DEBUG2,
+				(errmsg_internal("sending %s to process %d",
+								 "SIGTERM",
+								 (int) ForwarderHelperPID)));
+		signal_child(ForwarderHelperPID, SIGTERM);
 	}
 
 	/* We do NOT restart the syslogger */
@@ -2574,7 +2902,8 @@ PostmasterStateMachine(void)
 	{
 		/*
 		 * PM_WAIT_BACKENDS state ends when we have no regular backends
-		 * (including autovac workers) and no walwriter or autovac launcher.
+		 * (including autovac workers and forwarder children) and no walwriter
+		 * or autovac launcher.
 		 * If we are doing crash recovery then we expect the bgwriter to exit
 		 * too, otherwise not.	The archiver, stats, and syslogger processes
 		 * are disregarded since they are not connected to shared memory; we
@@ -2584,7 +2913,10 @@ PostmasterStateMachine(void)
 			StartupPID == 0 &&
 			(BgWriterPID == 0 || !FatalError) &&
 			WalWriterPID == 0 &&
-			AutoVacPID == 0)
+			AutoVacPID == 0 &&
+			ReplicationPID == 0 &&
+			ForwarderHelperPID == 0 &&
+			DLGetHead(ForwarderChildren) == NULL)
 		{
 			if (FatalError)
 			{
@@ -2641,8 +2973,8 @@ PostmasterStateMachine(void)
 	{
 		/*
 		 * PM_WAIT_DEAD_END state ends when the BackendList is entirely empty
-		 * (ie, no dead_end children remain), and the archiver and stats
-		 * collector are gone too.
+		 * (ie, no dead_end children remain), there are no forwarder children,
+		 * and the archiver and stats collector are gone too.
 		 *
 		 * The reason we wait for those two is to protect them against a new
 		 * postmaster starting conflicting subprocesses; this isn't an
@@ -2653,6 +2985,7 @@ PostmasterStateMachine(void)
 		 * FatalError processing.
 		 */
 		if (DLGetHead(BackendList) == NULL &&
+			DLGetHead(ForwarderChildren) == NULL &&
 			PgArchPID == 0 && PgStatPID == 0)
 		{
 			/* These other guys should be dead already */
@@ -2660,6 +2993,8 @@ PostmasterStateMachine(void)
 			Assert(BgWriterPID == 0);
 			Assert(WalWriterPID == 0);
 			Assert(AutoVacPID == 0);
+			Assert(ReplicationPID == 0);
+			Assert(ForwarderHelperPID == 0);
 			/* syslogger is not considered here */
 			pmState = PM_NO_CHILDREN;
 		}
@@ -2702,6 +3037,12 @@ PostmasterStateMachine(void)
 
 		shmem_exit(0);
 		reset_shared(PostPortNumber);
+		/* 
+		 * in case we run a forwarder - reset its state file to avoid loading
+		 * bogus data next time we read this file.
+		 */ 
+		if (ForwarderEnable)
+			RemoveForwarderStateFile();
 
 		StartupPID = StartupDataBase();
 		Assert(StartupPID != 0);
@@ -2770,6 +3111,23 @@ SignalSomeChildren(int signal, bool only_autovac)
 				(errmsg_internal("sending signal %d to process %d",
 								 signal, (int) bp->pid)));
 		signal_child(bp->pid, signal);
+	}
+}
+
+/* Ditto, for forwarder children */
+static void
+SignalForwarderChildren(int signal)
+{
+	Dlelem	   *curr;
+
+	for (curr = DLGetHead(ForwarderChildren); curr; curr = DLGetSucc(curr))
+	{
+		ForwarderChild	*fp = (ForwarderChild *) DLE_VAL(curr);
+
+		ereport(DEBUG4,
+				(errmsg_internal("sending signal %d to process %d",
+								 signal, (int) fp->pid)));
+		signal_child(fp->pid, signal);
 	}
 }
 
@@ -2877,6 +3235,68 @@ BackendStartup(Port *port)
 	return STATUS_OK;
 }
 
+static int
+ForwarderChildStartup(Port *port)
+{
+	ForwarderChild *fp;
+	pid_t			pid;
+
+	fp = (ForwarderChild *) malloc(sizeof(ForwarderChild));
+	if (!fp)
+	{
+		ereport(LOG,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of memory")));
+		return STATUS_ERROR;
+	}
+
+	pid = fork_process();
+	if (pid == 0)		/* in child */
+	{
+		free(fp);
+
+		IsUnderPostmaster = true;	/* we are a postmaster subprocess now */
+		MyProcPid = getpid();
+		MyStartTime = time(NULL);
+
+		on_exit_reset();
+
+		ClosePostmasterPorts(false);
+
+		if (PreAuthDelay > 0)
+			pg_usleep(PreAuthDelay * 1000000L);
+
+		/* does not return; keep compiler quiet */
+		proc_exit(MCPServerHandleConnection(port));
+	}
+	else if (pid < 0)
+	{
+		/* in parent, fork failed */
+		int		save_errno = errno;
+
+		free(fp);
+		errno = save_errno;
+		ereport(LOG,
+				(errmsg("could not fork new process for forwarder connection: %m")));
+		report_fork_failure_to_client(port, save_errno);
+		return STATUS_ERROR;
+	}
+
+	/* in parent, successful fork */
+	ereport(DEBUG2,
+			(errmsg_internal("forked new backend, pid=%d socket=%d",
+							 (int) pid, port->sock)));
+
+	/*
+	 * Everything's been successful, it's safe to add this to our list
+	 * of forwarder children.
+	 */
+	fp->pid = pid;
+	DLAddHead(ForwarderChildren, DLNewElem(fp));
+
+	return STATUS_OK;
+}
+
 /*
  * Try to report backend fork() failure to client before we close the
  * connection.	Since we do not care to risk blocking the postmaster on
@@ -2885,7 +3305,7 @@ BackendStartup(Port *port)
  * This is grungy special-purpose code; we cannot use backend libpq since
  * it's not up and running.
  */
-static void
+void
 report_fork_failure_to_client(Port *port, int errnum)
 {
 	char		buffer[1000];
@@ -3618,7 +4038,9 @@ SubPostmasterMain(int argc, char *argv[])
 	if (strcmp(argv[1], "--forkbackend") == 0 ||
 		strcmp(argv[1], "--forkavlauncher") == 0 ||
 		strcmp(argv[1], "--forkavworker") == 0 ||
-		strcmp(argv[1], "--forkboot") == 0)
+		strcmp(argv[1], "--forkboot") == 0 ||
+		strcmp(argv[1], "--forkrepl") == 0 ||
+		strcmp(argv[1], "--forkfwhlpr") == 0)
 		PGSharedMemoryReAttach();
 
 	/* autovacuum needs this set before calling InitProcess */
@@ -3784,6 +4206,52 @@ SubPostmasterMain(int argc, char *argv[])
 		SysLoggerMain(argc, argv);
 		proc_exit(0);
 	}
+	if (strcmp(argv[1], "--forkrepl") == 0)
+	{
+		/* Close the postmaster's sockets */
+		ClosePostmasterPorts(true);
+
+		/* Restore basic shared memory pointers */
+		InitShmemAccess(UsedShmemSegAddr);
+
+		/* Need a PGPROC to run CreateSharedMemoryAndSemaphores */
+		InitAuxiliaryProcess();
+
+		/* Attach process to shared data structures */
+		CreateSharedMemoryAndSemaphores(false, 0);
+
+#ifdef USE_SSL
+		/*
+		 * Need to reinitialize the SSL library in the backend, since the
+		 * context structures contain function pointers and cannot be
+		 * passed through the parameter file.
+		 */
+		if (EnableSSL)
+			secure_initialize();
+#endif
+
+		Assert(argc == 3);		/* shouldn't be any more args */
+		ReplicationMain(argc, argv);
+		proc_exit(0);
+	}
+	if (strcmp(argv[1], "--forkfwhlpr") == 0)
+	{
+		/* Close the postmaster's sockets */
+		ClosePostmasterPorts(true);
+
+		/* Restore basic shared memory pointers */
+		InitShmemAccess(UsedShmemSegAddr);
+
+		/* Need a PGPROC to run CreateSharedMemoryAndSemaphores */
+		InitAuxiliaryProcess();
+
+		/* Attach process to shared data structures */
+		CreateSharedMemoryAndSemaphores(false, 0);
+
+		Assert(argc == 3);		/* shouldn't be any more args */
+		ForwarderHelperMain(argc, argv);
+		proc_exit(0);
+	}
 
 	return 1;					/* shouldn't get here */
 }
@@ -3873,6 +4341,29 @@ sigusr1_handler(SIGNAL_ARGS)
 	{
 		/* The autovacuum launcher wants us to start a worker process. */
 		StartAutovacuumWorker();
+	}
+
+	if (ReplicationPID != 0 && Shutdown == NoShutdown)
+	{
+		if (CheckPostmasterSignal(PMSIGNAL_REPLICATOR))
+		{
+			/*
+			 * Send SIGUSR1 to the replication process, which will act on it by
+			 * starting the appropiate promotion action.  The backend process
+			 * which signalled us must have previously set the promotion
+			 * parameters in shared memory!
+			 */
+			kill(ReplicationPID, SIGUSR1);
+		}
+	}
+	
+	if (CheckPostmasterSignal(PMSIGNAL_READ_FORWARDER_FLAT_FILE))
+	{
+		/* 
+		 * Re-read forwarder configuration and check whether replication process
+		 * can be enabled.
+		 */
+		check_forwarder_config();
 	}
 
 	PG_SETMASK(&UnBlockSig);

@@ -79,6 +79,7 @@ static void StoreRelCheck(Relation rel, char *ccname, char *ccbin);
 static void StoreConstraints(Relation rel, TupleDesc tupdesc);
 static void SetRelationNumChecks(Relation rel, int numchecks);
 static List *insert_ordered_unique_oid(List *list, Oid datum);
+void heap_pgr_truncate(Oid rid);
 
 
 /* ----------------------------------------------------------------
@@ -2399,4 +2400,36 @@ insert_ordered_unique_oid(List *list, Oid datum)
 	/* Insert datum into list after 'prev' */
 	lappend_cell_oid(list, prev, datum);
 	return list;
+}
+
+void
+heap_pgr_truncate(Oid rid)
+{
+	Relation	rel;
+	Oid			toastrelid;
+
+	/* Open relation for processing, and grab exclusive access on it. */
+	rel = heap_open(rid, ExclusiveLock);
+
+	/*
+	 * Release any buffers associated with this relation.  If they're
+	 * dirty, they're just dropped without bothering to flush to disk.
+	 */
+	DropRelFileNodeBuffers(rel->rd_node, false, 0);
+
+	/* Now truncate the actual data and set blocks to zero */
+	RelationTruncate(rel, 0);
+
+	/* If this relation has indexes, truncate the indexes too */
+	RelationTruncateIndexes(rel);
+
+	/* If it has a toast table, recursively truncate that too */
+	toastrelid = rel->rd_rel->reltoastrelid;
+	if (OidIsValid(toastrelid))
+		heap_truncate(list_make1_oid(toastrelid));
+
+	/*
+	 * Close the relation, but keep exclusive lock on it until commit.
+	 */
+	heap_close(rel, NoLock);
 }

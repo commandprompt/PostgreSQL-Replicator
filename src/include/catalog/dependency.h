@@ -144,6 +144,9 @@ typedef enum ObjectClass
 	OCLASS_ROLE,				/* pg_authid */
 	OCLASS_DATABASE,			/* pg_database */
 	OCLASS_TBLSPACE,			/* pg_tablespace */
+	OCLASS_REPLIC,				/* pg_catalog.repl_relations */
+	OCLASS_SLAVE_REPLIC,		/* pg_catalog.repl_slave_relations */
+	OCLASS_LO_REPLIC,			/* pg_catalog.repl_lo_columns */
 	MAX_OCLASS					/* MUST BE LAST */
 } ObjectClass;
 
@@ -199,6 +202,8 @@ extern void recordMultipleDependencies(const ObjectAddress *depender,
 
 extern long deleteDependencyRecordsFor(Oid classId, Oid objectId);
 
+extern void deleteDependencyRecordsForClass(Oid classId);
+
 extern long changeDependencyFor(Oid classId, Oid objectId,
 					Oid refClassId, Oid oldRefObjectId,
 					Oid newRefObjectId);
@@ -234,6 +239,8 @@ extern char *checkSharedDependencies(Oid classId, Oid objectId);
 extern void copyTemplateDependencies(Oid templateDbId, Oid newDbId);
 
 extern void dropDatabaseDependencies(Oid databaseId);
+
+extern List *shdepGetTablesDependingOnRole(Oid roleid);
 
 extern void shdepDropOwned(List *relids, DropBehavior behavior);
 

@@ -70,7 +70,8 @@ typedef enum
 	BootstrapProcess,
 	StartupProcess,
 	BgWriterProcess,
-	WalWriterProcess
+	WalWriterProcess,
+	MammothBootstrapProcess = 99
 } AuxProcType;
 
 #endif   /* BOOTSTRAP_H */

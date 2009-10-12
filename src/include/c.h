@@ -484,6 +484,10 @@ typedef NameData *Name;
 
 #define ESCAPE_STRING_SYNTAX	'E'
 
+/* Mammoth Replicator stuff */
+typedef uint64 ullong;
+#define UNI_LLU UINT64_FORMAT
+
 /* ----------------------------------------------------------------
  *				Section 4:	IsValid macros for system types
  * ----------------------------------------------------------------

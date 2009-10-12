@@ -1,0 +1,2 @@
+NOTICE:  CREATE TABLE will create implicit sequence "[a-z_]+" for serial column "[a-z_.]+"
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index.*

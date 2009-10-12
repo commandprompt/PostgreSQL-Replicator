@@ -165,6 +165,39 @@ deleteDependencyRecordsFor(Oid classId, Oid objectId)
 }
 
 /*
+ * deleteDependencyRecordsForClass -- delete all records with given
+ * depender class.
+ *
+ * This is used when a catalog is truncated.
+ */
+void
+deleteDependencyRecordsForClass(Oid classId)
+{
+	Relation 			depRel;
+	HeapTuple 			tuple;
+	SysScanDesc 		desc;
+	ScanKeyData 		entry[1];
+
+	depRel = heap_open(DependRelationId, RowExclusiveLock);
+	
+	ScanKeyInit(&entry[0],
+				Anum_pg_depend_classid,
+				BTEqualStrategyNumber,
+				F_OIDEQ,
+				ObjectIdGetDatum(classId));
+	
+	desc = systable_beginscan(depRel, DependDependerIndexId, true,
+							  SnapshotNow, 1, entry);
+	
+	while (HeapTupleIsValid(tuple = systable_getnext(desc)))
+		simple_heap_delete(depRel, &tuple->t_self);
+	
+	systable_endscan(desc);
+	
+	heap_close(depRel, RowExclusiveLock);
+}
+
+/*
  * Adjust dependency record(s) to point to a different object of the same type
  *
  * classId/objectId specify the referencing object.

@@ -100,4 +100,6 @@ extern void CheckAttributeNamesTypes(TupleDesc tupdesc, char relkind);
 
 extern void CheckAttributeType(const char *attname, Oid atttypid);
 
+extern void heap_pgr_truncate(Oid rid);
+
 #endif   /* HEAP_H */

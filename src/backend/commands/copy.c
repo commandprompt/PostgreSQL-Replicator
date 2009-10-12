@@ -29,10 +29,12 @@
 #include "executor/executor.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
+#include "mammoth_r/pgr.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "optimizer/planner.h"
 #include "parser/parse_relation.h"
+#include "postmaster/replication.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/fd.h"
 #include "tcop/tcopprot.h"
@@ -1769,6 +1771,15 @@ CopyFrom(CopyState cstate)
 	slot = MakeSingleTupleTableSlot(tupDesc);
 
 	econtext = GetPerTupleExprContext(estate);
+
+	/*
+	 * Emit some replicator noise and check that it's not a slave table.
+	 */
+	if (replication_enable && cstate->rel->rd_replicate && replication_slave)
+		ereport(ERROR,
+				(errmsg("cannot COPY to relation \"%s\"",
+						RelationGetRelationName(cstate->rel)),
+				 errdetail("Table is under replication.")));
 
 	/*
 	 * Pick up the required catalog information for each attribute in the

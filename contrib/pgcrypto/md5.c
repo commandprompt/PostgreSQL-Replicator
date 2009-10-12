@@ -1,4 +1,4 @@
-/*	   $KAME$	   */
+/*	   $KAME: md5.c,v 1.3 2000/02/22 14:01:17 itojun Exp $	   */
 
 /*
  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.

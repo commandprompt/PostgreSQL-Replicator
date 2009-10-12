@@ -14,6 +14,8 @@
 #ifndef LWLOCK_H
 #define LWLOCK_H
 
+#include "mammoth_r/repl_limits.h"
+
 /*
  * It's a bit odd to declare NUM_BUFFER_PARTITIONS and NUM_LOCK_PARTITIONS
  * here, but we need them to set up enum LWLockId correctly, and having
@@ -58,6 +60,18 @@ typedef enum LWLockId
 	BgWriterCommLock,
 	TwoPhaseStateLock,
 	TablespaceCreateLock,
+	ReplicationLock,
+	ReplicationCommitLock,
+	BackendQueueLock,
+	ForwarderQueueLock,
+	ReplicationQueueTruncateLock,
+	BackendTxlogControlLock,
+	ForwarderTxlogControlLock,
+	MCPServerLock,
+	MCPHostsLock,
+    /* Do not put any locks between MCPHostLock and MCPHostLastLock */
+	MCPLastHostLock = MCPHostsLock + MCP_MAX_SLAVES,
+    MCPTableListLock,
 	BtreeVacuumLock,
 	AddinShmemInitLock,
 	AutovacuumLock,

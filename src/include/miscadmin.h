@@ -281,13 +281,16 @@ extern bool superuser_arg(Oid roleid);	/* given user is superuser */
 typedef enum ProcessingMode
 {
 	BootstrapProcessing,		/* bootstrap creation of template database */
+	MammothBootstrapProcessing,	/* special bootstrap mode for Mammoth */
 	InitProcessing,				/* initializing system */
 	NormalProcessing			/* normal processing */
 } ProcessingMode;
 
 extern ProcessingMode Mode;
 
-#define IsBootstrapProcessingMode() ((bool)(Mode == BootstrapProcessing))
+#define IsBootstrapProcessingMode() ((bool)(Mode == BootstrapProcessing) || \
+									 (bool)(Mode == MammothBootstrapProcessing))
+#define IsMammothBootstrapProcessingMode() ((bool)(Mode == MammothBootstrapProcessing))
 #define IsInitProcessingMode() ((bool)(Mode == InitProcessing))
 #define IsNormalProcessingMode() ((bool)(Mode == NormalProcessing))
 
@@ -295,6 +298,7 @@ extern ProcessingMode Mode;
 	do { \
 		AssertArg((mode) == BootstrapProcessing || \
 				  (mode) == InitProcessing || \
+				  (mode) == MammothBootstrapProcessing || \
 				  (mode) == NormalProcessing); \
 		Mode = (mode); \
 	} while(0)

@@ -152,8 +152,8 @@ static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args)
 		AlterDatabaseStmt AlterDatabaseSetStmt AlterDomainStmt AlterGroupStmt
 		AlterObjectSchemaStmt AlterOwnerStmt AlterSeqStmt AlterTableStmt
 		AlterUserStmt AlterUserSetStmt AlterRoleStmt AlterRoleSetStmt
-		AnalyzeStmt ClosePortalStmt ClusterStmt CommentStmt
-		ConstraintsSetStmt CopyStmt CreateAsStmt CreateCastStmt
+		AlterRoleSlaveReplicationStmt AnalyzeStmt ClosePortalStmt ClusterStmt 
+		CommentStmt ConstraintsSetStmt CopyStmt CreateAsStmt CreateCastStmt
 		CreateDomainStmt CreateGroupStmt CreateOpClassStmt
 		CreateOpFamilyStmt AlterOpFamilyStmt CreatePLangStmt
 		CreateSchemaStmt CreateSeqStmt CreateStmt CreateTableSpaceStmt
@@ -163,7 +163,7 @@ static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args)
 		DropAssertStmt DropTrigStmt DropRuleStmt DropCastStmt DropRoleStmt
 		DropUserStmt DropdbStmt DropTableSpaceStmt ExplainStmt FetchStmt
 		GrantStmt GrantRoleStmt IndexStmt InsertStmt ListenStmt LoadStmt
-		LockStmt NotifyStmt ExplainableStmt PreparableStmt
+		LockStmt McpStmt NotifyStmt ExplainableStmt PreparableStmt PromoteStmt
 		CreateFunctionStmt AlterFunctionStmt ReindexStmt RemoveAggrStmt
 		RemoveFuncStmt RemoveOperStmt RenameStmt RevokeStmt RevokeRoleStmt
 		RuleActionStmt RuleActionStmtOrEmpty RuleStmt
@@ -174,6 +174,7 @@ static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args)
 		DeallocateStmt PrepareStmt ExecuteStmt
 		DropOwnedStmt ReassignOwnedStmt
 		AlterTSConfigurationStmt AlterTSDictionaryStmt
+		CreateForwarderStmt DropForwarderStmt AlterForwarderStmt
 
 %type <node>	select_no_parens select_with_parens select_clause
 				simple_select values_clause
@@ -370,7 +371,7 @@ static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args)
 	AGGREGATE ALL ALSO ALTER ALWAYS ANALYSE ANALYZE AND ANY ARRAY AS ASC
 	ASSERTION ASSIGNMENT ASYMMETRIC AT AUTHORIZATION
 
-	BACKWARD BEFORE BEGIN_P BETWEEN BIGINT BINARY BIT
+	BACK BACKWARD BATCHUPDATE BEFORE BEGIN_P BETWEEN BIGINT BINARY BIT
 	BOOLEAN_P BOTH BY
 
 	CACHE CALLED CASCADE CASCADED CASE CAST CHAIN CHAR_P
@@ -388,7 +389,7 @@ static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args)
 	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EXCEPT EXCLUDING
 	EXCLUSIVE EXECUTE EXISTS EXPLAIN EXTERNAL EXTRACT
 
-	FALSE_P FAMILY FETCH FIRST_P FLOAT_P FOR FORCE FOREIGN FORWARD
+	FALSE_P FAMILY FETCH FIRST_P FLOAT_P FOR FORCE FOREIGN FORWARD FORWARDER
 	FREEZE FROM FULL FUNCTION
 
 	GLOBAL GRANT GRANTED GREATEST GROUP_P
@@ -405,10 +406,10 @@ static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args)
 	KEY
 
 	LANCOMPILER LANGUAGE LARGE_P LAST_P LEADING LEAST LEFT LEVEL
-	LIKE LIMIT LISTEN LOAD LOCAL LOCALTIME LOCALTIMESTAMP LOCATION
+	LIKE LIMIT LISTEN LO LOAD LOCAL LOCALTIME LOCALTIMESTAMP LOCATION
 	LOCK_P LOGIN_P
 
-	MAPPING MATCH MAXVALUE MINUTE_P MINVALUE MODE MONTH_P MOVE
+	MAPPING MATCH MAXVALUE MCP MINUTE_P MINVALUE MODE MONTH_P MOVE
 
 	NAME_P NAMES NATIONAL NATURAL NCHAR NEW NEXT NO NOCREATEDB
 	NOCREATEROLE NOCREATEUSER NOINHERIT NOLOGIN_P NONE NOSUPERUSER
@@ -419,17 +420,17 @@ static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args)
 
 	PARSER PARTIAL PASSWORD PLACING PLANS POSITION
 	PRECISION PRESERVE PREPARE PREPARED PRIMARY
-	PRIOR PRIVILEGES PROCEDURAL PROCEDURE
+	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROMOTE
 
 	QUOTE
 
-	READ REAL REASSIGN RECHECK REFERENCES REINDEX RELATIVE_P RELEASE RENAME
-	REPEATABLE REPLACE REPLICA RESET RESTART RESTRICT RETURNING RETURNS REVOKE
-	RIGHT ROLE ROLLBACK ROW ROWS RULE
+	READ REAL REASSIGN RECHECK REFERENCES REFRESH REINDEX RELATIVE_P RELEASE 
+	RENAME REPEATABLE REPLACE REPLICA REPLICATION RESET RESTART RESTRICT 
+	RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROW ROWS RULE
 
 	SAVEPOINT SCHEMA SCROLL SEARCH SECOND_P SECURITY SELECT SEQUENCE
 	SERIALIZABLE SESSION SESSION_USER SET SETOF SHARE
-	SHOW SIMILAR SIMPLE SMALLINT SOME STABLE STANDALONE_P START STATEMENT
+	SHOW SIMILAR SIMPLE SLAVE SMALLINT SOME STABLE STANDALONE_P START STATEMENT
 	STATISTICS STDIN STDOUT STORAGE STRICT_P STRIP_P SUBSTRING SUPERUSER_P
 	SYMMETRIC SYSID SYSTEM_P
 
@@ -537,6 +538,7 @@ stmt :
 			| AlterSeqStmt
 			| AlterTableStmt
 			| AlterRoleSetStmt
+			| AlterRoleSlaveReplicationStmt
 			| AlterRoleStmt
 			| AlterTSConfigurationStmt
 			| AlterTSDictionaryStmt
@@ -597,8 +599,10 @@ stmt :
 			| ListenStmt
 			| LoadStmt
 			| LockStmt
+			| McpStmt
 			| NotifyStmt
 			| PrepareStmt
+            | PromoteStmt
 			| ReassignOwnedStmt
 			| ReindexStmt
 			| RemoveAggrStmt
@@ -618,6 +622,9 @@ stmt :
 			| VariableSetStmt
 			| VariableShowStmt
 			| ViewStmt
+			| CreateForwarderStmt
+			| DropForwarderStmt
+			| AlterForwarderStmt
 			| /*EMPTY*/
 				{ $$ = NULL; }
 		;
@@ -801,6 +808,27 @@ AlterRoleSetStmt:
 					AlterRoleSetStmt *n = makeNode(AlterRoleSetStmt);
 					n->role = $3;
 					n->setstmt = $4;
+					$$ = (Node *)n;
+				}
+		;
+AlterRoleSlaveReplicationStmt:
+		 	ALTER ROLE RoleId ENABLE_P REPLICATION ON SLAVE Iconst
+				{
+					AlterRoleSlaveReplicationStmt *n = 
+						makeNode(AlterRoleSlaveReplicationStmt);
+					n->role = $3;
+					n->enable = TRUE;
+					n->slaveno = $8;
+					$$ = (Node *)n;
+				}
+		|
+			ALTER ROLE RoleId DISABLE_P REPLICATION ON SLAVE Iconst
+				{
+					AlterRoleSlaveReplicationStmt *n =
+						makeNode(AlterRoleSlaveReplicationStmt);
+					n->role = $3;
+					n->enable = FALSE;
+					n->slaveno = $8;
 					$$ = (Node *)n;
 				}
 		;
@@ -1467,6 +1495,22 @@ alter_table_cmd:
 					n->def = (Node *) makeString($6);
 					$$ = (Node *)n;
 				}
+			/* ALTER TABLE <relation> ALTER [COLUMN] <colname> ENABLE LO */
+			| ALTER opt_column ColId ENABLE_P LO
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_EnableLO;
+					n->name = $3;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <relation> ALTER [COLUMN] <colname> DISABLE LO */
+			| ALTER opt_column ColId DISABLE_P LO
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_DisableLO;
+					n->name = $3;
+					$$ = (Node *)n;
+				}
 			/* ALTER TABLE <relation> DROP [COLUMN] <colname> [RESTRICT|CASCADE] */
 			| DROP opt_column ColId opt_drop_behavior
 				{
@@ -1527,6 +1571,34 @@ alter_table_cmd:
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 					n->subtype = AT_DropCluster;
 					n->name = NULL;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> ENABLE REPLICATION */
+			| ENABLE_P REPLICATION
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_EnableReplication;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> DISABLE REPLICATION */
+			| DISABLE_P REPLICATION
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_DisableReplication;
+					$$ = (Node *)n;
+				}
+			| ENABLE_P REPLICATION ON SLAVE Iconst
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_EnableReplicationSlave;
+					n->def = (Node *)makeInteger($5);
+					$$ = (Node *)n;
+				}
+			| DISABLE_P REPLICATION ON SLAVE Iconst
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_DisableReplicationSlave;
+					n->def = (Node *)makeInteger($5);
 					$$ = (Node *)n;
 				}
 			/* ALTER TABLE <name> ENABLE TRIGGER <trig> */
@@ -5737,6 +5809,73 @@ opt_name_list:
 			| /*EMPTY*/								{ $$ = NIL; }
 		;
 
+/*****************************************************************************
+ *
+ *		QUERY:
+ *				MCP REFRESH tablename
+ *				MCP BATCHUPDATE
+ *				PROMOTE [FORCE | BACK]
+ *****************************************************************************/
+
+McpStmt: MCP REFRESH qualified_name
+				{
+					elog(ERROR, "MCP REFRESH not implemented yet");
+				}
+		| MCP BATCHUPDATE
+				{
+					McpStmt *n = makeNode(McpStmt);
+					n->kind = McpBatchUpdate;
+					$$ = (Node *)n;
+				}
+		;
+
+PromoteStmt: PROMOTE opt_force
+				{
+					PromoteStmt *n = makeNode(PromoteStmt);
+					n->force = $2;
+					n->back = false;
+					$$ = (Node *)n;
+				}
+			| PROMOTE BACK
+				{
+					PromoteStmt *n = makeNode(PromoteStmt);
+					n->force = false;
+					n->back = true;
+					$$ = (Node *)n;
+				}
+		;
+
+/*****************************************************************************
+ *
+ *		QUERY:
+ *				CREATE FORWARDER name (host = 'ip-address', port = nn, ...)
+ *				DROP FORWARDER name
+ *****************************************************************************/
+CreateForwarderStmt: CREATE FORWARDER name definition
+					{
+						CreateForwarderStmt *n = makeNode(CreateForwarderStmt);
+						n->name = $3;
+						n->parameters = $4;
+						$$ = (Node *) n;
+					}
+			;
+
+DropForwarderStmt: DROP FORWARDER name
+					{
+						DropForwarderStmt *n = makeNode(DropForwarderStmt);
+						n->name = $3;
+						$$ = (Node *) n;
+					}
+			;
+
+AlterForwarderStmt: ALTER FORWARDER name definition
+					{
+						AlterForwarderStmt *n = makeNode(AlterForwarderStmt);
+						n->name = $3;
+						n->options = $4;
+						$$ = (Node *) n;
+					}
+			;
 
 /*****************************************************************************
  *
@@ -9013,7 +9152,9 @@ unreserved_keyword:
 			| ASSERTION
 			| ASSIGNMENT
 			| AT
+			| BACK
 			| BACKWARD
+			| BATCHUPDATE
 			| BEFORE
 			| BEGIN_P
 			| BY
@@ -9078,6 +9219,7 @@ unreserved_keyword:
 			| FIRST_P
 			| FORCE
 			| FORWARD
+			| FORWARDER
 			| FUNCTION
 			| GLOBAL
 			| GRANTED
@@ -9108,6 +9250,7 @@ unreserved_keyword:
 			| LAST_P
 			| LEVEL
 			| LISTEN
+			| LO
 			| LOAD
 			| LOCAL
 			| LOCATION
@@ -9116,6 +9259,7 @@ unreserved_keyword:
 			| MAPPING
 			| MATCH
 			| MAXVALUE
+			| MCP
 			| MINUTE_P
 			| MINVALUE
 			| MODE
@@ -9153,10 +9297,12 @@ unreserved_keyword:
 			| PRIVILEGES
 			| PROCEDURAL
 			| PROCEDURE
+			| PROMOTE
 			| QUOTE
 			| READ
 			| REASSIGN
 			| RECHECK
+			| REFRESH
 			| REINDEX
 			| RELATIVE_P
 			| RELEASE
@@ -9164,6 +9310,7 @@ unreserved_keyword:
 			| REPEATABLE
 			| REPLACE
 			| REPLICA
+			| REPLICATION
 			| RESET
 			| RESTART
 			| RESTRICT
@@ -9186,6 +9333,7 @@ unreserved_keyword:
 			| SHARE
 			| SHOW
 			| SIMPLE
+			| SLAVE
 			| STABLE
 			| STANDALONE_P
 			| START

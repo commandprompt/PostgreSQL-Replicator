@@ -1,0 +1,1 @@
+SELECT enable_replication_by_schema('command prompt', ARRAY[0, 2]);

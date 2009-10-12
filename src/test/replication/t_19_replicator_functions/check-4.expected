@@ -1,0 +1,36 @@
+SELECT is_replicated('"command prompt"."public projects"');
+ is_replicated 
+---------------
+ f
+(1 row)
+
+SELECT is_replicated('"command prompt"."secret projects"');
+ is_replicated 
+---------------
+ f
+(1 row)
+
+SELECT is_replicated('"123'' junk"."root passwords"');
+ is_replicated 
+---------------
+ t
+(1 row)
+
+SELECT get_replication_status('"command prompt"."public projects"');
+ get_replication_status 
+------------------------
+ Replication disabled
+(1 row)
+
+SELECT get_replication_status('"command prompt"."secret projects"');
+ get_replication_status 
+------------------------
+ Replication disabled
+(1 row)
+
+SELECT get_replication_status('"123'' junk"."root passwords"');
+      get_replication_status      
+----------------------------------
+ Replication enabled on slaves: 0
+(1 row)
+

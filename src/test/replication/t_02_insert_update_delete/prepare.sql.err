@@ -1,0 +1,2 @@
+psql:.+test2/prepare.sql:1: NOTICE:  CREATE TABLE will create implicit sequence "test_1_col1_seq" for serial column "test_1.col1"
+psql:.+test2/prepare.sql:1: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_1_pkey" for table "test_1"

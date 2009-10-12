@@ -40,6 +40,7 @@ MemoryContext CurrentMemoryContext = NULL;
  */
 MemoryContext TopMemoryContext = NULL;
 MemoryContext ErrorContext = NULL;
+MemoryContext ReplRollbackContext = NULL;
 MemoryContext PostmasterContext = NULL;
 MemoryContext CacheMemoryContext = NULL;
 MemoryContext MessageContext = NULL;
@@ -108,6 +109,17 @@ MemoryContextInit(void)
 										 8 * 1024,
 										 8 * 1024,
 										 8 * 1024);
+
+	/* 
+	 * ReplRollbackContext initialization. This context is used on rollback
+	 * to allocate memory for replication of sequences.
+	 */
+	ReplRollbackContext = AllocSetContextCreate(TopMemoryContext,
+												"ReplRollbackContext",
+												8 * 1024,
+												8 * 1024,
+												8 * 1024);
+
 }
 
 /*

@@ -13,11 +13,12 @@ include $(top_builddir)/src/Makefile.global
 OBJS = catalog.o dependency.o heap.o index.o indexing.o namespace.o aclchk.o \
        pg_aggregate.o pg_constraint.o pg_conversion.o pg_depend.o pg_enum.o \
        pg_largeobject.o pg_namespace.o pg_operator.o pg_proc.o pg_shdepend.o \
-       pg_type.o toasting.o
+	   pg_type.o toasting.o replication.o
 
-BKIFILES = postgres.bki postgres.description postgres.shdescription
+BKIFILES = postgres.bki postgres.description postgres.shdescription mammoth.bki
+MAMMOTH_SQL = mammoth_pk_indexes.sql
 
-all: SUBSYS.o $(BKIFILES)
+all: SUBSYS.o $(BKIFILES) $(MAMMOTH_SQL)
 
 SUBSYS.o: $(OBJS)
 	$(LD) $(LDREL) $(LDOUT) SUBSYS.o $(OBJS)
@@ -50,6 +51,18 @@ postgres.shdescription: postgres.bki ;
 postgres.bki: genbki.sh $(POSTGRES_BKI_SRCS) $(top_builddir)/src/include/pg_config_manual.h
 	AWK='$(AWK)' $(SHELL) $< $(pg_includes) --set-version=$(VERSION) -o postgres $(POSTGRES_BKI_SRCS)
 
+MAMMOTH_BKI_SRCS := $(addprefix $(top_srcdir)/src/include/catalog/,\
+	replication.h repl_relations.h repl_versions.h repl_lo_columns.h \
+	repl_slave_lo_refs.h repl_master_lo_refs.h repl_slave_relations.h \
+	repl_authid.h repl_auth_members.h repl_acl.h repl_slave_roles.h \
+	repl_forwarder.h pg_mammoth_proc.h mammoth_indexing.h )
+
+mammoth.bki: genbki.sh $(MAMMOTH_BKI_SRCS) \
+	$(top_srcdir)/src/include/postgres_ext.h $(top_builddir)/src/include/pg_config_manual.h
+	AWK='$(AWK)' $(SHELL) $< $(pg_includes) --set-version=$(VERSION) -o mammoth $(MAMMOTH_BKI_SRCS)
+$(MAMMOTH_SQL):  gen-mammoth-init.sh $(top_srcdir)/src/include/catalog/mammoth_indexing.h
+	AWK='$(AWK)' $(SHELL) $< < $(top_srcdir)/src/include/catalog/mammoth_indexing.h > $@
+
 .PHONY: install-data
 install-data: $(BKIFILES) installdirs
 	$(INSTALL_DATA) postgres.bki         '$(DESTDIR)$(datadir)/postgres.bki'
@@ -58,13 +71,15 @@ install-data: $(BKIFILES) installdirs
 	$(INSTALL_DATA) $(srcdir)/system_views.sql '$(DESTDIR)$(datadir)/system_views.sql'
 	$(INSTALL_DATA) $(srcdir)/information_schema.sql '$(DESTDIR)$(datadir)/information_schema.sql'
 	$(INSTALL_DATA) $(srcdir)/sql_features.txt '$(DESTDIR)$(datadir)/sql_features.txt'
+	$(INSTALL_DATA) mammoth.bki         '$(DESTDIR)$(datadir)/mammoth.bki'
+	$(INSTALL_DATA) $(MAMMOTH_SQL) '$(DESTDIR)$(datadir)/$(MAMMOTH_SQL)'
 
 installdirs:
 	$(mkinstalldirs) '$(DESTDIR)$(datadir)'
 
 .PHONY: uninstall-data
 uninstall-data:
-	rm -f $(addprefix '$(DESTDIR)$(datadir)'/, $(BKIFILES) system_views.sql information_schema.sql sql_features.txt)
+	rm -f $(addprefix '$(DESTDIR)$(datadir)'/, $(BKIFILES) system_views.sql information_schema.sql sql_features.txt '$(MAMMOTH_SQL)')
 
 clean:
-	rm -f SUBSYS.o $(OBJS) $(BKIFILES)
+	rm -f SUBSYS.o $(OBJS) $(BKIFILES) $(MAMMOTH_SQL)

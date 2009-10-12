@@ -46,15 +46,17 @@ typedef struct
  */
 extern int StreamServerPort(int family, char *hostName,
 		 unsigned short portNumber, char *unixSocketName, int ListenSocket[],
-				 int MaxListen);
+				 int MaxListen, bool ListenSocketIsForw[], bool isForwarder);
 extern int	StreamConnection(int server_fd, Port *port);
 extern void StreamClose(int sock);
 extern void TouchSocketFile(void);
 extern void pq_init(void);
+extern void pq_reset(void);
 extern void pq_comm_reset(void);
 extern int	pq_getbytes(char *s, size_t len);
 extern int	pq_getstring(StringInfo s);
 extern int	pq_getmessage(StringInfo s, int maxlen);
+extern bool pq_arebytes(void);
 extern int	pq_getbyte(void);
 extern int	pq_peekbyte(void);
 extern int	pq_putbytes(const char *s, size_t len);
@@ -69,6 +71,7 @@ extern void pq_endcopyout(bool errorAbort);
 extern int	secure_initialize(void);
 extern void secure_destroy(void);
 extern int	secure_open_server(Port *port);
+extern int	secure_open_client(Port *port);
 extern void secure_close(Port *port);
 extern ssize_t secure_read(Port *port, void *ptr, size_t len);
 extern ssize_t secure_write(Port *port, void *ptr, size_t len);

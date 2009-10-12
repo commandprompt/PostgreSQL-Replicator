@@ -81,15 +81,6 @@ static TupleTableSlot *ExecutePlan(EState *estate, PlanState *planstate,
 			DestReceiver *dest);
 static void ExecSelect(TupleTableSlot *slot,
 		   DestReceiver *dest, EState *estate);
-static void ExecInsert(TupleTableSlot *slot, ItemPointer tupleid,
-		   TupleTableSlot *planSlot,
-		   DestReceiver *dest, EState *estate);
-static void ExecDelete(ItemPointer tupleid,
-		   TupleTableSlot *planSlot,
-		   DestReceiver *dest, EState *estate);
-static void ExecUpdate(TupleTableSlot *slot, ItemPointer tupleid,
-		   TupleTableSlot *planSlot,
-		   DestReceiver *dest, EState *estate);
 static void ExecProcessReturning(ProjectionInfo *projectReturning,
 					 TupleTableSlot *tupleSlot,
 					 TupleTableSlot *planSlot,
@@ -1564,7 +1555,7 @@ ExecSelect(TupleTableSlot *slot,
  *		index relations.
  * ----------------------------------------------------------------
  */
-static void
+void
 ExecInsert(TupleTableSlot *slot,
 		   ItemPointer tupleid,
 		   TupleTableSlot *planSlot,
@@ -1660,7 +1651,7 @@ ExecInsert(TupleTableSlot *slot,
  *		index modifications are needed
  * ----------------------------------------------------------------
  */
-static void
+void
 ExecDelete(ItemPointer tupleid,
 		   TupleTableSlot *planSlot,
 		   DestReceiver *dest,
@@ -1794,7 +1785,7 @@ ldelete:;
  *		which corrupts your database..
  * ----------------------------------------------------------------
  */
-static void
+void
 ExecUpdate(TupleTableSlot *slot,
 		   ItemPointer tupleid,
 		   TupleTableSlot *planSlot,

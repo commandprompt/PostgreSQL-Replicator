@@ -36,9 +36,13 @@
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
+#include "catalog/replication.h"
+#include "catalog/repl_master_lo_refs.h"
 #include "catalog/pg_largeobject.h"
 #include "commands/comment.h"
 #include "libpq/libpq-fs.h"
+#include "mammoth_r/pgr.h"
+#include "postmaster/replication.h"
 #include "storage/large_object.h"
 #include "utils/fmgroids.h"
 #include "utils/resowner.h"
@@ -283,6 +287,22 @@ inv_close(LargeObjectDesc *obj_desc)
 int
 inv_drop(Oid lobjId)
 {
+	/* Check if we replicate this large object and number of references == 0 */
+	if (replication_enable && replication_master)
+	{
+		int		refs;
+
+		/*
+		 * Get the number of references, and maybe delete the references tuple
+		 * if there are 0 of them
+		 */
+		refs = LOoidGetMasterRefs(lobjId, true);
+
+		/* tuple wasn't deleted, can't drop the object */
+		if (refs > 0)
+			return -1;
+	}
+
 	LargeObjectDrop(lobjId);
 
 	/* Delete any comments on the large object */
@@ -293,6 +313,9 @@ inv_drop(Oid lobjId)
 	 * large-object operations in this transaction.
 	 */
 	CommandCounterIncrement();
+
+	if (replication_enable && replication_master)
+		PGRCollectDropLO(lobjId, GetCurrentCommandId(false));
 
 	return 1;
 }
@@ -692,6 +715,22 @@ inv_write(LargeObjectDesc *obj_desc, const char *buf, int nbytes)
 	 * large-object operations in this transaction.
 	 */
 	CommandCounterIncrement();
+
+	/* Collect the data for replicating to slave */
+	if (replication_enable && replication_master)
+	{
+		HeapTuple tuple = palloc(sizeof(HeapTupleData));
+
+		tuple->t_data = palloc(offsetof(HeapTupleHeaderData, t_bits) +
+				MAXALIGN(nbytes));
+		tuple->t_len = nbytes;
+		memcpy((char *)tuple->t_data->t_bits, buf, nbytes);
+
+		PGRCollectWriteLO(tuple, obj_desc->id, GetCurrentCommandId(false));
+
+		pfree(tuple->t_data);
+		pfree(tuple);
+	}
 
 	return nwritten;
 }

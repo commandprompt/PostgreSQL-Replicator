@@ -1090,6 +1090,47 @@ isSharedObjectPinned(Oid classId, Oid objectId, Relation sdepRel)
 	return result;
 }
 
+List *
+shdepGetTablesDependingOnRole(Oid roleid)
+{
+	Relation	sdepRel;
+	SysScanDesc	scan;
+	ScanKeyData	key[2];
+	HeapTuple	tup;
+	List	   *rels = NIL;
+
+	sdepRel = heap_open(SharedDependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_shdepend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(AuthIdRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_shdepend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(roleid));
+
+	scan = systable_beginscan(sdepRel, SharedDependReferenceIndexId, true,
+							  SnapshotNow, 2, key);
+
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_shdepend shdepForm = (Form_pg_shdepend) GETSTRUCT(tup);
+
+		/* only consider relations */
+		if (shdepForm->classid != RelationRelationId)
+			continue;
+
+		rels = lappend_oid(rels, shdepForm->objid);
+	}
+
+	systable_endscan(scan);
+
+	heap_close(sdepRel, AccessShareLock);
+
+	return rels;
+}
+
 /*
  * shdepDropOwned
  *

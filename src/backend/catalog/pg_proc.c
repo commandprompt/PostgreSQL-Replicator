@@ -84,7 +84,6 @@ ProcedureCreate(const char *procedureName,
 	bool		genericOutParam = false;
 	bool		internalInParam = false;
 	bool		internalOutParam = false;
-	Oid			proowner = GetUserId();
 	Relation	rel;
 	HeapTuple	tup;
 	HeapTuple	oldtup;
@@ -225,7 +224,7 @@ ProcedureCreate(const char *procedureName,
 	namestrcpy(&procname, procedureName);
 	values[Anum_pg_proc_proname - 1] = NameGetDatum(&procname);
 	values[Anum_pg_proc_pronamespace - 1] = ObjectIdGetDatum(procNamespace);
-	values[Anum_pg_proc_proowner - 1] = ObjectIdGetDatum(proowner);
+	values[Anum_pg_proc_proowner - 1] = ObjectIdGetDatum(GetUserId());
 	values[Anum_pg_proc_prolang - 1] = ObjectIdGetDatum(languageObjectId);
 	values[Anum_pg_proc_procost - 1] = Float4GetDatum(procost);
 	values[Anum_pg_proc_prorows - 1] = Float4GetDatum(prorows);
@@ -280,7 +279,7 @@ ProcedureCreate(const char *procedureName,
 					(errcode(ERRCODE_DUPLICATE_FUNCTION),
 			errmsg("function \"%s\" already exists with same argument types",
 				   procedureName)));
-		if (!pg_proc_ownercheck(HeapTupleGetOid(oldtup), proowner))
+		if (!pg_proc_ownercheck(HeapTupleGetOid(oldtup), GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_PROC,
 						   procedureName);
 
@@ -334,10 +333,7 @@ ProcedureCreate(const char *procedureName,
 								procedureName)));
 		}
 
-		/*
-		 * Do not change existing ownership or permissions, either.  Note
-		 * dependency-update code below has to agree with this decision.
-		 */
+		/* do not change existing ownership or permissions, either */
 		replaces[Anum_pg_proc_proowner - 1] = ' ';
 		replaces[Anum_pg_proc_proacl - 1] = ' ';
 
@@ -364,11 +360,12 @@ ProcedureCreate(const char *procedureName,
 	/*
 	 * Create dependencies for the new function.  If we are updating an
 	 * existing function, first delete any existing pg_depend entries.
-	 * (However, since we are not changing ownership or permissions, the
-	 * shared dependencies do *not* need to change, and we leave them alone.)
 	 */
 	if (is_update)
+	{
 		deleteDependencyRecordsFor(ProcedureRelationId, retval);
+		deleteSharedDependencyRecordsFor(ProcedureRelationId, retval);
+	}
 
 	myself.classId = ProcedureRelationId;
 	myself.objectId = retval;
@@ -402,8 +399,7 @@ ProcedureCreate(const char *procedureName,
 	}
 
 	/* dependency on owner */
-	if (!is_update)
-		recordDependencyOnOwner(ProcedureRelationId, retval, proowner);
+	recordDependencyOnOwner(ProcedureRelationId, retval, GetUserId());
 
 	heap_freetuple(tup);
 

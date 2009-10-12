@@ -1,0 +1,2 @@
+DROP ROLE "123foo.=5-3";
+DROP ROLE bar;

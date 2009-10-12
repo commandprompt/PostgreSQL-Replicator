@@ -37,6 +37,9 @@
  */
 #define ProcedureRelationId  1255
 
+#define DATA_MAMMOTH(x) extern int no_such_variable
+#define DESCR_MAMMOTH(x)    extern int no_such_variable
+
 CATALOG(pg_proc,1255) BKI_BOOTSTRAP
 {
 	NameData	proname;		/* procedure name */
@@ -4415,6 +4418,28 @@ DESCR("get set of in-progress txids in snapshot");
 DATA(insert OID = 2948 (  txid_visible_in_snapshot	PGNSP PGUID 12 1  0 f f t f i 2 16 "20 2970" _null_ _null_ _null_ txid_visible_in_snapshot - _null_ _null_ ));
 DESCR("is txid visible in snapshot?");
 
+
+/* NOTE: these are ignored by the standard genbki.sh call */
+DATA_MAMMOTH(insert OID = 820 ( replicate_relations     PGNSP PGUID 12 1 0 f f t f v 0 2279 "" _null_ _null_ _null_ replicate_relations - _null_ _null_ ));
+DESCR_MAMMOTH("fixes repl_relations entry on slaves");
+DATA_MAMMOTH(insert OID = 821 ( replicate_slave_relations PGNSP PGUID 12 1 0 f f t f v 0 2279 "" _null_ _null_ _null_ replicate_slave_relations - _null_ _null_ ));
+DESCR_MAMMOTH("fixes repl_slave_relations entry on slaves");
+DATA_MAMMOTH(insert OID = 323 ( replicate_lo_columns    PGNSP PGUID 12 1 0 f f t f v 0 2279 "" _null_ _null_ _null_ replicate_lo_columns - _null_ _null_ ));
+DESCR_MAMMOTH("fixes repl_lo_columns entry on slaves");
+DATA_MAMMOTH(insert OID = 196 ( replicate_authid        PGNSP PGUID 12 1 0 f f t f v 0 2279 "" _null_ _null_ _null_ replicate_authid - _null_ _null_ ));
+DESCR_MAMMOTH("creates roles from tuples in repl_authid");
+DATA_MAMMOTH(insert OID = 324 ( replicate_auth_members  PGNSP PGUID 12 1 0 f f t f v 0 2279 "" _null_ _null_ _null_ replicate_auth_members - _null_ _null_ ));
+DESCR_MAMMOTH("creates role members from tuples in repl_auth_members");
+DATA_MAMMOTH(insert OID = 276 ( replicate_acl           PGNSP PGUID 12 1 0 f f t f v 0 2279 "" _null_ _null_ _null_ replicate_acl - _null_ _null_ ));
+DESCR_MAMMOTH("updates ACL in tables from tuples in repl_acl");
+DATA_MAMMOTH(insert OID = 824 (drop_replicated_role  PGNSP PGUID 12 1 0 f f t f v 0 2279 "" _null_ _null_ _null_ drop_replicated_role - _null_ _null_ ));
+DESCR_MAMMOTH("drops a role on deleting a corresponding tuple from repl_roles");
+DATA_MAMMOTH(insert OID = 2965 ( forwarder_status     PGNSP PGUID 12 1 0 f f t f v 0 2249 "" "{20,20,20,20,23,16,1184,1184}" "{o,o,o,o,o,o,o,o}" "{brecno,frecno,lrecno,vrecno,sync,empty,in_timestamp,out_timestamp}" forwarder_queue_status - _null_ _null_ ));
+DESCR_MAMMOTH("reports current replication status for the forwarder");
+DATA_MAMMOTH(insert OID = 2966 ( replication_status     PGNSP PGUID 12 1 0 f f t f v 0 2249 "" "{20,20,20,20,23,16,1184,1184}" "{o,o,o,o,o,o,o,o}" "{brecno,frecno,lrecno,vrecno,sync,empty,in_timestamp,out_timestamp}" mammoth_queue_status - _null_ _null_ ));
+DESCR_MAMMOTH("reports current replication status");
+DATA_MAMMOTH(insert OID = 2967 ( hosts_status           PGNSP PGUID 12 1 0 f f t t v 0 2249 "" "{23,16,23,1184,20,20}" "{o,o,o,o,o,o}" "{slaveno,connected,sync,timestamp,frecno,vrecno}" mammoth_hosts_status - _null_ _null_ ));
+DESCR_MAMMOTH("reports current status of forwarder host connections");
 
 /*
  * Symbolic values for provolatile column: these indicate whether the result

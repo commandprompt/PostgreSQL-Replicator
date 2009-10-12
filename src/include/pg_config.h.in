@@ -27,6 +27,12 @@
 /* The alignment requirement of a `short'. */
 #undef ALIGNOF_SHORT
 
+/* Define to 1 if you want to build demo version */
+#undef DEF_DEMO
+
+/* The hard limit on the number of concurrent connections. */
+#undef DEF_LIMITCONN
+
 /* Define to the default TCP port number on which the server listens and to
    which clients will try to connect. This can be overridden at run-time, but
    it's convenient if your clients have the right default compiled in.
@@ -601,6 +607,9 @@
 /* Define bytes to use libc memset(). */
 #undef MEMSET_LOOP_LIMIT
 
+/* Define to build MCP with (Open)SSL support */
+#undef MCP_USE_SSL
+
 /* Define to the address where bug reports for this package should be sent. */
 #undef PACKAGE_BUGREPORT
 
@@ -628,6 +637,9 @@
 
 /* A string containing the version number, platform, and C compiler */
 #undef PG_VERSION_STR
+
+/* Mammoth Replicator version as a string */
+#undef MAMMOTH_VERSION
 
 /* Define to 1 to allow profiling output to be saved separately for each
    process. */
@@ -661,6 +673,9 @@
 
 /* Define to 1 to build with Bonjour support. (--with-bonjour) */
 #undef USE_BONJOUR
+
+/* Define to build with zlib compression connection support (--with-zlib) */
+#undef USE_COMP
 
 /* Define to 1 if you want 64-bit integer timestamp and interval support.
    (--enable-integer-datetimes) */

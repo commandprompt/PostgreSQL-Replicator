@@ -1,0 +1,1 @@
+ALTER TABLE jedi INHERIT rebels;

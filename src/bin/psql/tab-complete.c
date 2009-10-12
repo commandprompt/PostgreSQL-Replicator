@@ -552,6 +552,7 @@ psql_completion(char *text, int start, int end)
 			   *prev5_wd;
 
 	static const char *const sql_commands[] = {
+		"MCP",  "PROMOTE",
 		"ABORT", "ALTER", "ANALYZE", "BEGIN", "CHECKPOINT", "CLOSE", "CLUSTER",
 		"COMMENT", "COMMIT", "COPY", "CREATE", "DEALLOCATE", "DECLARE",
 		"DELETE FROM", "DISCARD", "DROP", "END", "EXECUTE", "EXPLAIN", "FETCH",
@@ -790,7 +791,7 @@ psql_completion(char *text, int start, int end)
 
 	/*
 	 * If we detect ALTER TABLE <name>, suggest either ADD, DROP, ALTER,
-	 * RENAME, CLUSTER ON or OWNER
+	 * RENAME, CLUSTER ON or OWNER, or {ENABLE|DISABLE} REPLICATION
 	 */
 	else if (pg_strcasecmp(prev3_wd, "ALTER") == 0 &&
 			 pg_strcasecmp(prev2_wd, "TABLE") == 0)
@@ -807,7 +808,7 @@ psql_completion(char *text, int start, int end)
 			 pg_strcasecmp(prev_wd, "ENABLE") == 0)
 	{
 		static const char *const list_ALTERENABLE[] =
-		{"ALWAYS", "REPLICA", "RULE", "TRIGGER", NULL};
+		{"ALWAYS", "REPLICA", "REPLICATION", "RULE", "TRIGGER", NULL};
 
 		COMPLETE_WITH_LIST(list_ALTERENABLE);
 	}
@@ -826,7 +827,7 @@ psql_completion(char *text, int start, int end)
 			 pg_strcasecmp(prev_wd, "DISABLE") == 0)
 	{
 		static const char *const list_ALTERDISABLE[] =
-		{"RULE", "TRIGGER", NULL};
+		{"REPLICATION", "RULE", "TRIGGER", NULL};
 
 		COMPLETE_WITH_LIST(list_ALTERDISABLE);
 	}
@@ -883,7 +884,8 @@ psql_completion(char *text, int start, int end)
 		/* DROP ... does not work well yet */
 		static const char *const list_COLUMNALTER[] =
 		{"TYPE", "SET DEFAULT", "DROP DEFAULT", "SET NOT NULL",
-		"DROP NOT NULL", "SET STATISTICS", "SET STORAGE", NULL};
+		"DROP NOT NULL", "SET STATISTICS", "SET STORAGE", "ENABLE LO",
+		 "DISABLE LO", NULL};
 
 		COMPLETE_WITH_LIST(list_COLUMNALTER);
 	}
@@ -998,6 +1000,24 @@ psql_completion(char *text, int start, int end)
 			 pg_strcasecmp(prev_wd, "USER") == 0)
 		COMPLETE_WITH_QUERY(Query_for_list_of_roles);
 
+/* MCP */
+	/* complete with (REFRESH|BATCHUPDATE) */
+	else if (pg_strcasecmp(prev_wd, "MCP") == 0)
+	{
+		static const char *const list_MCP[] =
+		{"REFRESH", "BATCHUPDATE", NULL};
+
+		COMPLETE_WITH_LIST(list_MCP);
+	}
+/* PROMOTE */
+	/* complete with (;|FORCE|BACK) */
+	else if (pg_strcasecmp(prev_wd, "PROMOTE") == 0)
+	{
+		static const char *const list_PROMOTE[] =
+		{";", "FORCE", "BACK", NULL};
+
+		COMPLETE_WITH_LIST(list_PROMOTE);
+	}
 /* BEGIN, END, ABORT */
 	else if (pg_strcasecmp(prev_wd, "BEGIN") == 0 ||
 			 pg_strcasecmp(prev_wd, "END") == 0 ||

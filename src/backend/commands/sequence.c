@@ -23,8 +23,10 @@
 #include "commands/defrem.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
+#include "mammoth_r/pgr.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "postmaster/replication.h"
 #include "storage/proc.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -89,7 +91,6 @@ static void init_sequence(Oid relid, SeqTable *p_elm, Relation *p_rel);
 static Form_pg_sequence read_info(SeqTable elm, Relation rel, Buffer *buf);
 static void init_params(List *options, bool isInit,
 			Form_pg_sequence new, List **owned_by);
-static void do_setval(Oid relid, int64 next, bool iscalled);
 static void process_owned_by(Relation seqrel, List *owned_by);
 
 
@@ -569,6 +570,21 @@ nextval_internal(Oid relid)
 	elm->cached = last;			/* last fetched number */
 	elm->last_valid = true;
 
+	/*
+	 * Do the replication stuff outside the critical section so that we
+	 * don't cause a PANIC if we try to raise an ERROR.
+	 */
+	if (replication_enable && seqrel->rd_replicate)
+	{
+		if (replication_master)
+			PGRCollectSequence(seqrel, last, GetCurrentCommandId(false));
+		else if (replication_slave)
+			ereport(ERROR,
+					(errmsg("cannot modify sequence \"%s\"",
+							RelationGetRelationName(seqrel)),
+					 errdetail("Sequence is being replicated.")));
+	}
+
 	last_used_seq = elm;
 
 	START_CRIT_SECTION();
@@ -700,7 +716,7 @@ lastval(PG_FUNCTION_ARGS)
  * it is the only way to clear the is_called flag in an existing
  * sequence.
  */
-static void
+void
 do_setval(Oid relid, int64 next, bool iscalled)
 {
 	SeqTable	elm;
@@ -785,6 +801,16 @@ do_setval(Oid relid, int64 next, bool iscalled)
 	seq->last_value = next;		/* last fetched number */
 	seq->is_called = iscalled;
 	seq->log_cnt = (iscalled) ? 0 : 1;
+
+	if (replication_enable && seqrel->rd_replicate)
+	{
+		if (replication_master)
+			PGRCollectSequence(seqrel, next, GetCurrentCommandId(false));
+		/*
+		 * FIXME -- we should disallow this in the slave, but we cannot
+		 * because the replay code uses this function ...
+		 */
+	}
 
 	END_CRIT_SECTION();
 

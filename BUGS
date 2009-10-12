@@ -1,0 +1,10 @@
+1. Sequence handling may fail on ROLLBACK.  The problem is that replicating
+the sequence data requires writing to disk, which could fail when the disk
+is full.
+
+2. Replication of oid attribute for tables declared WITH OIDS during creation.
+Currently values of that attribute are different on master and on slaves after
+replication of these tables.
+
+3. Single point of failure in the forwarder: right now, if the server running
+the forwarder crashes, replication is completely stuck.

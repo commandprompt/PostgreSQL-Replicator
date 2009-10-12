@@ -15,9 +15,11 @@
 
 extern void database_file_update_needed(void);
 extern void auth_file_update_needed(void);
+extern void forw_file_update_needed(void);
 
 extern char *database_getflatfilename(void);
 extern char *auth_getflatfilename(void);
+extern char *forw_getflatfilename(void);
 
 extern void BuildFlatFiles(bool database_only);
 

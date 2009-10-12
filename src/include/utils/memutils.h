@@ -69,6 +69,7 @@ typedef struct StandardChunkHeader
  */
 extern PGDLLIMPORT MemoryContext TopMemoryContext;
 extern PGDLLIMPORT MemoryContext ErrorContext;
+extern PGDLLIMPORT MemoryContext ReplRollbackContext;
 extern PGDLLIMPORT MemoryContext PostmasterContext;
 extern PGDLLIMPORT MemoryContext CacheMemoryContext;
 extern PGDLLIMPORT MemoryContext MessageContext;

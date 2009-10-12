@@ -1,4 +1,4 @@
--- $PostgreSQL$$
+-- $PostgreSQL$
 
 SET search_path = pg_catalog;
 

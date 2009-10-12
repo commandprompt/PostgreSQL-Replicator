@@ -1,0 +1,2 @@
+REVOKE ADMIN OPTION FOR foo FROM bar;
+REVOKE bar FROM baz;

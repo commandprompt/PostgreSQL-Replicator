@@ -1,0 +1,2 @@
+psql:.*:5: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "public projects_pkey" for table "public projects"
+psql:.*:7: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "root passwords_pkey" for table "root passwords"

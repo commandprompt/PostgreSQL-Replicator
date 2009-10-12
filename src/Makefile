@@ -25,6 +25,7 @@ all install installdirs uninstall distprep:
 	$(MAKE) -C pl $@
 	$(MAKE) -C makefiles $@
 	$(MAKE) -C test/regress $@
+	$(MAKE) -C backend/mammoth_r $@
 
 install: install-local
 

@@ -1,0 +1,2 @@
+psql:.*:1: NOTICE:  CREATE TABLE will create implicit sequence "test6_a_seq" for serial column "test6.a"
+psql:.*:1: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test6_pkey" for table "test6"

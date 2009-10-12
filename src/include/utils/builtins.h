@@ -971,4 +971,20 @@ extern Datum pg_prepared_statement(PG_FUNCTION_ARGS);
 /* utils/mmgr/portalmem.c */
 extern Datum pg_cursor(PG_FUNCTION_ARGS);
 
+/* mammoth_r/globals/pgr_acl.c */
+extern Datum    replicate_acl(PG_FUNCTION_ARGS);
+
+/* mammoth_r/globals/pgr_auth_members.c */
+extern Datum    replicate_auth_members(PG_FUNCTION_ARGS);
+
+/* mammoth_r/globals/pgr_authid.c */
+extern Datum    replicate_authid(PG_FUNCTION_ARGS);
+
+/* mammoth_r/globals/pgr_relations.c */
+extern Datum    replicate_relations(PG_FUNCTION_ARGS);
+extern Datum    replicate_slave_relations(PG_FUNCTION_ARGS);
+extern Datum    replicate_lo_columns(PG_FUNCTION_ARGS);
+
+/* mammoth_r/globals/repl_roles_trigger.c */
+extern Datum 	drop_replicated_role(PG_FUNCTION_ARGS);
 #endif   /* BUILTINS_H */

@@ -1,0 +1,37 @@
+We use a comm protocol between the MCP server and MCP clients that is very
+similar to Postgres' own FE/BE protocol.  (In fact it uses the same code).
+
+The MCP server listens for connections on a configurable port, much like
+postmaster.  MCP clients attempt to connect to that port, do an initial 
+interchange and a possible SSL handshake, and then start moving messages around
+about replication itself.
+
+A client trying to open a connection first sends a "StartupPacket".  This is a
+packet containing 'MR' and a four-byte protocol version.  Then comes the SSL
+byte, which can be 'S' (ssl required) or 'N'.  If it's S, the packet ends here,
+the SSL handshake must be made and the server sends an empty J packet.  Then
+the client sends a new startup packet, which will be the same format as before
+except the SSL byte must now be N.
+
+When the SSL byte is N, the startup packet contains a byte for master or slave
+mode -- M for master, S for slave.  If it's a slave, a 2-byte slave ID follows.
+
+
+Then the client sends the authentication packet.  This packet contains
+- 8-byte system_identifier
+- 4-byte number of config items we're going to send
+- "foo=bar" pairs.  One such pair must be "authkey".
+
+The server receives that packet and sends back an empty 'J' message, or an
+error packet.
+
+Error packets carry an 'E' byte and use the same format as Postgres ERROR
+messages.
+
+After that, there's an exchange of 'I' packets, which carry "initial recno".
+In the case of the master, it's the server who sends it.  In the case of the
+slave, it's the client who sends it.  The other party must receive the initial
+recno and adjust the queue configuration accordingly.
+
+The replication protocol consists only on 'M' messages (and eventually 'E'),
+which are used to send MCPMsg structs.

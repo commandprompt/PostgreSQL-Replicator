@@ -147,6 +147,17 @@ extern TupleTableSlot *EvalPlanQual(EState *estate, Index rti,
 extern PlanState *ExecGetActivePlanTree(QueryDesc *queryDesc);
 extern DestReceiver *CreateIntoRelDestReceiver(void);
 
+/* These functions are exported from execMain.c for Mammoth Replicator */
+extern void ExecInsert(TupleTableSlot *slot, ItemPointer tupleid,
+		 TupleTableSlot *planSlot,
+		 DestReceiver *dest, EState *estate);
+extern void ExecDelete(ItemPointer tupleid,
+		 TupleTableSlot *planSlot,
+		 DestReceiver *dest, EState *estate);
+extern void ExecUpdate(TupleTableSlot *slot, ItemPointer tupleid,
+		 TupleTableSlot *planSlot,
+		 DestReceiver *dest, EState *estate);
+
 /*
  * prototypes from functions in execProcnode.c
  */

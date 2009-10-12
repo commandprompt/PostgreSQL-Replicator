@@ -1,0 +1,15 @@
+port = PORT
+fsync = off
+
+log_connections = on
+log_line_prefix='%p '
+log_min_messages=warning
+
+forwarder=1
+forwarder_dump_cache_max_size=30MB
+forwarder_optimizer_rounds=10
+forwarder_optimizer_naptime=10s
+forwarder_auth_key = AUTHKEY
+forwarder_port = 7777
+forwarder_acl = 0
+forwarder_promote_acl='0,1'

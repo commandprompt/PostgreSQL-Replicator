@@ -1,0 +1,32 @@
+Fix the connect() call in clientconn to have a timeout; perhaps do it in
+non-blocking mode and put the socket back in blocking mode after the connection
+is complete.  Perhaps this is unnecessary.
+
+Make sure the "master check" stuff is in line with socket close in the master
+(there's a specific ordering required in order to avoid a race condition)
+
+Get rid of the MCP server as a separate program.  It should be integrated into
+the backend instead.  That gets rid of some portability problems (for example
+we will not have to write all the EXEC_BACKEND code for the MCP server to run
+on Windows).  It'll probably also help us build a cascading system.
+
+Separate the responsability of Replicator processes: right now,
+ * in the master, we have one process talking to the network, and the same
+   process generating some dumps (thus running transactions).
+ * in the slave, we have one process listening from the network, and
+   the same process applying changes into the database.
+ * in the MCP server, we have the master process listening from the network,
+   and also running the queue-prune algorithm.
+Ideally we should have, on the master and slave, one process connected to the
+database running transactions, and another database taking care of the network
+chatter.  In the MCP server, the queue prune thing should run on a separate
+process as well.
+
+Using 2PC for Synchronous replication.  See ticket #9.
+
+Need the ability to replication the entire cluster or multiple databases.
+See ticket #8.
+
+Enable DDL replication.  See ticket #109.
+
+Disable indexes for full sync.  See ticket #82.

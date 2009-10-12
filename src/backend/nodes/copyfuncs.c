@@ -2742,6 +2742,18 @@ _copyAlterRoleSetStmt(AlterRoleSetStmt *from)
 	return newnode;
 }
 
+static AlterRoleSlaveReplicationStmt *
+_copyAlterRoleSlaveReplicationStmt(AlterRoleSlaveReplicationStmt *from)
+{
+	AlterRoleSlaveReplicationStmt *newnode = makeNode(AlterRoleSlaveReplicationStmt);
+
+	COPY_STRING_FIELD(role);
+	COPY_SCALAR_FIELD(enable);
+	COPY_SCALAR_FIELD(slaveno);
+
+	return newnode;
+}
+
 static DropRoleStmt *
 _copyDropRoleStmt(DropRoleStmt *from)
 {
@@ -3473,6 +3485,9 @@ copyObject(void *from)
 			break;
 		case T_AlterRoleSetStmt:
 			retval = _copyAlterRoleSetStmt(from);
+			break;
+		case T_AlterRoleSlaveReplicationStmt:
+			retval = _copyAlterRoleSlaveReplicationStmt(from);
 			break;
 		case T_DropRoleStmt:
 			retval = _copyDropRoleStmt(from);

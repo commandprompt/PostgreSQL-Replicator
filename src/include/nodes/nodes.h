@@ -282,6 +282,7 @@ typedef enum NodeTag
 	T_DropPLangStmt,
 	T_CreateRoleStmt,
 	T_AlterRoleStmt,
+	T_AlterRoleSlaveReplicationStmt,
 	T_DropRoleStmt,
 	T_LockStmt,
 	T_ConstraintsSetStmt,
@@ -302,6 +303,8 @@ typedef enum NodeTag
 	T_PrepareStmt,
 	T_ExecuteStmt,
 	T_DeallocateStmt,
+	T_McpStmt,
+	T_PromoteStmt,
 	T_DeclareCursorStmt,
 	T_CreateTableSpaceStmt,
 	T_DropTableSpaceStmt,
@@ -313,6 +316,9 @@ typedef enum NodeTag
 	T_CreateEnumStmt,
 	T_AlterTSDictionaryStmt,
 	T_AlterTSConfigurationStmt,
+	T_CreateForwarderStmt,
+	T_DropForwarderStmt,
+	T_AlterForwarderStmt,
 
 	/*
 	 * TAGS FOR PARSE TREE NODES (parsenodes.h)

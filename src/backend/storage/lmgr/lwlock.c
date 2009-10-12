@@ -24,6 +24,7 @@
 #include "access/clog.h"
 #include "access/multixact.h"
 #include "access/subtrans.h"
+#include "mammoth_r/txlog.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "storage/ipc.h"
@@ -173,6 +174,12 @@ NumLWLocks(void)
 
 	/* multixact.c needs two SLRU areas */
 	numLocks += NUM_MXACTOFFSET_BUFFERS + NUM_MXACTMEMBER_BUFFERS;
+
+	/*
+	 * txlog.c needs one per TXLOG buffer. Maximum number of txlogs
+	 * is 2 (for the forwarder and replication processes) 
+	 */
+	numLocks += NUM_TXLOG_BUFFERS * 2;
 
 	/*
 	 * Add any requested by loadable modules; for backwards-compatibility

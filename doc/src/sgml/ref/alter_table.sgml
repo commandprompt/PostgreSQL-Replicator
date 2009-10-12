@@ -58,6 +58,8 @@ where <replaceable class="PARAMETER">action</replaceable> is one of:
     NO INHERIT <replaceable class="PARAMETER">parent_table</replaceable>
     OWNER TO <replaceable class="PARAMETER">new_owner</replaceable>
     SET TABLESPACE <replaceable class="PARAMETER">new_tablespace</replaceable>
+    [ ENABLE | DISABLE ] REPLICATION
+    [ ENABLE | DISABLE ] REPLICATION ON SLAVE <replaceable class="PARAMETER">slave_number</replaceable>
 </synopsis>
  </refsynopsisdiv>
 
@@ -398,6 +400,52 @@ where <replaceable class="PARAMETER">action</replaceable> is one of:
     </listitem>
    </varlistentry>
 
+   <varlistentry>
+    <term><literal>ENABLE REPLICATION</literal></term>
+    <listitem>
+     <para>
+      This form declares the table as globally replicated, that is, the
+      master will broadcast any changes on this table to the MCP server.
+      If no slaves are configured to receive the changes on this table,
+      this command raises an error.  The table must have a primary key.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>DISABLE REPLICATION</literal></term>
+     <listitem>
+      <para>
+       This form declares the table as no longer replicated.  The slave
+       settings are not changed.
+      </para>
+     </listitem>
+    </varlistentry>
+
+   <varlistentry>
+    <term><literal>ENABLE REPLICATION ON SLAVE</literal></term>
+    <listitem>
+     <para>
+      This form declares that the changes of this table should be sent
+      by the MCP server to the given slave, if the table is globally replicated.
+      The table must have a primary key.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>DISABLE REPLICATION ON SLAVE</literal></term>
+    <listitem>
+     <para>
+      This form declares that the changes of this tables should no longer be
+      sent to the given slave.  If this is the only slave that is receiving
+      this table's changes, this command raises an error.  In that case, global
+      broadcasting must be disabled with <literal>DISABLE REPLICATION</literal>
+      prior to executing this command.
+     </para>
+    </listitem>
+   </varlistentry>
+
   </variablelist>
   </para>
 
@@ -611,6 +659,15 @@ where <replaceable class="PARAMETER">action</replaceable> is one of:
       <listitem>
        <para>
         The name of the schema to which the table will be moved.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><replaceable class="PARAMETER">slave_number</replaceable></term>
+      <listitem>
+       <para>
+        The slave ID on which replication is to be enabled or disabled.
        </para>
       </listitem>
      </varlistentry>
