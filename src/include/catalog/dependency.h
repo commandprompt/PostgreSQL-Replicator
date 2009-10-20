@@ -4,7 +4,7 @@
  *	  Routines to support inter-object dependencies.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -17,7 +17,7 @@
 #include "nodes/parsenodes.h"	/* for DropBehavior */
 
 
-/*----------
+/*
  * Precise semantics of a dependency relationship are specified by the
  * DependencyType code (which is stored in a "char" field in pg_depend,
  * so we assign ASCII-code values to the enumeration members).
@@ -56,7 +56,6 @@
  * contain zeroes.
  *
  * Other dependency flavors may be needed in future.
- *----------
  */
 
 typedef enum DependencyType
@@ -109,7 +108,7 @@ typedef struct ObjectAddress
 {
 	Oid			classId;		/* Class Id from pg_class */
 	Oid			objectId;		/* OID of the object */
-	int32		objectSubId;	/* Subitem within the object (column of table) */
+	int32		objectSubId;	/* Subitem within object (eg column), or 0 */
 } ObjectAddress;
 
 /* expansible list of ObjectAddresses (private in dependency.c) */
@@ -147,6 +146,9 @@ typedef enum ObjectClass
 	OCLASS_REPLIC,				/* pg_catalog.repl_relations */
 	OCLASS_SLAVE_REPLIC,		/* pg_catalog.repl_slave_relations */
 	OCLASS_LO_REPLIC,			/* pg_catalog.repl_lo_columns */
+	OCLASS_FDW,					/* pg_foreign_data_wrapper */
+	OCLASS_FOREIGN_SERVER,		/* pg_foreign_server */
+	OCLASS_USER_MAPPING,		/* pg_user_mapping */
 	MAX_OCLASS					/* MUST BE LAST */
 } ObjectClass;
 
@@ -181,7 +183,7 @@ extern void add_exact_object_address(const ObjectAddress *object,
 						 ObjectAddresses *addrs);
 
 extern bool object_address_present(const ObjectAddress *object,
-					   ObjectAddresses *addrs);
+					   const ObjectAddresses *addrs);
 
 extern void record_object_address_dependencies(const ObjectAddress *depender,
 								   ObjectAddresses *referenced,
@@ -212,6 +214,8 @@ extern bool sequenceIsOwned(Oid seqId, Oid *tableId, int32 *colId);
 
 extern void markSequenceUnowned(Oid seqId);
 
+extern List *getOwnedSequences(Oid relid);
+
 extern Oid	get_constraint_index(Oid constraintId);
 
 extern Oid	get_index_constraint(Oid indexId);
@@ -222,19 +226,21 @@ extern void recordSharedDependencyOn(ObjectAddress *depender,
 						 ObjectAddress *referenced,
 						 SharedDependencyType deptype);
 
-extern void deleteSharedDependencyRecordsFor(Oid classId, Oid objectId);
+extern void deleteSharedDependencyRecordsFor(Oid classId, Oid objectId,
+								 int32 objectSubId);
 
 extern void recordDependencyOnOwner(Oid classId, Oid objectId, Oid owner);
 
 extern void changeDependencyOnOwner(Oid classId, Oid objectId,
 						Oid newOwnerId);
 
-extern void updateAclDependencies(Oid classId, Oid objectId,
+extern void updateAclDependencies(Oid classId, Oid objectId, int32 objectSubId,
 					  Oid ownerId, bool isGrant,
 					  int noldmembers, Oid *oldmembers,
 					  int nnewmembers, Oid *newmembers);
 
-extern char *checkSharedDependencies(Oid classId, Oid objectId);
+extern bool checkSharedDependencies(Oid classId, Oid objectId,
+						char **detail_msg, char **detail_log_msg);
 
 extern void copyTemplateDependencies(Oid templateDbId, Oid newDbId);
 

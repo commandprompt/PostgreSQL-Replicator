@@ -4,7 +4,7 @@
  *	  postgres transaction access method support code
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -130,7 +130,7 @@ typedef VariableCacheData *VariableCache;
  */
 
 /* in transam/varsup.c */
-extern VariableCache ShmemVariableCache;
+extern PGDLLIMPORT VariableCache ShmemVariableCache;
 
 
 /*
@@ -138,13 +138,11 @@ extern VariableCache ShmemVariableCache;
  */
 extern bool TransactionIdDidCommit(TransactionId transactionId);
 extern bool TransactionIdDidAbort(TransactionId transactionId);
-extern void TransactionIdCommit(TransactionId transactionId);
-extern void TransactionIdAsyncCommit(TransactionId transactionId, XLogRecPtr lsn);
+extern bool TransactionIdIsKnownCompleted(TransactionId transactionId);
 extern void TransactionIdAbort(TransactionId transactionId);
-extern void TransactionIdSubCommit(TransactionId transactionId);
-extern void TransactionIdCommitTree(int nxids, TransactionId *xids);
-extern void TransactionIdAsyncCommitTree(int nxids, TransactionId *xids, XLogRecPtr lsn);
-extern void TransactionIdAbortTree(int nxids, TransactionId *xids);
+extern void TransactionIdCommitTree(TransactionId xid, int nxids, TransactionId *xids);
+extern void TransactionIdAsyncCommitTree(TransactionId xid, int nxids, TransactionId *xids, XLogRecPtr lsn);
+extern void TransactionIdAbortTree(TransactionId xid, int nxids, TransactionId *xids);
 extern bool TransactionIdPrecedes(TransactionId id1, TransactionId id2);
 extern bool TransactionIdPrecedesOrEquals(TransactionId id1, TransactionId id2);
 extern bool TransactionIdFollows(TransactionId id1, TransactionId id2);

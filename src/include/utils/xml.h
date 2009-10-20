@@ -4,7 +4,7 @@
  *	  Declarations for XML data type support.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -73,9 +73,7 @@ extern text *xmltotext_with_xmloption(xmltype *data, XmlOptionType xmloption_arg
 
 extern char *map_sql_identifier_to_xml_name(char *ident, bool fully_escaped, bool escape_period);
 extern char *map_xml_name_to_sql_identifier(char *name);
-extern char *map_sql_value_to_xml_value(Datum value, Oid type);
-
-extern void AtEOXact_xml(void);
+extern char *map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings);
 
 typedef enum
 {
@@ -83,8 +81,8 @@ typedef enum
 	XMLBINARY_HEX
 } XmlBinaryType;
 
-extern XmlBinaryType xmlbinary;
+extern int	xmlbinary;			/* XmlBinaryType, but int for guc enum */
 
-extern XmlOptionType xmloption;
+extern int	xmloption;			/* XmlOptionType, but int for guc enum */
 
 #endif   /* XML_H */

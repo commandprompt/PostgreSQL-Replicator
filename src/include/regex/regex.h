@@ -151,7 +151,7 @@ typedef struct
 #define REG_INVARG	16			/* invalid argument to regex function */
 #define REG_MIXED	17			/* character widths of regex and string differ */
 #define REG_BADOPT	18			/* invalid embedded option */
-#define REG_ETOOBIG	19			/* nfa has too many states */
+#define REG_ETOOBIG 19			/* nfa has too many states */
 /* two specials for debugging and testing */
 #define REG_ATOI	101			/* convert error-code name to number */
 #define REG_ITOA	102			/* convert error-code number to name */
@@ -165,5 +165,10 @@ extern int	pg_regcomp(regex_t *, const pg_wchar *, size_t, int);
 extern int	pg_regexec(regex_t *, const pg_wchar *, size_t, size_t, rm_detail_t *, size_t, regmatch_t[], int);
 extern void pg_regfree(regex_t *);
 extern size_t pg_regerror(int, const regex_t *, char *, size_t);
+
+/*
+ * guc configuration variables
+ */
+extern int	regex_flavor;
 
 #endif   /* _REGEX_H_ */

@@ -3,7 +3,7 @@
  * fe-protocol3.c
  *	  functions that are specific to frontend/backend protocol version 3
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -115,7 +115,8 @@ pqParseInput3(PGconn *conn)
 			 * recovery strategy if we are unable to make the buffer big
 			 * enough.
 			 */
-			if (pqCheckInBufferSpace(conn->inCursor + msgLength, conn))
+			if (pqCheckInBufferSpace(conn->inCursor + (size_t) msgLength,
+									 conn))
 			{
 				/*
 				 * XXX add some better recovery code... plan is to skip over
@@ -296,19 +297,24 @@ pqParseInput3(PGconn *conn)
 					/*
 					 * NoData indicates that we will not be seeing a
 					 * RowDescription message because the statement or portal
-					 * inquired about doesn't return rows. Set up a COMMAND_OK
-					 * result, instead of TUPLES_OK.
-					 */
-					if (conn->result == NULL)
-						conn->result = PQmakeEmptyPGresult(conn,
-														   PGRES_COMMAND_OK);
-
-					/*
-					 * If we're doing a Describe, we're ready to pass the
-					 * result back to the client.
+					 * inquired about doesn't return rows.
+					 *
+					 * If we're doing a Describe, we have to pass something
+					 * back to the client, so set up a COMMAND_OK result,
+					 * instead of TUPLES_OK.  Otherwise we can just ignore
+					 * this message.
 					 */
 					if (conn->queryclass == PGQUERY_DESCRIBE)
+					{
+						if (conn->result == NULL)
+						{
+							conn->result = PQmakeEmptyPGresult(conn,
+														   PGRES_COMMAND_OK);
+							if (!conn->result)
+								return;
+						}
 						conn->asyncStatus = PGASYNC_READY;
+					}
 					break;
 				case 't':		/* Parameter Description */
 					if (getParamDescriptions(conn))
@@ -852,7 +858,6 @@ pqGetErrorNotice3(PGconn *conn, bool isError)
 			goto fail;
 		pqClearAsyncResult(conn);
 		conn->result = res;
-		resetPQExpBuffer(&conn->errorMessage);
 		appendPQExpBufferStr(&conn->errorMessage, workBuf.data);
 	}
 	else
@@ -1310,7 +1315,8 @@ getCopyDataMessage(PGconn *conn)
 			 * Before returning, enlarge the input buffer if needed to hold
 			 * the whole message.  See notes in parseInput.
 			 */
-			if (pqCheckInBufferSpace(conn->inCursor + msgLength - 4, conn))
+			if (pqCheckInBufferSpace(conn->inCursor + (size_t) msgLength - 4,
+									 conn))
 			{
 				/*
 				 * XXX add some better recovery code... plan is to skip over
@@ -1372,7 +1378,7 @@ pqGetCopyData3(PGconn *conn, char **buffer, int async)
 	for (;;)
 	{
 		/*
-		 * Collect the next input message.  To make life simpler for async
+		 * Collect the next input message.	To make life simpler for async
 		 * callers, we keep returning 0 until the next message is fully
 		 * available, even if it is not Copy Data.
 		 */
@@ -1381,13 +1387,13 @@ pqGetCopyData3(PGconn *conn, char **buffer, int async)
 		{
 			/*
 			 * On end-of-copy, exit COPY_OUT mode and let caller read status
-			 * with PQgetResult().  The normal case is that it's Copy Done,
-			 * but we let parseInput read that.  If error, we expect the
-			 * state was already changed.
+			 * with PQgetResult().	The normal case is that it's Copy Done,
+			 * but we let parseInput read that.  If error, we expect the state
+			 * was already changed.
 			 */
 			if (msgLength == -1)
 				conn->asyncStatus = PGASYNC_BUSY;
-			return msgLength;		/* end-of-copy or error */
+			return msgLength;	/* end-of-copy or error */
 		}
 		if (msgLength == 0)
 		{
@@ -1745,7 +1751,8 @@ pqFunctionCall3(PGconn *conn, Oid fnid,
 			 * Before looping, enlarge the input buffer if needed to hold the
 			 * whole message.  See notes in parseInput.
 			 */
-			if (pqCheckInBufferSpace(conn->inCursor + msgLength, conn))
+			if (pqCheckInBufferSpace(conn->inCursor + (size_t) msgLength,
+									 conn))
 			{
 				/*
 				 * XXX add some better recovery code... plan is to skip over

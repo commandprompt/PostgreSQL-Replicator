@@ -2331,11 +2331,87 @@ Sun, 02 Mar 2008 11:50:48 +0100
 Thu, 20 Mar 2008 16:54:27 +0100
 
 	- Changed statement escaping to not escape continuation line markers.
-	- Bumped ecpg version to 4.4.1.
 	- Added ECPGget_PGconn() function to ecpglib, courtesy of Mike Aubury.
 
-Tue, 25 Mar 2008 13:43:27 +0100
+Tue, 25 Mar 2008 13:42:26 +0100
 
-	- Also added ECPGget_PGconn to exports.txt.
+	- Should list ECPGget_PGconn in exports.txt.
 
+Wed, 26 Mar 2008 17:02:08 +0100
+
+	- Moved from PQsetdbLogin to PQconnectDB.
+	- Correctly parse connect options.
+
+Thu, 10 Apr 2008 12:42:25 +0200
+
+	- Fixed bug in PGTYPEStimestamp_sub that used pointers instead of the
+	  values to substract.
+
+Mon, 12 May 2008 18:19:08 +0200
+
+	- Check for non-existant connection in prepare statement handling.
+	- Do not close files that weren't opened.
+
+Tue, 20 May 2008 17:31:01 +0200
+
+	- Synced parser.
+	- Made ecpg parser use backend provided keyword list. One less file to
+	  sync manually.
+	- Changed whenever test so exit value is 0.
+
+Wed, 04 Jun 2008 14:22:30 +0200
+
+	- Added lost symbol SQL to list of allowed variable names.
+
+Tue, 24 Jun 2008 13:30:51 +0200
+
+	- Synced parser.
+
+Tue, 19 Aug 2008 12:32:24 +0200
+
+	- Fixed incorrect argument handling in SET command if argument is a variable.
+
+Wed, 20 Aug 2008 15:49:23 +0200
+
+	- Synced parser.
+
+Tue, 07 Oct 2008 14:35:26 +0200
+
+	- Synced parser.
+
+Fri, 10 Oct 2008 14:03:05 +0200
+
+	- Fixed "create role" parsing to accept optional "with" argument.
+
+Tue, 14 Oct 2008 11:25:51 +0200
+
+	- Fixed parameter parsing.
+
+Sat, 25 Oct 2008 16:34:28 +0200
+
+	- Free allocated memory even if the next alloc failed with ENOMEM.
+
+Wed, 26 Nov 2008 14:09:08 +0100
+
+	- When creating a varchar struct name braces must be discarded.
+	- Applied patch by Ron Mayer <rm_pg@cheapcomplexdevices.com> to merge
+	  the new interval style into ecpg.
+
+Mon, 15 Dec 2008 16:31:31 +0100
+
+	- Do not try to change a const variable in ecpg_log.
+
+Wed, 17 Dec 2008 17:49:11 +0100
+
+	- Applied patch by ITAGAKI Takahiro <itagaki.takahiro@oss.ntt.co.jp> to
+	  fix segfault on non-glibc systems.
+
+Mon, 02 Feb 2009 16:34:53 +0100
+
+	- Fixed bug in handling of "%s" pattern in PGTYPEStimestamp_defmt_asc().
+	- Fixed auto allocation for binary data types.
+	- Set pgtypes library version to 3.1.
+	- Set compat library version to 3.1.
+	- Set ecpg library version to 6.2.
+	- Set ecpg version to 4.5.
 

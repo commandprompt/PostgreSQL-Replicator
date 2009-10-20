@@ -28,10 +28,10 @@
   <title>The <structname>pg_buffercache</structname> view</title>
 
   <para>
-   The definitions of the columns exposed by the view are:
+   The definitions of the columns exposed by the view are shown in <xref linkend="pgbuffercache-columns">.
   </para>
 
-  <table>
+  <table id="pgbuffercache-columns">
    <title><structname>pg_buffercache</> Columns</title>
 
    <tgroup cols="4">
@@ -78,6 +78,13 @@
       <entry><type>bigint</type></entry>
       <entry></entry>
       <entry>Page number within the relation</entry>
+     </row>
+
+     <row>
+      <entry><structfield>relforknumber</structfield></entry>
+      <entry><type>smallint</type></entry>
+      <entry></entry>
+      <entry>Fork number within the relation</entry>
      </row>
 
      <row>
@@ -134,7 +141,8 @@
                   b.reldatabase IN (0, (SELECT oid FROM pg_database
                                         WHERE datname = current_database()))
                GROUP BY c.relname
-               ORDER BY 2 DESC LIMIT 10;
+               ORDER BY 2 DESC
+               LIMIT 10;
                relname             | buffers
   ---------------------------------+---------
    tenk2                           |     345

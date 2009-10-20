@@ -3,7 +3,7 @@
  * nbtutils.c
  *	  Utility code for Postgres btree implementation.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,8 +20,10 @@
 #include "access/genam.h"
 #include "access/nbtree.h"
 #include "access/reloptions.h"
+#include "access/relscan.h"
 #include "executor/execdebug.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
 #include "utils/lsyscache.h"
@@ -1400,9 +1402,7 @@ btoptions(PG_FUNCTION_ARGS)
 	bool		validate = PG_GETARG_BOOL(1);
 	bytea	   *result;
 
-	result = default_reloptions(reloptions, validate,
-								BTREE_MIN_FILLFACTOR,
-								BTREE_DEFAULT_FILLFACTOR);
+	result = default_reloptions(reloptions, validate, RELOPT_KIND_BTREE);
 	if (result)
 		PG_RETURN_BYTEA_P(result);
 	PG_RETURN_NULL();

@@ -8,7 +8,7 @@
  * needed by rmgr routines (redo support for individual record types).
  * So the XLogRecord typedef and associated stuff appear in xlog.h.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -16,10 +16,9 @@
 #ifndef XLOG_INTERNAL_H
 #define XLOG_INTERNAL_H
 
-#include <time.h>
-
 #include "access/xlog.h"
 #include "fmgr.h"
+#include "pgtime.h"
 #include "storage/block.h"
 #include "storage/relfilenode.h"
 
@@ -41,6 +40,7 @@
 typedef struct BkpBlock
 {
 	RelFileNode node;			/* relation containing block */
+	ForkNumber	fork;			/* fork within the relation */
 	BlockNumber block;			/* block number */
 	uint16		hole_offset;	/* number of bytes before "hole" */
 	uint16		hole_length;	/* number of bytes in "hole" */
@@ -71,7 +71,7 @@ typedef struct XLogContRecord
 /*
  * Each page of XLOG file has a header like this:
  */
-#define XLOG_PAGE_MAGIC 0xD062	/* can be used as WAL version indicator */
+#define XLOG_PAGE_MAGIC 0xD063	/* can be used as WAL version indicator */
 
 typedef struct XLogPageHeaderData
 {
@@ -242,7 +242,7 @@ extern const RmgrData RmgrTable[];
 /*
  * Exported to support xlog switching from bgwriter
  */
-extern time_t GetLastSegSwitchTime(void);
+extern pg_time_t GetLastSegSwitchTime(void);
 extern XLogRecPtr RequestXLogSwitch(void);
 
 /*

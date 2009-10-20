@@ -3,7 +3,7 @@
  * outfuncs.c
  *	  Output functions for Postgres tree nodes.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -78,6 +78,10 @@
 #define WRITE_STRING_FIELD(fldname) \
 	(appendStringInfo(str, " :" CppAsString(fldname) " "), \
 	 _outToken(str, node->fldname))
+
+/* Write a parse location field (actually same as INT case) */
+#define WRITE_LOCATION_FIELD(fldname) \
+	appendStringInfo(str, " :" CppAsString(fldname) " %d", node->fldname)
 
 /* Write a Node field */
 #define WRITE_NODE_FIELD(fldname) \
@@ -176,8 +180,6 @@ _outList(StringInfo str, List *node)
  *	   converts a bitmap set of integers
  *
  * Note: the output format is "(b int int ...)", similar to an integer List.
- * Currently bitmapsets do not appear in any node type that is stored in
- * rules, so there is no support in readfuncs.c for reading this format.
  */
 static void
 _outBitmapset(StringInfo str, Bitmapset *bms)
@@ -251,6 +253,7 @@ _outPlannedStmt(StringInfo str, PlannedStmt *node)
 	WRITE_NODE_FIELD(returningLists);
 	WRITE_NODE_FIELD(rowMarks);
 	WRITE_NODE_FIELD(relationOids);
+	WRITE_NODE_FIELD(invalItems);
 	WRITE_INT_FIELD(nParamExec);
 }
 
@@ -327,6 +330,29 @@ _outAppend(StringInfo str, Append *node)
 }
 
 static void
+_outRecursiveUnion(StringInfo str, RecursiveUnion *node)
+{
+	int			i;
+
+	WRITE_NODE_TYPE("RECURSIVEUNION");
+
+	_outPlanInfo(str, (Plan *) node);
+
+	WRITE_INT_FIELD(wtParam);
+	WRITE_INT_FIELD(numCols);
+
+	appendStringInfo(str, " :dupColIdx");
+	for (i = 0; i < node->numCols; i++)
+		appendStringInfo(str, " %d", node->dupColIdx[i]);
+
+	appendStringInfo(str, " :dupOperators");
+	for (i = 0; i < node->numCols; i++)
+		appendStringInfo(str, " %u", node->dupOperators[i]);
+
+	WRITE_LONG_FIELD(numGroups);
+}
+
+static void
 _outBitmapAnd(StringInfo str, BitmapAnd *node)
 {
 	WRITE_NODE_TYPE("BITMAPAND");
@@ -372,8 +398,6 @@ _outIndexScan(StringInfo str, IndexScan *node)
 	WRITE_OID_FIELD(indexid);
 	WRITE_NODE_FIELD(indexqual);
 	WRITE_NODE_FIELD(indexqualorig);
-	WRITE_NODE_FIELD(indexstrategy);
-	WRITE_NODE_FIELD(indexsubtype);
 	WRITE_ENUM_FIELD(indexorderdir, ScanDirection);
 }
 
@@ -387,8 +411,6 @@ _outBitmapIndexScan(StringInfo str, BitmapIndexScan *node)
 	WRITE_OID_FIELD(indexid);
 	WRITE_NODE_FIELD(indexqual);
 	WRITE_NODE_FIELD(indexqualorig);
-	WRITE_NODE_FIELD(indexstrategy);
-	WRITE_NODE_FIELD(indexsubtype);
 }
 
 static void
@@ -443,6 +465,27 @@ _outValuesScan(StringInfo str, ValuesScan *node)
 	_outScanInfo(str, (Scan *) node);
 
 	WRITE_NODE_FIELD(values_lists);
+}
+
+static void
+_outCteScan(StringInfo str, CteScan *node)
+{
+	WRITE_NODE_TYPE("CTESCAN");
+
+	_outScanInfo(str, (Scan *) node);
+
+	WRITE_INT_FIELD(ctePlanId);
+	WRITE_INT_FIELD(cteParam);
+}
+
+static void
+_outWorkTableScan(StringInfo str, WorkTableScan *node)
+{
+	WRITE_NODE_TYPE("WORKTABLESCAN");
+
+	_outScanInfo(str, (Scan *) node);
+
+	WRITE_INT_FIELD(wtParam);
 }
 
 static void
@@ -501,7 +544,7 @@ _outHashJoin(StringInfo str, HashJoin *node)
 static void
 _outAgg(StringInfo str, Agg *node)
 {
-	int i;
+	int			i;
 
 	WRITE_NODE_TYPE("AGG");
 
@@ -519,6 +562,39 @@ _outAgg(StringInfo str, Agg *node)
 		appendStringInfo(str, " %u", node->grpOperators[i]);
 
 	WRITE_LONG_FIELD(numGroups);
+}
+
+static void
+_outWindowAgg(StringInfo str, WindowAgg *node)
+{
+	int			i;
+
+	WRITE_NODE_TYPE("WINDOWAGG");
+
+	_outPlanInfo(str, (Plan *) node);
+
+	WRITE_UINT_FIELD(winref);
+	WRITE_INT_FIELD(partNumCols);
+
+	appendStringInfo(str, " :partColIdx");
+	for (i = 0; i < node->partNumCols; i++)
+		appendStringInfo(str, " %d", node->partColIdx[i]);
+
+	appendStringInfo(str, " :partOperations");
+	for (i = 0; i < node->partNumCols; i++)
+		appendStringInfo(str, " %u", node->partOperators[i]);
+
+	WRITE_INT_FIELD(ordNumCols);
+
+	appendStringInfo(str, " :ordColIdx");
+	for (i = 0; i < node->ordNumCols; i++)
+		appendStringInfo(str, " %d", node->ordColIdx[i]);
+
+	appendStringInfo(str, " :ordOperations");
+	for (i = 0; i < node->ordNumCols; i++)
+		appendStringInfo(str, " %u", node->ordOperators[i]);
+
+	WRITE_INT_FIELD(frameOptions);
 }
 
 static void
@@ -594,6 +670,19 @@ _outUnique(StringInfo str, Unique *node)
 }
 
 static void
+_outHash(StringInfo str, Hash *node)
+{
+	WRITE_NODE_TYPE("HASH");
+
+	_outPlanInfo(str, (Plan *) node);
+
+	WRITE_OID_FIELD(skewTable);
+	WRITE_INT_FIELD(skewColumn);
+	WRITE_OID_FIELD(skewColType);
+	WRITE_INT_FIELD(skewColTypmod);
+}
+
+static void
 _outSetOp(StringInfo str, SetOp *node)
 {
 	int			i;
@@ -603,6 +692,7 @@ _outSetOp(StringInfo str, SetOp *node)
 	_outPlanInfo(str, (Plan *) node);
 
 	WRITE_ENUM_FIELD(cmd, SetOpCmd);
+	WRITE_ENUM_FIELD(strategy, SetOpStrategy);
 	WRITE_INT_FIELD(numCols);
 
 	appendStringInfo(str, " :dupColIdx");
@@ -614,6 +704,8 @@ _outSetOp(StringInfo str, SetOp *node)
 		appendStringInfo(str, " %u", node->dupOperators[i]);
 
 	WRITE_INT_FIELD(flagColIdx);
+	WRITE_INT_FIELD(firstFlag);
+	WRITE_LONG_FIELD(numGroups);
 }
 
 static void
@@ -628,11 +720,14 @@ _outLimit(StringInfo str, Limit *node)
 }
 
 static void
-_outHash(StringInfo str, Hash *node)
+_outPlanInvalItem(StringInfo str, PlanInvalItem *node)
 {
-	WRITE_NODE_TYPE("HASH");
+	WRITE_NODE_TYPE("PLANINVALITEM");
 
-	_outPlanInfo(str, (Plan *) node);
+	WRITE_INT_FIELD(cacheId);
+	appendStringInfo(str, " :tupleId (%u,%u)",
+					 ItemPointerGetBlockNumber(&node->tupleId),
+					 ItemPointerGetOffsetNumber(&node->tupleId));
 }
 
 /*****************************************************************************
@@ -664,6 +759,7 @@ _outRangeVar(StringInfo str, RangeVar *node)
 	WRITE_ENUM_FIELD(inhOpt, InhOption);
 	WRITE_BOOL_FIELD(istemp);
 	WRITE_NODE_FIELD(alias);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -690,6 +786,7 @@ _outVar(StringInfo str, Var *node)
 	WRITE_UINT_FIELD(varlevelsup);
 	WRITE_UINT_FIELD(varnoold);
 	WRITE_INT_FIELD(varoattno);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -702,6 +799,7 @@ _outConst(StringInfo str, Const *node)
 	WRITE_INT_FIELD(constlen);
 	WRITE_BOOL_FIELD(constbyval);
 	WRITE_BOOL_FIELD(constisnull);
+	WRITE_LOCATION_FIELD(location);
 
 	appendStringInfo(str, " :constvalue ");
 	if (node->constisnull)
@@ -719,6 +817,7 @@ _outParam(StringInfo str, Param *node)
 	WRITE_INT_FIELD(paramid);
 	WRITE_OID_FIELD(paramtype);
 	WRITE_INT_FIELD(paramtypmod);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -732,6 +831,21 @@ _outAggref(StringInfo str, Aggref *node)
 	WRITE_UINT_FIELD(agglevelsup);
 	WRITE_BOOL_FIELD(aggstar);
 	WRITE_BOOL_FIELD(aggdistinct);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outWindowFunc(StringInfo str, WindowFunc *node)
+{
+	WRITE_NODE_TYPE("WINDOWFUNC");
+
+	WRITE_OID_FIELD(winfnoid);
+	WRITE_OID_FIELD(wintype);
+	WRITE_NODE_FIELD(args);
+	WRITE_UINT_FIELD(winref);
+	WRITE_BOOL_FIELD(winstar);
+	WRITE_BOOL_FIELD(winagg);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -758,6 +872,7 @@ _outFuncExpr(StringInfo str, FuncExpr *node)
 	WRITE_BOOL_FIELD(funcretset);
 	WRITE_ENUM_FIELD(funcformat, CoercionForm);
 	WRITE_NODE_FIELD(args);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -770,6 +885,7 @@ _outOpExpr(StringInfo str, OpExpr *node)
 	WRITE_OID_FIELD(opresulttype);
 	WRITE_BOOL_FIELD(opretset);
 	WRITE_NODE_FIELD(args);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -782,6 +898,7 @@ _outDistinctExpr(StringInfo str, DistinctExpr *node)
 	WRITE_OID_FIELD(opresulttype);
 	WRITE_BOOL_FIELD(opretset);
 	WRITE_NODE_FIELD(args);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -793,6 +910,7 @@ _outScalarArrayOpExpr(StringInfo str, ScalarArrayOpExpr *node)
 	WRITE_OID_FIELD(opfuncid);
 	WRITE_BOOL_FIELD(useOr);
 	WRITE_NODE_FIELD(args);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -819,6 +937,7 @@ _outBoolExpr(StringInfo str, BoolExpr *node)
 	_outToken(str, opstr);
 
 	WRITE_NODE_FIELD(args);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -830,6 +949,7 @@ _outSubLink(StringInfo str, SubLink *node)
 	WRITE_NODE_FIELD(testexpr);
 	WRITE_NODE_FIELD(operName);
 	WRITE_NODE_FIELD(subselect);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -841,12 +961,24 @@ _outSubPlan(StringInfo str, SubPlan *node)
 	WRITE_NODE_FIELD(testexpr);
 	WRITE_NODE_FIELD(paramIds);
 	WRITE_INT_FIELD(plan_id);
+	WRITE_STRING_FIELD(plan_name);
 	WRITE_OID_FIELD(firstColType);
+	WRITE_INT_FIELD(firstColTypmod);
 	WRITE_BOOL_FIELD(useHashTable);
 	WRITE_BOOL_FIELD(unknownEqFalse);
 	WRITE_NODE_FIELD(setParam);
 	WRITE_NODE_FIELD(parParam);
 	WRITE_NODE_FIELD(args);
+	WRITE_FLOAT_FIELD(startup_cost, "%.2f");
+	WRITE_FLOAT_FIELD(per_call_cost, "%.2f");
+}
+
+static void
+_outAlternativeSubPlan(StringInfo str, AlternativeSubPlan *node)
+{
+	WRITE_NODE_TYPE("ALTERNATIVESUBPLAN");
+
+	WRITE_NODE_FIELD(subplans);
 }
 
 static void
@@ -880,6 +1012,7 @@ _outRelabelType(StringInfo str, RelabelType *node)
 	WRITE_OID_FIELD(resulttype);
 	WRITE_INT_FIELD(resulttypmod);
 	WRITE_ENUM_FIELD(relabelformat, CoercionForm);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -890,6 +1023,7 @@ _outCoerceViaIO(StringInfo str, CoerceViaIO *node)
 	WRITE_NODE_FIELD(arg);
 	WRITE_OID_FIELD(resulttype);
 	WRITE_ENUM_FIELD(coerceformat, CoercionForm);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -903,6 +1037,7 @@ _outArrayCoerceExpr(StringInfo str, ArrayCoerceExpr *node)
 	WRITE_INT_FIELD(resulttypmod);
 	WRITE_BOOL_FIELD(isExplicit);
 	WRITE_ENUM_FIELD(coerceformat, CoercionForm);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -913,6 +1048,7 @@ _outConvertRowtypeExpr(StringInfo str, ConvertRowtypeExpr *node)
 	WRITE_NODE_FIELD(arg);
 	WRITE_OID_FIELD(resulttype);
 	WRITE_ENUM_FIELD(convertformat, CoercionForm);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -924,6 +1060,7 @@ _outCaseExpr(StringInfo str, CaseExpr *node)
 	WRITE_NODE_FIELD(arg);
 	WRITE_NODE_FIELD(args);
 	WRITE_NODE_FIELD(defresult);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -933,6 +1070,7 @@ _outCaseWhen(StringInfo str, CaseWhen *node)
 
 	WRITE_NODE_FIELD(expr);
 	WRITE_NODE_FIELD(result);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -953,6 +1091,7 @@ _outArrayExpr(StringInfo str, ArrayExpr *node)
 	WRITE_OID_FIELD(element_typeid);
 	WRITE_NODE_FIELD(elements);
 	WRITE_BOOL_FIELD(multidims);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -963,6 +1102,8 @@ _outRowExpr(StringInfo str, RowExpr *node)
 	WRITE_NODE_FIELD(args);
 	WRITE_OID_FIELD(row_typeid);
 	WRITE_ENUM_FIELD(row_format, CoercionForm);
+	WRITE_NODE_FIELD(colnames);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -984,6 +1125,7 @@ _outCoalesceExpr(StringInfo str, CoalesceExpr *node)
 
 	WRITE_OID_FIELD(coalescetype);
 	WRITE_NODE_FIELD(args);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -994,6 +1136,7 @@ _outMinMaxExpr(StringInfo str, MinMaxExpr *node)
 	WRITE_OID_FIELD(minmaxtype);
 	WRITE_ENUM_FIELD(op, MinMaxOp);
 	WRITE_NODE_FIELD(args);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1009,6 +1152,7 @@ _outXmlExpr(StringInfo str, XmlExpr *node)
 	WRITE_ENUM_FIELD(xmloption, XmlOptionType);
 	WRITE_OID_FIELD(type);
 	WRITE_INT_FIELD(typmod);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1021,6 +1165,7 @@ _outNullIfExpr(StringInfo str, NullIfExpr *node)
 	WRITE_OID_FIELD(opresulttype);
 	WRITE_BOOL_FIELD(opretset);
 	WRITE_NODE_FIELD(args);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1050,6 +1195,7 @@ _outCoerceToDomain(StringInfo str, CoerceToDomain *node)
 	WRITE_OID_FIELD(resulttype);
 	WRITE_INT_FIELD(resulttypmod);
 	WRITE_ENUM_FIELD(coercionformat, CoercionForm);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1059,6 +1205,7 @@ _outCoerceToDomainValue(StringInfo str, CoerceToDomainValue *node)
 
 	WRITE_OID_FIELD(typeId);
 	WRITE_INT_FIELD(typeMod);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1068,6 +1215,7 @@ _outSetToDefault(StringInfo str, SetToDefault *node)
 
 	WRITE_OID_FIELD(typeId);
 	WRITE_INT_FIELD(typeMod);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1268,6 +1416,8 @@ _outUniquePath(StringInfo str, UniquePath *node)
 
 	WRITE_NODE_FIELD(subpath);
 	WRITE_ENUM_FIELD(umethod, UniquePathMethod);
+	WRITE_NODE_FIELD(in_operators);
+	WRITE_NODE_FIELD(uniq_exprs);
 	WRITE_FLOAT_FIELD(rows, "%.0f");
 }
 
@@ -1299,6 +1449,7 @@ _outHashPath(StringInfo str, HashPath *node)
 	_outJoinPathInfo(str, (JoinPath *) node);
 
 	WRITE_NODE_FIELD(path_hashclauses);
+	WRITE_INT_FIELD(num_batches);
 }
 
 static void
@@ -1313,6 +1464,9 @@ _outPlannerGlobal(StringInfo str, PlannerGlobal *node)
 	WRITE_BITMAPSET_FIELD(rewindPlanIDs);
 	WRITE_NODE_FIELD(finalrtable);
 	WRITE_NODE_FIELD(relationOids);
+	WRITE_NODE_FIELD(invalItems);
+	WRITE_UINT_FIELD(lastPHId);
+	WRITE_BOOL_FIELD(transientPlan);
 }
 
 static void
@@ -1328,23 +1482,27 @@ _outPlannerInfo(StringInfo str, PlannerInfo *node)
 	WRITE_NODE_FIELD(resultRelations);
 	WRITE_NODE_FIELD(returningLists);
 	WRITE_NODE_FIELD(init_plans);
+	WRITE_NODE_FIELD(cte_plan_ids);
 	WRITE_NODE_FIELD(eq_classes);
 	WRITE_NODE_FIELD(canon_pathkeys);
 	WRITE_NODE_FIELD(left_join_clauses);
 	WRITE_NODE_FIELD(right_join_clauses);
 	WRITE_NODE_FIELD(full_join_clauses);
-	WRITE_NODE_FIELD(oj_info_list);
-	WRITE_NODE_FIELD(in_info_list);
+	WRITE_NODE_FIELD(join_info_list);
 	WRITE_NODE_FIELD(append_rel_list);
+	WRITE_NODE_FIELD(placeholder_list);
 	WRITE_NODE_FIELD(query_pathkeys);
 	WRITE_NODE_FIELD(group_pathkeys);
+	WRITE_NODE_FIELD(window_pathkeys);
+	WRITE_NODE_FIELD(distinct_pathkeys);
 	WRITE_NODE_FIELD(sort_pathkeys);
 	WRITE_FLOAT_FIELD(total_table_pages, "%.0f");
 	WRITE_FLOAT_FIELD(tuple_fraction, "%.4f");
 	WRITE_BOOL_FIELD(hasJoinRTEs);
-	WRITE_BOOL_FIELD(hasOuterJoins);
 	WRITE_BOOL_FIELD(hasHavingQual);
 	WRITE_BOOL_FIELD(hasPseudoConstantQuals);
+	WRITE_BOOL_FIELD(hasRecursion);
+	WRITE_INT_FIELD(wt_param_id);
 }
 
 static void
@@ -1460,7 +1618,8 @@ _outRestrictInfo(StringInfo str, RestrictInfo *node)
 	WRITE_BITMAPSET_FIELD(right_relids);
 	WRITE_NODE_FIELD(orclause);
 	/* don't write parent_ec, leads to infinite recursion in plan tree dump */
-	WRITE_FLOAT_FIELD(this_selec, "%.4f");
+	WRITE_FLOAT_FIELD(norm_selec, "%.4f");
+	WRITE_FLOAT_FIELD(outer_selec, "%.4f");
 	WRITE_NODE_FIELD(mergeopfamilies);
 	/* don't write left_ec, leads to infinite recursion in plan tree dump */
 	/* don't write right_ec, leads to infinite recursion in plan tree dump */
@@ -1481,28 +1640,29 @@ _outInnerIndexscanInfo(StringInfo str, InnerIndexscanInfo *node)
 }
 
 static void
-_outOuterJoinInfo(StringInfo str, OuterJoinInfo *node)
+_outPlaceHolderVar(StringInfo str, PlaceHolderVar *node)
 {
-	WRITE_NODE_TYPE("OUTERJOININFO");
+	WRITE_NODE_TYPE("PLACEHOLDERVAR");
+
+	WRITE_NODE_FIELD(phexpr);
+	WRITE_BITMAPSET_FIELD(phrels);
+	WRITE_UINT_FIELD(phid);
+	WRITE_UINT_FIELD(phlevelsup);
+}
+
+static void
+_outSpecialJoinInfo(StringInfo str, SpecialJoinInfo *node)
+{
+	WRITE_NODE_TYPE("SPECIALJOININFO");
 
 	WRITE_BITMAPSET_FIELD(min_lefthand);
 	WRITE_BITMAPSET_FIELD(min_righthand);
 	WRITE_BITMAPSET_FIELD(syn_lefthand);
 	WRITE_BITMAPSET_FIELD(syn_righthand);
-	WRITE_BOOL_FIELD(is_full_join);
+	WRITE_ENUM_FIELD(jointype, JoinType);
 	WRITE_BOOL_FIELD(lhs_strict);
 	WRITE_BOOL_FIELD(delay_upper_joins);
-}
-
-static void
-_outInClauseInfo(StringInfo str, InClauseInfo *node)
-{
-	WRITE_NODE_TYPE("INCLAUSEINFO");
-
-	WRITE_BITMAPSET_FIELD(lefthand);
-	WRITE_BITMAPSET_FIELD(righthand);
-	WRITE_NODE_FIELD(sub_targetlist);
-	WRITE_NODE_FIELD(in_operators);
+	WRITE_NODE_FIELD(join_quals);
 }
 
 static void
@@ -1514,9 +1674,20 @@ _outAppendRelInfo(StringInfo str, AppendRelInfo *node)
 	WRITE_UINT_FIELD(child_relid);
 	WRITE_OID_FIELD(parent_reltype);
 	WRITE_OID_FIELD(child_reltype);
-	WRITE_NODE_FIELD(col_mappings);
 	WRITE_NODE_FIELD(translated_vars);
 	WRITE_OID_FIELD(parent_reloid);
+}
+
+static void
+_outPlaceHolderInfo(StringInfo str, PlaceHolderInfo *node)
+{
+	WRITE_NODE_TYPE("PLACEHOLDERINFO");
+
+	WRITE_UINT_FIELD(phid);
+	WRITE_NODE_FIELD(ph_var);
+	WRITE_BITMAPSET_FIELD(ph_eval_at);
+	WRITE_BITMAPSET_FIELD(ph_needed);
+	WRITE_INT_FIELD(ph_width);
 }
 
 static void
@@ -1571,7 +1742,7 @@ _outNotifyStmt(StringInfo str, NotifyStmt *node)
 {
 	WRITE_NODE_TYPE("NOTIFY");
 
-	WRITE_NODE_FIELD(relation);
+	WRITE_STRING_FIELD(conditionname);
 }
 
 static void
@@ -1596,6 +1767,8 @@ _outSelectStmt(StringInfo str, SelectStmt *node)
 	WRITE_NODE_FIELD(whereClause);
 	WRITE_NODE_FIELD(groupClause);
 	WRITE_NODE_FIELD(havingClause);
+	WRITE_NODE_FIELD(windowClause);
+	WRITE_NODE_FIELD(withClause);
 	WRITE_NODE_FIELD(valuesLists);
 	WRITE_NODE_FIELD(sortClause);
 	WRITE_NODE_FIELD(limitOffset);
@@ -1616,7 +1789,9 @@ _outFuncCall(StringInfo str, FuncCall *node)
 	WRITE_NODE_FIELD(args);
 	WRITE_BOOL_FIELD(agg_star);
 	WRITE_BOOL_FIELD(agg_distinct);
-	WRITE_INT_FIELD(location);
+	WRITE_BOOL_FIELD(func_variadic);
+	WRITE_NODE_FIELD(over);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1624,8 +1799,10 @@ _outDefElem(StringInfo str, DefElem *node)
 {
 	WRITE_NODE_TYPE("DEFELEM");
 
+	WRITE_STRING_FIELD(defnamespace);
 	WRITE_STRING_FIELD(defname);
 	WRITE_NODE_FIELD(arg);
+	WRITE_ENUM_FIELD(defaction, DefElemAction);
 }
 
 static void
@@ -1646,6 +1823,7 @@ _outXmlSerialize(StringInfo str, XmlSerialize *node)
 	WRITE_ENUM_FIELD(xmloption, XmlOptionType);
 	WRITE_NODE_FIELD(expr);
 	WRITE_NODE_FIELD(typename);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1659,7 +1837,7 @@ _outColumnDef(StringInfo str, ColumnDef *node)
 	WRITE_BOOL_FIELD(is_local);
 	WRITE_BOOL_FIELD(is_not_null);
 	WRITE_NODE_FIELD(raw_default);
-	WRITE_STRING_FIELD(cooked_default);
+	WRITE_NODE_FIELD(cooked_default);
 	WRITE_NODE_FIELD(constraints);
 }
 
@@ -1670,13 +1848,12 @@ _outTypeName(StringInfo str, TypeName *node)
 
 	WRITE_NODE_FIELD(names);
 	WRITE_OID_FIELD(typeid);
-	WRITE_BOOL_FIELD(timezone);
 	WRITE_BOOL_FIELD(setof);
 	WRITE_BOOL_FIELD(pct_type);
 	WRITE_NODE_FIELD(typmods);
 	WRITE_INT_FIELD(typemod);
 	WRITE_NODE_FIELD(arrayBounds);
-	WRITE_INT_FIELD(location);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1686,6 +1863,7 @@ _outTypeCast(StringInfo str, TypeCast *node)
 
 	WRITE_NODE_FIELD(arg);
 	WRITE_NODE_FIELD(typename);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1737,13 +1915,18 @@ _outQuery(StringInfo str, Query *node)
 	WRITE_INT_FIELD(resultRelation);
 	WRITE_NODE_FIELD(intoClause);
 	WRITE_BOOL_FIELD(hasAggs);
+	WRITE_BOOL_FIELD(hasWindowFuncs);
 	WRITE_BOOL_FIELD(hasSubLinks);
+	WRITE_BOOL_FIELD(hasDistinctOn);
+	WRITE_BOOL_FIELD(hasRecursive);
+	WRITE_NODE_FIELD(cteList);
 	WRITE_NODE_FIELD(rtable);
 	WRITE_NODE_FIELD(jointree);
 	WRITE_NODE_FIELD(targetList);
 	WRITE_NODE_FIELD(returningList);
 	WRITE_NODE_FIELD(groupClause);
 	WRITE_NODE_FIELD(havingQual);
+	WRITE_NODE_FIELD(windowClause);
 	WRITE_NODE_FIELD(distinctClause);
 	WRITE_NODE_FIELD(sortClause);
 	WRITE_NODE_FIELD(limitOffset);
@@ -1753,23 +1936,28 @@ _outQuery(StringInfo str, Query *node)
 }
 
 static void
-_outSortClause(StringInfo str, SortClause *node)
+_outSortGroupClause(StringInfo str, SortGroupClause *node)
 {
-	WRITE_NODE_TYPE("SORTCLAUSE");
+	WRITE_NODE_TYPE("SORTGROUPCLAUSE");
 
 	WRITE_UINT_FIELD(tleSortGroupRef);
+	WRITE_OID_FIELD(eqop);
 	WRITE_OID_FIELD(sortop);
 	WRITE_BOOL_FIELD(nulls_first);
 }
 
 static void
-_outGroupClause(StringInfo str, GroupClause *node)
+_outWindowClause(StringInfo str, WindowClause *node)
 {
-	WRITE_NODE_TYPE("GROUPCLAUSE");
+	WRITE_NODE_TYPE("WINDOWCLAUSE");
 
-	WRITE_UINT_FIELD(tleSortGroupRef);
-	WRITE_OID_FIELD(sortop);
-	WRITE_BOOL_FIELD(nulls_first);
+	WRITE_STRING_FIELD(name);
+	WRITE_STRING_FIELD(refname);
+	WRITE_NODE_FIELD(partitionClause);
+	WRITE_NODE_FIELD(orderClause);
+	WRITE_INT_FIELD(frameOptions);
+	WRITE_UINT_FIELD(winref);
+	WRITE_BOOL_FIELD(copiedOrder);
 }
 
 static void
@@ -1778,8 +1966,36 @@ _outRowMarkClause(StringInfo str, RowMarkClause *node)
 	WRITE_NODE_TYPE("ROWMARKCLAUSE");
 
 	WRITE_UINT_FIELD(rti);
+	WRITE_UINT_FIELD(prti);
 	WRITE_BOOL_FIELD(forUpdate);
 	WRITE_BOOL_FIELD(noWait);
+	WRITE_BOOL_FIELD(isParent);
+}
+
+static void
+_outWithClause(StringInfo str, WithClause *node)
+{
+	WRITE_NODE_TYPE("WITHCLAUSE");
+
+	WRITE_NODE_FIELD(ctes);
+	WRITE_BOOL_FIELD(recursive);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outCommonTableExpr(StringInfo str, CommonTableExpr *node)
+{
+	WRITE_NODE_TYPE("COMMONTABLEEXPR");
+
+	WRITE_STRING_FIELD(ctename);
+	WRITE_NODE_FIELD(aliascolnames);
+	WRITE_NODE_FIELD(ctequery);
+	WRITE_LOCATION_FIELD(location);
+	WRITE_BOOL_FIELD(cterecursive);
+	WRITE_INT_FIELD(cterefcount);
+	WRITE_NODE_FIELD(ctecolnames);
+	WRITE_NODE_FIELD(ctecoltypes);
+	WRITE_NODE_FIELD(ctecoltypmods);
 }
 
 static void
@@ -1793,6 +2009,7 @@ _outSetOperationStmt(StringInfo str, SetOperationStmt *node)
 	WRITE_NODE_FIELD(rarg);
 	WRITE_NODE_FIELD(colTypes);
 	WRITE_NODE_FIELD(colTypmods);
+	WRITE_NODE_FIELD(groupClauses);
 }
 
 static void
@@ -1814,6 +2031,10 @@ _outRangeTblEntry(StringInfo str, RangeTblEntry *node)
 		case RTE_SUBQUERY:
 			WRITE_NODE_FIELD(subquery);
 			break;
+		case RTE_JOIN:
+			WRITE_ENUM_FIELD(jointype, JoinType);
+			WRITE_NODE_FIELD(joinaliasvars);
+			break;
 		case RTE_FUNCTION:
 			WRITE_NODE_FIELD(funcexpr);
 			WRITE_NODE_FIELD(funccoltypes);
@@ -1822,9 +2043,12 @@ _outRangeTblEntry(StringInfo str, RangeTblEntry *node)
 		case RTE_VALUES:
 			WRITE_NODE_FIELD(values_lists);
 			break;
-		case RTE_JOIN:
-			WRITE_ENUM_FIELD(jointype, JoinType);
-			WRITE_NODE_FIELD(joinaliasvars);
+		case RTE_CTE:
+			WRITE_STRING_FIELD(ctename);
+			WRITE_UINT_FIELD(ctelevelsup);
+			WRITE_BOOL_FIELD(self_reference);
+			WRITE_NODE_FIELD(ctecoltypes);
+			WRITE_NODE_FIELD(ctecoltypmods);
 			break;
 		default:
 			elog(ERROR, "unrecognized RTE kind: %d", (int) node->rtekind);
@@ -1835,6 +2059,8 @@ _outRangeTblEntry(StringInfo str, RangeTblEntry *node)
 	WRITE_BOOL_FIELD(inFromCl);
 	WRITE_UINT_FIELD(requiredPerms);
 	WRITE_OID_FIELD(checkAsUser);
+	WRITE_BITMAPSET_FIELD(selectedCols);
+	WRITE_BITMAPSET_FIELD(modifiedCols);
 }
 
 static void
@@ -1890,7 +2116,7 @@ _outAExpr(StringInfo str, A_Expr *node)
 
 	WRITE_NODE_FIELD(lexpr);
 	WRITE_NODE_FIELD(rexpr);
-	WRITE_INT_FIELD(location);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1934,7 +2160,7 @@ _outColumnRef(StringInfo str, ColumnRef *node)
 	WRITE_NODE_TYPE("COLUMNREF");
 
 	WRITE_NODE_FIELD(fields);
-	WRITE_INT_FIELD(location);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1943,6 +2169,7 @@ _outParamRef(StringInfo str, ParamRef *node)
 	WRITE_NODE_TYPE("PARAMREF");
 
 	WRITE_INT_FIELD(number);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
@@ -1952,7 +2179,13 @@ _outAConst(StringInfo str, A_Const *node)
 
 	appendStringInfo(str, " :val ");
 	_outValue(str, &(node->val));
-	WRITE_NODE_FIELD(typename);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outA_Star(StringInfo str, A_Star *node)
+{
+	WRITE_NODE_TYPE("A_STAR");
 }
 
 static void
@@ -1974,6 +2207,15 @@ _outA_Indirection(StringInfo str, A_Indirection *node)
 }
 
 static void
+_outA_ArrayExpr(StringInfo str, A_ArrayExpr *node)
+{
+	WRITE_NODE_TYPE("A_ARRAYEXPR");
+
+	WRITE_NODE_FIELD(elements);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
 _outResTarget(StringInfo str, ResTarget *node)
 {
 	WRITE_NODE_TYPE("RESTARGET");
@@ -1981,7 +2223,51 @@ _outResTarget(StringInfo str, ResTarget *node)
 	WRITE_STRING_FIELD(name);
 	WRITE_NODE_FIELD(indirection);
 	WRITE_NODE_FIELD(val);
-	WRITE_INT_FIELD(location);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outSortBy(StringInfo str, SortBy *node)
+{
+	WRITE_NODE_TYPE("SORTBY");
+
+	WRITE_NODE_FIELD(node);
+	WRITE_ENUM_FIELD(sortby_dir, SortByDir);
+	WRITE_ENUM_FIELD(sortby_nulls, SortByNulls);
+	WRITE_NODE_FIELD(useOp);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outWindowDef(StringInfo str, WindowDef *node)
+{
+	WRITE_NODE_TYPE("WINDOWDEF");
+
+	WRITE_STRING_FIELD(name);
+	WRITE_STRING_FIELD(refname);
+	WRITE_NODE_FIELD(partitionClause);
+	WRITE_NODE_FIELD(orderClause);
+	WRITE_INT_FIELD(frameOptions);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outRangeSubselect(StringInfo str, RangeSubselect *node)
+{
+	WRITE_NODE_TYPE("RANGESUBSELECT");
+
+	WRITE_NODE_FIELD(subquery);
+	WRITE_NODE_FIELD(alias);
+}
+
+static void
+_outRangeFunction(StringInfo str, RangeFunction *node)
+{
+	WRITE_NODE_TYPE("RANGEFUNCTION");
+
+	WRITE_NODE_FIELD(funccallnode);
+	WRITE_NODE_FIELD(alias);
+	WRITE_NODE_FIELD(coldeflist);
 }
 
 static void
@@ -2084,6 +2370,9 @@ _outNode(StringInfo str, void *obj)
 			case T_Append:
 				_outAppend(str, obj);
 				break;
+			case T_RecursiveUnion:
+				_outRecursiveUnion(str, obj);
+				break;
 			case T_BitmapAnd:
 				_outBitmapAnd(str, obj);
 				break;
@@ -2117,6 +2406,12 @@ _outNode(StringInfo str, void *obj)
 			case T_ValuesScan:
 				_outValuesScan(str, obj);
 				break;
+			case T_CteScan:
+				_outCteScan(str, obj);
+				break;
+			case T_WorkTableScan:
+				_outWorkTableScan(str, obj);
+				break;
 			case T_Join:
 				_outJoin(str, obj);
 				break;
@@ -2132,6 +2427,9 @@ _outNode(StringInfo str, void *obj)
 			case T_Agg:
 				_outAgg(str, obj);
 				break;
+			case T_WindowAgg:
+				_outWindowAgg(str, obj);
+				break;
 			case T_Group:
 				_outGroup(str, obj);
 				break;
@@ -2144,14 +2442,17 @@ _outNode(StringInfo str, void *obj)
 			case T_Unique:
 				_outUnique(str, obj);
 				break;
+			case T_Hash:
+				_outHash(str, obj);
+				break;
 			case T_SetOp:
 				_outSetOp(str, obj);
 				break;
 			case T_Limit:
 				_outLimit(str, obj);
 				break;
-			case T_Hash:
-				_outHash(str, obj);
+			case T_PlanInvalItem:
+				_outPlanInvalItem(str, obj);
 				break;
 			case T_Alias:
 				_outAlias(str, obj);
@@ -2173,6 +2474,9 @@ _outNode(StringInfo str, void *obj)
 				break;
 			case T_Aggref:
 				_outAggref(str, obj);
+				break;
+			case T_WindowFunc:
+				_outWindowFunc(str, obj);
 				break;
 			case T_ArrayRef:
 				_outArrayRef(str, obj);
@@ -2197,6 +2501,9 @@ _outNode(StringInfo str, void *obj)
 				break;
 			case T_SubPlan:
 				_outSubPlan(str, obj);
+				break;
+			case T_AlternativeSubPlan:
+				_outAlternativeSubPlan(str, obj);
 				break;
 			case T_FieldSelect:
 				_outFieldSelect(str, obj);
@@ -2343,14 +2650,17 @@ _outNode(StringInfo str, void *obj)
 			case T_InnerIndexscanInfo:
 				_outInnerIndexscanInfo(str, obj);
 				break;
-			case T_OuterJoinInfo:
-				_outOuterJoinInfo(str, obj);
+			case T_PlaceHolderVar:
+				_outPlaceHolderVar(str, obj);
 				break;
-			case T_InClauseInfo:
-				_outInClauseInfo(str, obj);
+			case T_SpecialJoinInfo:
+				_outSpecialJoinInfo(str, obj);
 				break;
 			case T_AppendRelInfo:
 				_outAppendRelInfo(str, obj);
+				break;
+			case T_PlaceHolderInfo:
+				_outPlaceHolderInfo(str, obj);
 				break;
 			case T_PlannerParamItem:
 				_outPlannerParamItem(str, obj);
@@ -2386,14 +2696,20 @@ _outNode(StringInfo str, void *obj)
 			case T_Query:
 				_outQuery(str, obj);
 				break;
-			case T_SortClause:
-				_outSortClause(str, obj);
+			case T_SortGroupClause:
+				_outSortGroupClause(str, obj);
 				break;
-			case T_GroupClause:
-				_outGroupClause(str, obj);
+			case T_WindowClause:
+				_outWindowClause(str, obj);
 				break;
 			case T_RowMarkClause:
 				_outRowMarkClause(str, obj);
+				break;
+			case T_WithClause:
+				_outWithClause(str, obj);
+				break;
+			case T_CommonTableExpr:
+				_outCommonTableExpr(str, obj);
 				break;
 			case T_SetOperationStmt:
 				_outSetOperationStmt(str, obj);
@@ -2413,14 +2729,32 @@ _outNode(StringInfo str, void *obj)
 			case T_A_Const:
 				_outAConst(str, obj);
 				break;
+			case T_A_Star:
+				_outA_Star(str, obj);
+				break;
 			case T_A_Indices:
 				_outA_Indices(str, obj);
 				break;
 			case T_A_Indirection:
 				_outA_Indirection(str, obj);
 				break;
+			case T_A_ArrayExpr:
+				_outA_ArrayExpr(str, obj);
+				break;
 			case T_ResTarget:
 				_outResTarget(str, obj);
+				break;
+			case T_SortBy:
+				_outSortBy(str, obj);
+				break;
+			case T_WindowDef:
+				_outWindowDef(str, obj);
+				break;
+			case T_RangeSubselect:
+				_outRangeSubselect(str, obj);
+				break;
+			case T_RangeFunction:
+				_outRangeFunction(str, obj);
 				break;
 			case T_Constraint:
 				_outConstraint(str, obj);

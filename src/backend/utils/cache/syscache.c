@@ -3,7 +3,7 @@
  * syscache.c
  *	  System cache management routines
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,7 +20,7 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
+#include "access/sysattr.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_amop.h"
@@ -32,6 +32,8 @@
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_enum.h"
+#include "catalog/pg_foreign_data_wrapper.h"
+#include "catalog/pg_foreign_server.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
@@ -46,6 +48,8 @@
 #include "catalog/pg_ts_parser.h"
 #include "catalog/pg_ts_template.h"
 #include "catalog/pg_type.h"
+#include "catalog/pg_user_mapping.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 
@@ -53,9 +57,8 @@
 
 	Adding system caches:
 
-	Add your new cache to the list in include/utils/syscache.h.  Keep
-	the list sorted alphabetically and adjust the cache numbers
-	accordingly.
+	Add your new cache to the list in include/utils/syscache.h.
+	Keep the list sorted alphabetically.
 
 	Add your entry to the cacheinfo[] array below. All cache lists are
 	alphabetical, so add it in the proper place.  Specify the relation OID,
@@ -307,7 +310,7 @@ static const struct cachedesc cacheinfo[] = {
 	},
 	{ConstraintRelationId,		/* CONSTROID */
 		ConstraintOidIndexId,
-		0,
+		Anum_pg_constraint_conrelid,
 		1,
 		{
 			ObjectIdAttributeNumber,
@@ -364,6 +367,54 @@ static const struct cachedesc cacheinfo[] = {
 			0
 		},
 		256
+	},
+	{ForeignDataWrapperRelationId,		/* FOREIGNDATAWRAPPERNAME */
+		ForeignDataWrapperNameIndexId,
+		0,
+		1,
+		{
+			Anum_pg_foreign_data_wrapper_fdwname,
+			0,
+			0,
+			0
+		},
+		8
+	},
+	{ForeignDataWrapperRelationId,		/* FOREIGNDATAWRAPPEROID */
+		ForeignDataWrapperOidIndexId,
+		0,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		8
+	},
+	{ForeignServerRelationId,	/* FOREIGNSERVERNAME */
+		ForeignServerNameIndexId,
+		0,
+		1,
+		{
+			Anum_pg_foreign_server_srvname,
+			0,
+			0,
+			0
+		},
+		32
+	},
+	{ForeignServerRelationId,	/* FOREIGNSERVEROID */
+		ForeignServerOidIndexId,
+		0,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		32
 	},
 	{IndexRelationId,			/* INDEXRELID */
 		IndexRelidIndexId,
@@ -676,6 +727,30 @@ static const struct cachedesc cacheinfo[] = {
 			0
 		},
 		1024
+	},
+	{UserMappingRelationId,		/* USERMAPPINGOID */
+		UserMappingOidIndexId,
+		0,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		128
+	},
+	{UserMappingRelationId,		/* USERMAPPINGUSERSERVER */
+		UserMappingUserServerIndexId,
+		0,
+		2,
+		{
+			Anum_pg_user_mapping_umuser,
+			Anum_pg_user_mapping_umserver,
+			0,
+			0
+		},
+		128
 	}
 };
 

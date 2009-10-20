@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  */
@@ -33,6 +33,8 @@ extern bool do_pset(const char *param,
 		const char *value,
 		printQueryOpt *popt,
 		bool quiet);
+
+extern void connection_warnings(void);
 
 extern void SyncVariables(void);
 

@@ -4,7 +4,7 @@
  *	  POSTGRES definitions for external and compressed storage
  *	  of variable size attributes.
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
@@ -15,6 +15,7 @@
 
 #include "access/htup.h"
 #include "storage/bufpage.h"
+#include "utils/relcache.h"
 
 /*
  * This enables de-toasting of index entries.  Needed until VACUUM is
@@ -45,10 +46,9 @@
  */
 #define TOAST_TUPLES_PER_PAGE	4
 
-/* Note: sizeof(PageHeaderData) includes the first ItemId on the page */
 #define TOAST_TUPLE_THRESHOLD	\
 	MAXALIGN_DOWN((BLCKSZ - \
-				   MAXALIGN(sizeof(PageHeaderData) + (TOAST_TUPLES_PER_PAGE-1) * sizeof(ItemIdData))) \
+				   MAXALIGN(SizeOfPageHeaderData + TOAST_TUPLES_PER_PAGE * sizeof(ItemIdData))) \
 				  / TOAST_TUPLES_PER_PAGE)
 
 #define TOAST_TUPLE_TARGET		TOAST_TUPLE_THRESHOLD
@@ -72,10 +72,9 @@
  */
 #define EXTERN_TUPLES_PER_PAGE	4		/* tweak only this */
 
-/* Note: sizeof(PageHeaderData) includes the first ItemId on the page */
 #define EXTERN_TUPLE_MAX_SIZE	\
 	MAXALIGN_DOWN((BLCKSZ - \
-				   MAXALIGN(sizeof(PageHeaderData) + (EXTERN_TUPLES_PER_PAGE-1) * sizeof(ItemIdData))) \
+				   MAXALIGN(SizeOfPageHeaderData + EXTERN_TUPLES_PER_PAGE * sizeof(ItemIdData))) \
 				  / EXTERN_TUPLES_PER_PAGE)
 
 #define TOAST_MAX_CHUNK_SIZE	\
@@ -94,7 +93,7 @@
  */
 extern HeapTuple toast_insert_or_update(Relation rel,
 					   HeapTuple newtup, HeapTuple oldtup,
-					   bool use_wal, bool use_fsm);
+					   int options);
 
 /* ----------
  * toast_delete -

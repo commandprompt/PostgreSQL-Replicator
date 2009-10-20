@@ -6,6 +6,8 @@ INSERT INTO xmltest VALUES (1, '<value>one</value>');
 INSERT INTO xmltest VALUES (2, '<value>two</value>');
 INSERT INTO xmltest VALUES (3, '<wrong');
 ERROR:  invalid XML content
+LINE 1: INSERT INTO xmltest VALUES (3, '<wrong');
+                                       ^
 DETAIL:  Entity: line 1: parser error : Couldn't find end of Start Tag wrong line 1
 <wrong
       ^
@@ -54,8 +56,12 @@ SELECT xmlconcat('hello', 'you');
 
 SELECT xmlconcat(1, 2);
 ERROR:  argument of XMLCONCAT must be type xml, not type integer
+LINE 1: SELECT xmlconcat(1, 2);
+                         ^
 SELECT xmlconcat('bad', '<syntax');
 ERROR:  invalid XML content
+LINE 1: SELECT xmlconcat('bad', '<syntax');
+                                ^
 DETAIL:  Entity: line 1: parser error : Couldn't find end of Start Tag syntax line 1
 <syntax
        ^
@@ -94,6 +100,8 @@ SELECT xmlelement(name element,
 SELECT xmlelement(name element,
                   xmlattributes ('unnamed and wrong'));
 ERROR:  unnamed XML attribute value must be a column reference
+LINE 2:                   xmlattributes ('unnamed and wrong'));
+                                         ^
 SELECT xmlelement(name element, xmlelement(name nested, 'stuff'));
                 xmlelement                 
 -------------------------------------------
@@ -113,6 +121,8 @@ SELECT xmlelement(name employee, xmlforest(name, age, salary as pay)) FROM emp;
 
 SELECT xmlelement(name duplicate, xmlattributes(1 as a, 2 as b, 3 as a));
 ERROR:  XML attribute name "a" appears more than once
+LINE 1: ...ment(name duplicate, xmlattributes(1 as a, 2 as b, 3 as a));
+                                                              ^
 SELECT xmlelement(name num, 37);
   xmlelement   
 ---------------
@@ -161,6 +171,27 @@ SELECT xmlelement(name foo, bytea 'bar');
     xmlelement     
 -------------------
  <foo>626172</foo>
+(1 row)
+
+SELECT xmlelement(name foo, xmlattributes(true as bar));
+    xmlelement     
+-------------------
+ <foo bar="true"/>
+(1 row)
+
+SELECT xmlelement(name foo, xmlattributes('2009-04-09 00:24:37'::timestamp as bar));
+            xmlelement            
+----------------------------------
+ <foo bar="2009-04-09T00:24:37"/>
+(1 row)
+
+SELECT xmlelement(name foo, xmlattributes('infinity'::timestamp as bar));
+ERROR:  timestamp out of range
+DETAIL:  XML does not support infinite timestamp values.
+SELECT xmlelement(name foo, xmlattributes('<>&"''' as funny, xml 'b<a/>r' as funnier));
+                         xmlelement                         
+------------------------------------------------------------
+ <foo funny="&lt;&gt;&amp;&quot;'" funnier="b&lt;a/&gt;r"/>
 (1 row)
 
 SELECT xmlparse(content 'abc');
@@ -346,6 +377,8 @@ SELECT xml 'abc' IS NOT DOCUMENT;
 
 SELECT '<>' IS NOT DOCUMENT;
 ERROR:  invalid XML content
+LINE 1: SELECT '<>' IS NOT DOCUMENT;
+               ^
 DETAIL:  Entity: line 1: parser error : StartTag: invalid element name
 <>
  ^
@@ -390,6 +423,8 @@ EXECUTE foo ('<bar/>');
 
 EXECUTE foo ('bad');
 ERROR:  invalid XML document
+LINE 1: EXECUTE foo ('bad');
+                     ^
 DETAIL:  Entity: line 1: parser error : Start tag expected, '<' not found
 bad
 ^

@@ -26,13 +26,16 @@
 
 #include "access/heapam.h"
 #include "access/multixact.h"
+#include "access/relscan.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/tqual.h"
 
 
 PG_MODULE_MAGIC;
@@ -54,7 +57,7 @@ typedef struct
 	Relation	rel;
 	HeapScanDesc scan;
 	int			ncolumns;
-}	MyData;
+} MyData;
 
 Datum
 pgrowlocks(PG_FUNCTION_ARGS)

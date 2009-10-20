@@ -3,7 +3,7 @@
  * misc.c
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,40 +20,21 @@
 #include <math.h>
 
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "parser/keywords.h"
 #include "postmaster/syslogger.h"
 #include "storage/fd.h"
 #include "storage/pmsignal.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
+#include "tcop/tcopprot.h"
 
 #define atooid(x)  ((Oid) strtoul((x), NULL, 10))
 
-
-/*
- * Check if data is Null
- */
-Datum
-nullvalue(PG_FUNCTION_ARGS)
-{
-	if (PG_ARGISNULL(0))
-		PG_RETURN_BOOL(true);
-	PG_RETURN_BOOL(false);
-}
-
-/*
- * Check if data is not Null
- */
-Datum
-nonnullvalue(PG_FUNCTION_ARGS)
-{
-	if (PG_ARGISNULL(0))
-		PG_RETURN_BOOL(false);
-	PG_RETURN_BOOL(true);
-}
 
 /*
  * current_database()
@@ -70,6 +51,21 @@ current_database(PG_FUNCTION_ARGS)
 	PG_RETURN_NAME(db);
 }
 
+
+/*
+ * current_query()
+ *	Expose the current query to the user (useful in stored procedures)
+ *	We might want to use ActivePortal->sourceText someday.
+ */
+Datum
+current_query(PG_FUNCTION_ARGS)
+{
+	/* there is no easy way to access the more concise 'query_string' */
+	if (debug_query_string)
+		PG_RETURN_TEXT_P(cstring_to_text(debug_query_string));
+	else
+		PG_RETURN_NULL();
+}
 
 /*
  * Functions to send signals to other backends.
@@ -115,6 +111,12 @@ pg_cancel_backend(PG_FUNCTION_ARGS)
 }
 
 Datum
+pg_terminate_backend(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(pg_signal_backend(PG_GETARG_INT32(0), SIGTERM));
+}
+
+Datum
 pg_reload_conf(PG_FUNCTION_ARGS)
 {
 	if (!superuser())
@@ -154,17 +156,6 @@ pg_rotate_logfile(PG_FUNCTION_ARGS)
 	SendPostmasterSignal(PMSIGNAL_ROTATE_LOGFILE);
 	PG_RETURN_BOOL(true);
 }
-
-#ifdef NOT_USED
-
-/* Disabled in 8.0 due to reliability concerns; FIXME someday */
-Datum
-pg_terminate_backend(PG_FUNCTION_ARGS)
-{
-	PG_RETURN_INT32(pg_signal_backend(PG_GETARG_INT32(0), SIGTERM));
-}
-#endif
-
 
 /* Function to find out which databases make use of a tablespace */
 
@@ -312,4 +303,83 @@ pg_sleep(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_VOID();
+}
+
+/* Function to return the list of grammar keywords */
+Datum
+pg_get_keywords(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+		TupleDesc	tupdesc;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(3, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "word",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "catcode",
+						   CHAROID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "catdesc",
+						   TEXTOID, -1, 0);
+
+		funcctx->attinmeta = TupleDescGetAttInMetadata(tupdesc);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	if (&ScanKeywords[funcctx->call_cntr] < LastScanKeyword)
+	{
+		char	   *values[3];
+		HeapTuple	tuple;
+
+		/* cast-away-const is ugly but alternatives aren't much better */
+		values[0] = (char *) ScanKeywords[funcctx->call_cntr].name;
+
+		switch (ScanKeywords[funcctx->call_cntr].category)
+		{
+			case UNRESERVED_KEYWORD:
+				values[1] = "U";
+				values[2] = _("unreserved");
+				break;
+			case COL_NAME_KEYWORD:
+				values[1] = "C";
+				values[2] = _("unreserved (cannot be function or type name)");
+				break;
+			case TYPE_FUNC_NAME_KEYWORD:
+				values[1] = "T";
+				values[2] = _("reserved (can be function or type name)");
+				break;
+			case RESERVED_KEYWORD:
+				values[1] = "R";
+				values[2] = _("reserved");
+				break;
+			default:			/* shouldn't be possible */
+				values[1] = NULL;
+				values[2] = NULL;
+				break;
+		}
+
+		tuple = BuildTupleFromCStrings(funcctx->attinmeta, values);
+
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+
+	SRF_RETURN_DONE(funcctx);
+}
+
+
+/*
+ * Return the type of the argument.
+ */
+Datum
+pg_typeof(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_OID(get_fn_expr_argtype(fcinfo->flinfo, 0));
 }

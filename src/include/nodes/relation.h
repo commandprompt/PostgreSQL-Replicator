@@ -4,7 +4,7 @@
  *	  Definitions for planner's internal data structures.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -74,6 +74,10 @@ typedef struct PlannerGlobal
 
 	List	   *relationOids;	/* OIDs of relations the plan depends on */
 
+	List	   *invalItems;		/* other dependencies, as PlanInvalItems */
+
+	Index		lastPHId;		/* highest PlaceHolderVar ID assigned */
+
 	bool		transientPlan;	/* redo plan when TransactionXmin changes? */
 } PlannerGlobal;
 
@@ -101,6 +105,8 @@ typedef struct PlannerInfo
 	PlannerGlobal *glob;		/* global info for current planner run */
 
 	Index		query_level;	/* 1 at the outermost Query */
+
+	struct PlannerInfo *parent_root;	/* NULL at outermost Query */
 
 	/*
 	 * simple_rel_array holds pointers to "base rels" and "other rels" (see
@@ -136,7 +142,9 @@ typedef struct PlannerInfo
 
 	List	   *returningLists; /* list of lists of TargetEntry, or NIL */
 
-	List	   *init_plans;		/* init subplans for query */
+	List	   *init_plans;		/* init SubPlans for query */
+
+	List	   *cte_plan_ids;	/* per-CTE-item list of subplan IDs */
 
 	List	   *eq_classes;		/* list of active EquivalenceClasses */
 
@@ -153,16 +161,18 @@ typedef struct PlannerInfo
 	List	   *full_join_clauses;		/* list of RestrictInfos for
 										 * mergejoinable full join clauses */
 
-	List	   *oj_info_list;	/* list of OuterJoinInfos */
-
-	List	   *in_info_list;	/* list of InClauseInfos */
+	List	   *join_info_list; /* list of SpecialJoinInfos */
 
 	List	   *append_rel_list;	/* list of AppendRelInfos */
+
+	List	   *placeholder_list;		/* list of PlaceHolderInfos */
 
 	List	   *query_pathkeys; /* desired pathkeys for query_planner(), and
 								 * actual pathkeys afterwards */
 
 	List	   *group_pathkeys; /* groupClause pathkeys, if any */
+	List	   *window_pathkeys;	/* pathkeys of bottom window, if any */
+	List	   *distinct_pathkeys;		/* distinctClause pathkeys, if any */
 	List	   *sort_pathkeys;	/* sortClause pathkeys, if any */
 
 	List	   *initial_rels;	/* RelOptInfos we are now trying to join */
@@ -174,10 +184,14 @@ typedef struct PlannerInfo
 	double		tuple_fraction; /* tuple_fraction passed to query_planner */
 
 	bool		hasJoinRTEs;	/* true if any RTEs are RTE_JOIN kind */
-	bool		hasOuterJoins;	/* true if any RTEs are outer joins */
 	bool		hasHavingQual;	/* true if havingQual was non-null */
 	bool		hasPseudoConstantQuals; /* true if any RestrictInfo has
 										 * pseudoconstant = true */
+	bool		hasRecursion;	/* true if planning a recursive WITH item */
+
+	/* These fields are used only when hasRecursion is true: */
+	int			wt_param_id;	/* PARAM_EXEC ID for the work table */
+	struct Plan *non_recursive_plan;	/* plan for non-recursive term */
 } PlannerInfo;
 
 
@@ -234,9 +248,12 @@ typedef struct PlannerInfo
  *			   clauses have been applied (ie, output rows of a plan for it)
  *		width - avg. number of bytes per tuple in the relation after the
  *				appropriate projections have been done (ie, output width)
- *		reltargetlist - List of Var nodes for the attributes we need to
- *						output from this relation (in no particular order)
- *						NOTE: in a child relation, may contain RowExprs
+ *		reltargetlist - List of Var and PlaceHolderVar nodes for the values
+ *						we need to output from this relation.
+ *						List is in no particular order, but all rels of an
+ *						appendrel set must use corresponding orders.
+ *						NOTE: in a child relation, may contain RowExpr or
+ *						ConvertRowtypeExpr representing a whole-row Var.
  *		pathlist - List of Path nodes, one for each potentially useful
  *				   method of generating the relation
  *		cheapest_startup_path - the pathlist member with lowest startup cost
@@ -328,7 +345,7 @@ typedef struct RelOptInfo
 	int			width;			/* estimated avg width of result tuples */
 
 	/* materialization information */
-	List	   *reltargetlist;	/* needed Vars */
+	List	   *reltargetlist;	/* Vars to be output by scan of relation */
 	List	   *pathlist;		/* Path structures */
 	struct Path *cheapest_startup_path;
 	struct Path *cheapest_total_path;
@@ -341,7 +358,7 @@ typedef struct RelOptInfo
 	AttrNumber	max_attr;		/* largest attrno of rel */
 	Relids	   *attr_needed;	/* array indexed [min_attr .. max_attr] */
 	int32	   *attr_widths;	/* array indexed [min_attr .. max_attr] */
-	List	   *indexlist;
+	List	   *indexlist;		/* list of IndexOptInfo */
 	BlockNumber pages;
 	double		tuples;
 	struct Plan *subplan;		/* if subquery */
@@ -424,6 +441,8 @@ typedef struct IndexOptInfo
 	bool		unique;			/* true if a unique index */
 	bool		amoptionalkey;	/* can query omit key for the first column? */
 	bool		amsearchnulls;	/* can AM search for NULL index entries? */
+	bool		amhasgettuple;	/* does AM have amgettuple interface? */
+	bool		amhasgetbitmap; /* does AM have amgetbitmap interface? */
 } IndexOptInfo;
 
 
@@ -542,8 +561,9 @@ typedef struct PathKey
 } PathKey;
 
 /*
- * Type "Path" is used as-is for sequential-scan paths.  For other
- * path types it is the first component of a larger struct.
+ * Type "Path" is used as-is for sequential-scan paths, as well as some other
+ * simple plan types that we don't need any extra information in the path for.
+ * For other path types it is the first component of a larger struct.
  *
  * Note: "pathtype" is the NodeTag of the Plan node we could build from this
  * Path.  It is partially redundant with the Path's NodeTag, but allows us
@@ -755,6 +775,8 @@ typedef struct UniquePath
 	Path		path;
 	Path	   *subpath;
 	UniquePathMethod umethod;
+	List	   *in_operators;	/* equality operators of the IN clause */
+	List	   *uniq_exprs;		/* expressions to be made unique */
 	double		rows;			/* estimated number of result tuples */
 } UniquePath;
 
@@ -823,6 +845,7 @@ typedef struct HashPath
 {
 	JoinPath	jpath;
 	List	   *path_hashclauses;		/* join clauses used for hashing */
+	int			num_batches;	/* number of batches expected */
 } HashPath;
 
 /*
@@ -893,7 +916,7 @@ typedef struct HashPath
  * if we decide that it can be pushed down into the nullable side of the join.
  * In that case it acts as a plain filter qual for wherever it gets evaluated.
  * (In short, is_pushed_down is only false for non-degenerate outer join
- * conditions.  Possibly we should rename it to reflect that meaning?)
+ * conditions.	Possibly we should rename it to reflect that meaning?)
  *
  * RestrictInfo nodes also contain an outerjoin_delayed flag, which is true
  * if the clause's applicability must be delayed due to any outer joins
@@ -903,7 +926,7 @@ typedef struct HashPath
  * forced null by some outer join below the clause.  outerjoin_delayed = true
  * is subtly different from nullable_relids != NULL: a clause might reference
  * some nullable rels and yet not be outerjoin_delayed because it also
- * references all the other rels of the outer join(s).  A clause that is not
+ * references all the other rels of the outer join(s).	A clause that is not
  * outerjoin_delayed can be enforced anywhere it is computable.
  *
  * In general, the referenced clause might be arbitrarily complex.	The
@@ -954,7 +977,7 @@ typedef struct RestrictInfo
 
 	bool		is_pushed_down; /* TRUE if clause was pushed down in level */
 
-	bool		outerjoin_delayed;	/* TRUE if delayed by lower outer join */
+	bool		outerjoin_delayed;		/* TRUE if delayed by lower outer join */
 
 	bool		can_join;		/* see comment above */
 
@@ -981,8 +1004,11 @@ typedef struct RestrictInfo
 
 	/* cache space for cost and selectivity */
 	QualCost	eval_cost;		/* eval cost of clause; -1 if not yet set */
-	Selectivity this_selec;		/* selectivity; -1 if not yet set; >1 means
-								 * a redundant clause */
+	Selectivity norm_selec;		/* selectivity for "normal" (JOIN_INNER)
+								 * semantics; -1 if not yet set; >1 means a
+								 * redundant clause */
+	Selectivity outer_selec;	/* selectivity for outer join semantics; -1 if
+								 * not yet set */
 
 	/* valid if clause is mergejoinable, else NIL */
 	List	   *mergeopfamilies;	/* opfamilies containing clause operator */
@@ -1062,18 +1088,48 @@ typedef struct InnerIndexscanInfo
 } InnerIndexscanInfo;
 
 /*
- * Outer join info.
+ * Placeholder node for an expression to be evaluated below the top level
+ * of a plan tree.	This is used during planning to represent the contained
+ * expression.	At the end of the planning process it is replaced by either
+ * the contained expression or a Var referring to a lower-level evaluation of
+ * the contained expression.  Typically the evaluation occurs below an outer
+ * join, and Var references above the outer join might thereby yield NULL
+ * instead of the expression value.
+ *
+ * Although the planner treats this as an expression node type, it is not
+ * recognized by the parser or executor, so we declare it here rather than
+ * in primnodes.h.
+ */
+
+typedef struct PlaceHolderVar
+{
+	Expr		xpr;
+	Expr	   *phexpr;			/* the represented expression */
+	Relids		phrels;			/* base relids syntactically within expr src */
+	Index		phid;			/* ID for PHV (unique within planner run) */
+	Index		phlevelsup;		/* > 0 if PHV belongs to outer query */
+} PlaceHolderVar;
+
+/*
+ * "Special join" info.
  *
  * One-sided outer joins constrain the order of joining partially but not
  * completely.	We flatten such joins into the planner's top-level list of
- * relations to join, but record information about each outer join in an
- * OuterJoinInfo struct.  These structs are kept in the PlannerInfo node's
- * oj_info_list.
+ * relations to join, but record information about each outer join in a
+ * SpecialJoinInfo struct.	These structs are kept in the PlannerInfo node's
+ * join_info_list.
+ *
+ * Similarly, semijoins and antijoins created by flattening IN (subselect)
+ * and EXISTS(subselect) clauses create partial constraints on join order.
+ * These are likewise recorded in SpecialJoinInfo structs.
+ *
+ * We make SpecialJoinInfos for FULL JOINs even though there is no flexibility
+ * of planning for them, because this simplifies make_join_rel()'s API.
  *
  * min_lefthand and min_righthand are the sets of base relids that must be
- * available on each side when performing the outer join.  lhs_strict is
- * true if the outer join's condition cannot succeed when the LHS variables
- * are all NULL (this means that the outer join can commute with upper-level
+ * available on each side when performing the special join.  lhs_strict is
+ * true if the special join's condition cannot succeed when the LHS variables
+ * are all NULL (this means that an outer join can commute with upper-level
  * outer joins even if it appears in their RHS).  We don't bother to set
  * lhs_strict for FULL JOINs, however.
  *
@@ -1081,9 +1137,8 @@ typedef struct InnerIndexscanInfo
  * if they were, this would break the logic that enforces join order.
  *
  * syn_lefthand and syn_righthand are the sets of base relids that are
- * syntactically below this outer join.  (These are needed to help compute
- * min_lefthand and min_righthand for higher joins, but are not used
- * thereafter.)
+ * syntactically below this special join.  (These are needed to help compute
+ * min_lefthand and min_righthand for higher joins.)
  *
  * delay_upper_joins is set TRUE if we detect a pushed-down clause that has
  * to be evaluated after this join is formed (because it references the RHS).
@@ -1091,46 +1146,38 @@ typedef struct InnerIndexscanInfo
  * commute with this join, because that would leave noplace to check the
  * pushed-down clause.	(We don't track this for FULL JOINs, either.)
  *
- * Note: OuterJoinInfo directly represents only LEFT JOIN and FULL JOIN;
- * RIGHT JOIN is handled by switching the inputs to make it a LEFT JOIN.
- * We make an OuterJoinInfo for FULL JOINs even though there is no flexibility
- * of planning for them, because this simplifies make_join_rel()'s API.
+ * join_quals is an implicit-AND list of the quals syntactically associated
+ * with the join (they may or may not end up being applied at the join level).
+ * This is just a side list and does not drive actual application of quals.
+ * For JOIN_SEMI joins, this is cleared to NIL in create_unique_path() if
+ * the join is found not to be suitable for a uniqueify-the-RHS plan.
+ *
+ * jointype is never JOIN_RIGHT; a RIGHT JOIN is handled by switching
+ * the inputs to make it a LEFT JOIN.  So the allowed values of jointype
+ * in a join_info_list member are only LEFT, FULL, SEMI, or ANTI.
+ *
+ * For purposes of join selectivity estimation, we create transient
+ * SpecialJoinInfo structures for regular inner joins; so it is possible
+ * to have jointype == JOIN_INNER in such a structure, even though this is
+ * not allowed within join_info_list.  We also create transient
+ * SpecialJoinInfos with jointype == JOIN_INNER for outer joins, since for
+ * cost estimation purposes it is sometimes useful to know the join size under
+ * plain innerjoin semantics.  Note that lhs_strict, delay_upper_joins, and
+ * join_quals are not set meaningfully within such structs.
  */
 
-typedef struct OuterJoinInfo
+typedef struct SpecialJoinInfo
 {
 	NodeTag		type;
 	Relids		min_lefthand;	/* base relids in minimum LHS for join */
 	Relids		min_righthand;	/* base relids in minimum RHS for join */
 	Relids		syn_lefthand;	/* base relids syntactically within LHS */
 	Relids		syn_righthand;	/* base relids syntactically within RHS */
-	bool		is_full_join;	/* it's a FULL OUTER JOIN */
+	JoinType	jointype;		/* always INNER, LEFT, FULL, SEMI, or ANTI */
 	bool		lhs_strict;		/* joinclause is strict for some LHS rel */
 	bool		delay_upper_joins;		/* can't commute with upper RHS */
-} OuterJoinInfo;
-
-/*
- * IN clause info.
- *
- * When we convert top-level IN quals into join operations, we must restrict
- * the order of joining and use special join methods at some join points.
- * We record information about each such IN clause in an InClauseInfo struct.
- * These structs are kept in the PlannerInfo node's in_info_list.
- *
- * Note: sub_targetlist is a bit misnamed; it is a list of the expressions
- * on the RHS of the IN's join clauses.  (This normally starts out as a list
- * of Vars referencing the subquery outputs, but can get mutated if the
- * subquery is flattened into the main query.)
- */
-
-typedef struct InClauseInfo
-{
-	NodeTag		type;
-	Relids		lefthand;		/* base relids in lefthand expressions */
-	Relids		righthand;		/* base relids coming from the subselect */
-	List	   *sub_targetlist; /* RHS expressions of the IN's comparisons */
-	List	   *in_operators;	/* OIDs of the IN's equality operators */
-} InClauseInfo;
+	List	   *join_quals;		/* join quals, in implicit-AND list format */
+} SpecialJoinInfo;
 
 /*
  * Append-relation info.
@@ -1189,26 +1236,13 @@ typedef struct AppendRelInfo
 	Oid			child_reltype;	/* OID of child's composite type */
 
 	/*
-	 * The N'th element of this list is the integer column number of the child
-	 * column corresponding to the N'th column of the parent. A list element
-	 * is zero if it corresponds to a dropped column of the parent (this is
-	 * only possible for inheritance cases, not UNION ALL).
-	 */
-	List	   *col_mappings;	/* list of child attribute numbers */
-
-	/*
 	 * The N'th element of this list is a Var or expression representing the
 	 * child column corresponding to the N'th column of the parent. This is
 	 * used to translate Vars referencing the parent rel into references to
 	 * the child.  A list element is NULL if it corresponds to a dropped
 	 * column of the parent (this is only possible for inheritance cases, not
-	 * UNION ALL).
-	 *
-	 * This might seem redundant with the col_mappings data, but it is handy
-	 * because flattening of sub-SELECTs that are members of a UNION ALL will
-	 * cause changes in the expressions that need to be substituted for a
-	 * parent Var.	Adjusting this data structure lets us track what really
-	 * needs to be substituted.
+	 * UNION ALL).	The list elements are always simple Vars for inheritance
+	 * cases, but can be arbitrary expressions in UNION ALL cases.
 	 *
 	 * Notice we only store entries for user columns (attno > 0).  Whole-row
 	 * Vars are special-cased, and system columns (attno < 0) need no special
@@ -1226,6 +1260,34 @@ typedef struct AppendRelInfo
 	 */
 	Oid			parent_reloid;	/* OID of parent relation */
 } AppendRelInfo;
+
+/*
+ * For each distinct placeholder expression generated during planning, we
+ * store a PlaceHolderInfo node in the PlannerInfo node's placeholder_list.
+ * This stores info that is needed centrally rather than in each copy of the
+ * PlaceHolderVar.	The phid fields identify which PlaceHolderInfo goes with
+ * each PlaceHolderVar.  Note that phid is unique throughout a planner run,
+ * not just within a query level --- this is so that we need not reassign ID's
+ * when pulling a subquery into its parent.
+ *
+ * The idea is to evaluate the expression at (only) the ph_eval_at join level,
+ * then allow it to bubble up like a Var until the ph_needed join level.
+ * ph_needed has the same definition as attr_needed for a regular Var.
+ *
+ * We create a PlaceHolderInfo only after determining that the PlaceHolderVar
+ * is actually referenced in the plan tree.
+ */
+
+typedef struct PlaceHolderInfo
+{
+	NodeTag		type;
+
+	Index		phid;			/* ID for PH (unique within planner run) */
+	PlaceHolderVar *ph_var;		/* copy of PlaceHolderVar tree */
+	Relids		ph_eval_at;		/* lowest level we can evaluate value at */
+	Relids		ph_needed;		/* highest level the value is needed at */
+	int32		ph_width;		/* estimated attribute width */
+} PlaceHolderInfo;
 
 /*
  * glob->paramlist keeps track of the PARAM_EXEC slots that we have decided

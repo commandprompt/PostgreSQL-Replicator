@@ -10,7 +10,7 @@
  *	  Over time, this has also become the preferred place for widely known
  *	  resource-limitation stuff, such as work_mem and check_stack_depth().
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -23,10 +23,10 @@
 #ifndef MISCADMIN_H
 #define MISCADMIN_H
 
-#include <time.h>				/* for time_t */
+#include "pgtime.h"				/* for pg_time_t */
 
 
-#define PG_VERSIONSTR "postgres (PostgreSQL) " PG_VERSION "\n"
+#define PG_BACKEND_VERSIONSTR "postgres (PostgreSQL) " PG_VERSION "\n"
 
 
 /*****************************************************************************
@@ -123,7 +123,7 @@ do { \
  */
 extern pid_t PostmasterPid;
 extern bool IsPostmasterEnvironment;
-extern bool IsUnderPostmaster;
+extern PGDLLIMPORT bool IsUnderPostmaster;
 
 extern bool ExitOnAnyError;
 
@@ -134,9 +134,10 @@ extern int	MaxBackends;
 extern int	MaxConnections;
 
 extern PGDLLIMPORT int MyProcPid;
-extern PGDLLIMPORT time_t MyStartTime;
+extern PGDLLIMPORT pg_time_t MyStartTime;
 extern PGDLLIMPORT struct Port *MyProcPort;
 extern long MyCancelKey;
+extern int	MyPMChildSlot;
 
 extern char OutputFileName[];
 extern PGDLLIMPORT char my_exec_path[];
@@ -191,6 +192,20 @@ extern PGDLLIMPORT Oid MyDatabaseTableSpace;
 
 extern int	DateStyle;
 extern int	DateOrder;
+
+/*
+ * IntervalStyles
+ *	 INTSTYLE_POSTGRES			   Like Postgres < 8.4 when DateStyle = 'iso'
+ *	 INTSTYLE_POSTGRES_VERBOSE	   Like Postgres < 8.4 when DateStyle != 'iso'
+ *	 INTSTYLE_SQL_STANDARD		   SQL standard interval literals
+ *	 INTSTYLE_ISO_8601			   ISO-8601-basic formatted intervals
+ */
+#define INTSTYLE_POSTGRES			0
+#define INTSTYLE_POSTGRES_VERBOSE	1
+#define INTSTYLE_SQL_STANDARD		2
+#define INTSTYLE_ISO_8601			3
+
+extern int	IntervalStyle;
 
 /*
  * HasCTZSet is true if user has set timezone as a numeric offset from UTC.
@@ -318,6 +333,7 @@ extern void BaseInit(void);
 
 /* in utils/init/miscinit.c */
 extern bool IgnoreSystemIndexes;
+extern PGDLLIMPORT bool process_shared_preload_libraries_in_progress;
 extern char *shared_preload_libraries_string;
 extern char *local_preload_libraries_string;
 
@@ -333,5 +349,10 @@ extern void RecordSharedMemoryInLockFile(unsigned long id1,
 extern void ValidatePgVersion(const char *path);
 extern void process_shared_preload_libraries(void);
 extern void process_local_preload_libraries(void);
+extern void pg_bindtextdomain(const char *domain);
+
+/* in access/transam/xlog.c */
+extern bool BackupInProgress(void);
+extern void CancelBackup(void);
 
 #endif   /* MISCADMIN_H */

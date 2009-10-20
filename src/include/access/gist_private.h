@@ -4,7 +4,7 @@
  *	  private declarations for GiST -- declarations related to the
  *	  internal implementation of GiST, not the public API
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -16,9 +16,7 @@
 
 #include "access/gist.h"
 #include "access/itup.h"
-#include "access/xlog.h"
-#include "access/xlogdefs.h"
-#include "fmgr.h"
+#include "storage/bufmgr.h"
 
 #define GIST_UNLOCK BUFFER_LOCK_UNLOCK
 #define GIST_SHARE	BUFFER_LOCK_SHARE
@@ -60,11 +58,12 @@ typedef struct GISTSTATE
 	TupleDesc	tupdesc;
 } GISTSTATE;
 
-typedef struct MatchedItemPtr 
+typedef struct ItemResult
 {
-	ItemPointerData		heapPtr;
-	OffsetNumber		pageOffset; /* offset in index page */
-} MatchedItemPtr;
+	ItemPointerData heapPtr;
+	OffsetNumber pageOffset;	/* offset in index page */
+	bool		recheck;
+} ItemResult;
 
 /*
  *	When we're doing a scan, we need to keep track of the parent stack
@@ -74,21 +73,15 @@ typedef struct GISTScanOpaqueData
 {
 	GISTSearchStack *stack;
 	GISTSearchStack *markstk;
-	uint16		flags;
-	bool        qual_ok;        /* false if qual can never be satisfied */
+	bool		qual_ok;		/* false if qual can never be satisfied */
 	GISTSTATE  *giststate;
 	MemoryContext tempCxt;
 	Buffer		curbuf;
 	ItemPointerData curpos;
-	Buffer		markbuf;
-	ItemPointerData markpos;
 
-	MatchedItemPtr	pageData[BLCKSZ/sizeof(IndexTupleData)];
-	OffsetNumber	nPageData;
-	OffsetNumber	curPageData;
-	MatchedItemPtr	markPageData[BLCKSZ/sizeof(IndexTupleData)];
-	OffsetNumber	markNPageData;
-	OffsetNumber	markCurPageData;
+	ItemResult	pageData[BLCKSZ / sizeof(IndexTupleData)];
+	OffsetNumber nPageData;
+	OffsetNumber curPageData;
 } GISTScanOpaqueData;
 
 typedef GISTScanOpaqueData *GISTScanOpaque;
@@ -227,15 +220,6 @@ typedef struct
 	ItemPointerData key;
 } GISTInsertState;
 
-/*
- * When we're doing a scan and updating a tree at the same time, the
- * updates may affect the scan.  We use the flags entry of the scan's
- * opaque space to record our actual position in response to updates
- * that we can't handle simply by adjusting pointers.
- */
-#define GS_CURBEFORE	((uint16) (1 << 0))
-#define GS_MRKBEFORE	((uint16) (1 << 1))
-
 /* root page of a gist index */
 #define GIST_ROOT_BLKNO				0
 
@@ -283,7 +267,7 @@ extern XLogRecPtr gistxlogInsertCompletion(RelFileNode node, ItemPointerData *ke
 
 /* gistget.c */
 extern Datum gistgettuple(PG_FUNCTION_ARGS);
-extern Datum gistgetmulti(PG_FUNCTION_ARGS);
+extern Datum gistgetbitmap(PG_FUNCTION_ARGS);
 
 /* gistutil.c */
 
@@ -298,8 +282,8 @@ extern bool gistfitpage(IndexTuple *itvec, int len);
 extern bool gistnospace(Page page, IndexTuple *itvec, int len, OffsetNumber todelete, Size freespace);
 extern void gistcheckpage(Relation rel, Buffer buf);
 extern Buffer gistNewBuffer(Relation r);
-extern OffsetNumber gistfillbuffer(Relation r, Page page, IndexTuple *itup,
-			   int len, OffsetNumber off);
+extern void gistfillbuffer(Page page, IndexTuple *itup, int len,
+			   OffsetNumber off);
 extern IndexTuple *gistextractpage(Page page, int *len /* out */ );
 extern IndexTuple *gistjoinvector(
 			   IndexTuple *itvec, int *len,

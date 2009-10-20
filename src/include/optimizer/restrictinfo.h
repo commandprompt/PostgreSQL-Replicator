@@ -4,7 +4,7 @@
  *	  prototypes for restrictinfo.c.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -30,8 +30,11 @@ extern RestrictInfo *make_restrictinfo(Expr *clause,
 extern List *make_restrictinfo_from_bitmapqual(Path *bitmapqual,
 								  bool is_pushed_down,
 								  bool include_predicates);
+extern List *make_restrictinfos_from_actual_clauses(PlannerInfo *root,
+									   List *clause_list);
 extern bool restriction_is_or_clause(RestrictInfo *restrictinfo);
 extern List *get_actual_clauses(List *restrictinfo_list);
+extern List *get_all_actual_clauses(List *restrictinfo_list);
 extern List *extract_actual_clauses(List *restrictinfo_list,
 					   bool pseudoconstant);
 extern void extract_actual_join_clauses(List *restrictinfo_list,
@@ -39,6 +42,6 @@ extern void extract_actual_join_clauses(List *restrictinfo_list,
 							List **otherquals);
 extern List *select_nonredundant_join_clauses(PlannerInfo *root,
 								 List *restrictinfo_list,
-								 List *reference_list);
+								 Path *inner_path);
 
 #endif   /* RESTRICTINFO_H */

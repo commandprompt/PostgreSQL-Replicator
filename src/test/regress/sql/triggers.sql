@@ -415,3 +415,83 @@ UPDATE trigger_test SET f3 = NULL;
 DROP TABLE trigger_test;
 
 DROP FUNCTION mytrigger();
+
+-- Test snapshot management in serializable transactions involving triggers
+-- per bug report in 6bc73d4c0910042358k3d1adff3qa36f8df75198ecea@mail.gmail.com
+CREATE FUNCTION serializable_update_trig() RETURNS trigger LANGUAGE plpgsql AS
+$$
+declare
+	rec record;
+begin
+	new.description = 'updated in trigger';
+	return new;
+end;
+$$;
+
+CREATE TABLE serializable_update_tab (
+	id int,
+	filler  text,
+	description text
+);
+
+CREATE TRIGGER serializable_update_trig BEFORE UPDATE ON serializable_update_tab
+	FOR EACH ROW EXECUTE PROCEDURE serializable_update_trig();
+
+INSERT INTO serializable_update_tab SELECT a, repeat('xyzxz', 100), 'new'
+	FROM generate_series(1, 50) a;
+
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+UPDATE serializable_update_tab SET description = 'no no', id = 1 WHERE id = 1;
+COMMIT;
+SELECT description FROM serializable_update_tab WHERE id = 1;
+DROP TABLE serializable_update_tab;
+
+-- minimal update trigger
+
+CREATE TABLE min_updates_test (
+	f1	text,
+	f2 int,
+	f3 int);
+
+CREATE TABLE min_updates_test_oids (
+	f1	text,
+	f2 int,
+	f3 int) WITH OIDS;
+
+INSERT INTO min_updates_test VALUES ('a',1,2),('b','2',null);
+
+INSERT INTO min_updates_test_oids VALUES ('a',1,2),('b','2',null);
+
+CREATE TRIGGER z_min_update 
+BEFORE UPDATE ON min_updates_test
+FOR EACH ROW EXECUTE PROCEDURE suppress_redundant_updates_trigger();
+
+CREATE TRIGGER z_min_update 
+BEFORE UPDATE ON min_updates_test_oids
+FOR EACH ROW EXECUTE PROCEDURE suppress_redundant_updates_trigger();
+
+\set QUIET false
+
+UPDATE min_updates_test SET f1 = f1;
+
+UPDATE min_updates_test SET f2 = f2 + 1;
+
+UPDATE min_updates_test SET f3 = 2 WHERE f3 is null;
+
+UPDATE min_updates_test_oids SET f1 = f1;
+
+UPDATE min_updates_test_oids SET f2 = f2 + 1;
+
+UPDATE min_updates_test_oids SET f3 = 2 WHERE f3 is null;
+
+\set QUIET true
+
+SELECT * FROM min_updates_test;
+
+SELECT * FROM min_updates_test_oids;
+
+DROP TABLE min_updates_test;
+
+DROP TABLE min_updates_test_oids;
+

@@ -3,7 +3,7 @@
  * path.c
  *	  portable path handling routines
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -432,7 +432,7 @@ dir_strcmp(const char *s1, const char *s2)
 #ifndef WIN32
 			*s1 != *s2
 #else
-			/* On windows, paths are case-insensitive */
+		/* On windows, paths are case-insensitive */
 			pg_tolower((unsigned char) *s1) != pg_tolower((unsigned char) *s2)
 #endif
 			&& !(IS_DIR_SEP(*s1) && IS_DIR_SEP(*s2)))
@@ -604,6 +604,15 @@ void
 get_doc_path(const char *my_exec_path, char *ret_path)
 {
 	make_relative_path(ret_path, DOCDIR, PGBINDIR, my_exec_path);
+}
+
+/*
+ *	get_html_path
+ */
+void
+get_html_path(const char *my_exec_path, char *ret_path)
+{
+	make_relative_path(ret_path, HTMLDIR, PGBINDIR, my_exec_path);
 }
 
 /*

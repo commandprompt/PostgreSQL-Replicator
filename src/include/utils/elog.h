@@ -4,7 +4,7 @@
  *	  POSTGRES error reporting/logging definitions.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -28,12 +28,13 @@
 #define COMMERROR	16			/* Client communication problems; same as LOG
 								 * for server reporting, but never sent to
 								 * client. */
-#define INFO		17			/* Informative messages that are always sent
-								 * to client;  is not affected by
-								 * client_min_messages */
+#define INFO		17			/* Messages specifically requested by user (eg
+								 * VACUUM VERBOSE output); always sent to
+								 * client regardless of client_min_messages,
+								 * but by default not sent to server log. */
 #define NOTICE		18			/* Helpful messages to users about query
-								 * operation;  sent to client and server log
-								 * by default. */
+								 * operation; sent to client and server log by
+								 * default. */
 #define WARNING		19			/* Warnings.  NOTICE is for expected messages
 								 * like implicit sequence creation by SERIAL.
 								 * WARNING is for unexpected messages. */
@@ -92,14 +93,26 @@
  * ERRCODE_INTERNAL_ERROR if elevel is ERROR or more, ERRCODE_WARNING
  * if elevel is WARNING, or ERRCODE_SUCCESSFUL_COMPLETION if elevel is
  * NOTICE or below.
+ *
+ * ereport_domain() allows a message domain to be specified, for modules that
+ * wish to use a different message catalog from the backend's.	To avoid having
+ * one copy of the default text domain per .o file, we define it as NULL here
+ * and have errstart insert the default text domain.  Modules can either use
+ * ereport_domain() directly, or preferably they can override the TEXTDOMAIN
+ * macro.
  *----------
  */
-#define ereport(elevel, rest)  \
-	(errstart(elevel, __FILE__, __LINE__, PG_FUNCNAME_MACRO) ? \
+#define ereport_domain(elevel, domain, rest)	\
+	(errstart(elevel, __FILE__, __LINE__, PG_FUNCNAME_MACRO, domain) ? \
 	 (errfinish rest) : (void) 0)
 
+#define ereport(elevel, rest)	\
+	ereport_domain(elevel, TEXTDOMAIN, rest)
+
+#define TEXTDOMAIN NULL
+
 extern bool errstart(int elevel, const char *filename, int lineno,
-		 const char *funcname);
+		 const char *funcname, const char *domain);
 extern void errfinish(int dummy,...);
 
 extern int	errcode(int sqlerrcode);
@@ -120,10 +133,32 @@ errmsg_internal(const char *fmt,...)
 __attribute__((format(printf, 1, 2)));
 
 extern int
+errmsg_plural(const char *fmt_singular, const char *fmt_plural,
+			  unsigned long n,...)
+/* This extension allows gcc to check the format string for consistency with
+   the supplied arguments. */
+__attribute__((format(printf, 1, 4)))
+__attribute__((format(printf, 2, 4)));
+
+extern int
 errdetail(const char *fmt,...)
 /* This extension allows gcc to check the format string for consistency with
    the supplied arguments. */
 __attribute__((format(printf, 1, 2)));
+
+extern int
+errdetail_log(const char *fmt,...)
+/* This extension allows gcc to check the format string for consistency with
+   the supplied arguments. */
+__attribute__((format(printf, 1, 2)));
+
+extern int
+errdetail_plural(const char *fmt_singular, const char *fmt_plural,
+				 unsigned long n,...)
+/* This extension allows gcc to check the format string for consistency with
+   the supplied arguments. */
+__attribute__((format(printf, 1, 4)))
+__attribute__((format(printf, 2, 4)));
 
 extern int
 errhint(const char *fmt,...)
@@ -145,6 +180,7 @@ extern int	errposition(int cursorpos);
 extern int	internalerrposition(int cursorpos);
 extern int	internalerrquery(const char *query);
 
+extern int	geterrcode(void);
 extern int	geterrposition(void);
 extern int	getinternalerrposition(void);
 
@@ -262,9 +298,11 @@ typedef struct ErrorData
 	const char *filename;		/* __FILE__ of ereport() call */
 	int			lineno;			/* __LINE__ of ereport() call */
 	const char *funcname;		/* __func__ of ereport() call */
+	const char *domain;			/* message domain */
 	int			sqlerrcode;		/* encoded ERRSTATE */
 	char	   *message;		/* primary error message */
 	char	   *detail;			/* detail error message */
+	char	   *detail_log;		/* detail error message for server log only */
 	char	   *hint;			/* hint message */
 	char	   *context;		/* context message */
 	int			cursorpos;		/* cursor index into query string */
@@ -290,7 +328,7 @@ typedef enum
 	PGERROR_VERBOSE				/* all the facts, ma'am */
 } PGErrorVerbosity;
 
-extern PGErrorVerbosity Log_error_verbosity;
+extern int	Log_error_verbosity;
 extern char *Log_line_prefix;
 extern int	Log_destination;
 

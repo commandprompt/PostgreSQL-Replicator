@@ -36,7 +36,7 @@
  * to look like NO SCROLL cursors.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -102,10 +102,7 @@ typedef enum PortalStatus
 	PORTAL_FAILED				/* portal got error (can't re-run it) */
 } PortalStatus;
 
-/*
- * Note: typedef Portal is declared in tcop/dest.h as
- *		typedef struct PortalData *Portal;
- */
+typedef struct PortalData *Portal;
 
 typedef struct PortalData
 {
@@ -123,7 +120,7 @@ typedef struct PortalData
 	 */
 
 	/* The query or queries the portal will execute */
-	const char *sourceText;		/* text of query, if known (may be NULL) */
+	const char *sourceText;		/* text of query (as of 8.4, never NULL) */
 	const char *commandTag;		/* command tag for original query */
 	List	   *stmts;			/* PlannedStmts and/or utility statements */
 	CachedPlan *cplan;			/* CachedPlan, if stmts are from one */

@@ -20,13 +20,21 @@
  * step 2 ...
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
  *
  *-------------------------------------------------------------------------
  */
+
+/*
+ * We have to use postgres.h not postgres_fe.h here, because there's so much
+ * backend-only stuff in the XLOG include files we need.  But we need a
+ * frontend-ish environment otherwise.	Hence this ugly hack.
+ */
+#define FRONTEND 1
+
 #include "postgres.h"
 
 #include <dirent.h>
@@ -40,22 +48,12 @@
 #include <getopt.h>
 #endif
 
-/*
- * Mammoth Replicator note: we change xlog.h to export ControlFile (in order to
- * be able to retrieve the system identifier), but we define ControlFile as an
- * extern.  The problem is that this file defines it as a different kind of
- * symbol; so here he rename the symbol defined in the header to avoid the 
- * conflict.
- */
-#define ControlFile ControlFileDummy
-#include "access/multixact.h"
 #include "access/transam.h"
 #include "access/tuptoaster.h"
 #include "access/multixact.h"
 #include "access/xlog_internal.h"
 #include "catalog/catversion.h"
 #include "catalog/pg_control.h"
-#undef ControlFile
 
 extern int	optind;
 extern char *optarg;
@@ -99,7 +97,7 @@ main(int argc, char *argv[])
 	int			fd;
 	char		path[MAXPGPATH];
 
-	set_pglocale_pgservice(argv[0], "pg_resetxlog");
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_resetxlog"));
 
 	progname = get_progname(argv[0]);
 
@@ -454,7 +452,6 @@ GuessControlValues(void)
 {
 	uint64		sysidentifier;
 	struct timeval tv;
-	char	   *localeptr;
 
 	/*
 	 * Set up a completely default set of pg_control values.
@@ -483,10 +480,10 @@ GuessControlValues(void)
 	ControlFile.checkPointCopy.nextOid = FirstBootstrapObjectId;
 	ControlFile.checkPointCopy.nextMulti = FirstMultiXactId;
 	ControlFile.checkPointCopy.nextMultiOffset = 0;
-	ControlFile.checkPointCopy.time = time(NULL);
+	ControlFile.checkPointCopy.time = (pg_time_t) time(NULL);
 
 	ControlFile.state = DB_SHUTDOWNED;
-	ControlFile.time = time(NULL);
+	ControlFile.time = (pg_time_t) time(NULL);
 	ControlFile.checkPoint = ControlFile.checkPointCopy.redo;
 
 	ControlFile.maxAlign = MAXIMUM_ALIGNOF;
@@ -499,26 +496,12 @@ GuessControlValues(void)
 	ControlFile.indexMaxKeys = INDEX_MAX_KEYS;
 	ControlFile.toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
 #ifdef HAVE_INT64_TIMESTAMP
-	ControlFile.enableIntTimes = TRUE;
+	ControlFile.enableIntTimes = true;
 #else
-	ControlFile.enableIntTimes = FALSE;
+	ControlFile.enableIntTimes = false;
 #endif
-	ControlFile.localeBuflen = LOCALE_NAME_BUFLEN;
-
-	localeptr = setlocale(LC_COLLATE, "");
-	if (!localeptr)
-	{
-		fprintf(stderr, _("%s: invalid LC_COLLATE setting\n"), progname);
-		exit(1);
-	}
-	strlcpy(ControlFile.lc_collate, localeptr, sizeof(ControlFile.lc_collate));
-	localeptr = setlocale(LC_CTYPE, "");
-	if (!localeptr)
-	{
-		fprintf(stderr, _("%s: invalid LC_CTYPE setting\n"), progname);
-		exit(1);
-	}
-	strlcpy(ControlFile.lc_ctype, localeptr, sizeof(ControlFile.lc_ctype));
+	ControlFile.float4ByVal = FLOAT4PASSBYVAL;
+	ControlFile.float8ByVal = FLOAT8PASSBYVAL;
 
 	/*
 	 * XXX eventually, should try to grovel through old XLOG to develop more
@@ -590,12 +573,10 @@ PrintControlValues(bool guessed)
 		   ControlFile.toast_max_chunk_size);
 	printf(_("Date/time type storage:               %s\n"),
 		   (ControlFile.enableIntTimes ? _("64-bit integers") : _("floating-point numbers")));
-	printf(_("Maximum length of locale name:        %u\n"),
-		   ControlFile.localeBuflen);
-	printf(_("LC_COLLATE:                           %s\n"),
-		   ControlFile.lc_collate);
-	printf(_("LC_CTYPE:                             %s\n"),
-		   ControlFile.lc_ctype);
+	printf(_("Float4 argument passing:              %s\n"),
+		   (ControlFile.float4ByVal ? _("by value") : _("by reference")));
+	printf(_("Float8 argument passing:              %s\n"),
+		   (ControlFile.float8ByVal ? _("by value") : _("by reference")));
 }
 
 
@@ -615,10 +596,10 @@ RewriteControlFile(void)
 	ControlFile.checkPointCopy.redo.xlogid = newXlogId;
 	ControlFile.checkPointCopy.redo.xrecoff =
 		newXlogSeg * XLogSegSize + SizeOfXLogLongPHD;
-	ControlFile.checkPointCopy.time = time(NULL);
+	ControlFile.checkPointCopy.time = (pg_time_t) time(NULL);
 
 	ControlFile.state = DB_SHUTDOWNED;
-	ControlFile.time = time(NULL);
+	ControlFile.time = (pg_time_t) time(NULL);
 	ControlFile.checkPoint = ControlFile.checkPointCopy.redo;
 	ControlFile.prevCheckPoint.xlogid = 0;
 	ControlFile.prevCheckPoint.xrecoff = 0;
@@ -842,7 +823,7 @@ KillExistingArchiveStatus(void)
 	struct dirent *xlde;
 	char		path[MAXPGPATH];
 
-#define ARCHSTATDIR	XLOGDIR "/archive_status"
+#define ARCHSTATDIR XLOGDIR "/archive_status"
 
 	xldir = opendir(ARCHSTATDIR);
 	if (xldir == NULL)
@@ -857,7 +838,7 @@ KillExistingArchiveStatus(void)
 	{
 		if (strspn(xlde->d_name, "0123456789ABCDEF") == 24 &&
 			(strcmp(xlde->d_name + 24, ".ready") == 0 ||
-			 strcmp(xlde->d_name + 24, ".done")  == 0))
+			 strcmp(xlde->d_name + 24, ".done") == 0))
 		{
 			snprintf(path, MAXPGPATH, "%s/%s", ARCHSTATDIR, xlde->d_name);
 			if (unlink(path) < 0)
@@ -999,6 +980,7 @@ usage(void)
 	printf(_("%s resets the PostgreSQL transaction log.\n\n"), progname);
 	printf(_("Usage:\n  %s [OPTION]... DATADIR\n\n"), progname);
 	printf(_("Options:\n"));
+	printf(_("  -e XIDEPOCH     set next transaction ID epoch\n"));
 	printf(_("  -f              force update to be done\n"));
 	printf(_("  -l TLI,FILE,SEG force minimum WAL starting location for new transaction log\n"));
 	printf(_("  -m XID          set next multitransaction ID\n"));
@@ -1006,7 +988,6 @@ usage(void)
 	printf(_("  -o OID          set next OID\n"));
 	printf(_("  -O OFFSET       set next multitransaction offset\n"));
 	printf(_("  -x XID          set next transaction ID\n"));
-	printf(_("  -e XIDEPOCH     set next transaction ID epoch\n"));
 	printf(_("  --help          show this help, then exit\n"));
 	printf(_("  --version       output version information, then exit\n"));
 	printf(_("\nReport bugs to <pgsql-bugs@postgresql.org>.\n"));

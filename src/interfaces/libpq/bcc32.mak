@@ -62,7 +62,7 @@ OUTFILENAME=blibpq
 USERDEFINES=FRONTEND;NDEBUG;WIN32;_WINDOWS
 
 CPP=bcc32.exe
-CPP_PROJ = -I$(BCB)\include;..\..\include;..\..\include\port\win32;..\..\include\port\win32_msvc;..\..\port -n"$(INTDIR)" -WD -c -D$(USERDEFINES) -tWM \
+CPP_PROJ = -I..\..\include\port\win32_msvc;$(BCB)\include;..\..\include;..\..\include\port\win32;..\..\port -n"$(INTDIR)" -WD -c -D$(USERDEFINES) -tWM \
 		-a8 -X -w-use -w-par -w-pia -w-csu -w-aus -w-ccc
 
 !IFDEF DEBUG
@@ -91,6 +91,7 @@ CLEAN :
 	-@erase "$(INTDIR)\fe-misc.obj"
 	-@erase "$(INTDIR)\fe-print.obj"
 	-@erase "$(INTDIR)\fe-secure.obj"
+	-@erase "$(INTDIR)\libpq-events.obj"
 	-@erase "$(INTDIR)\pqexpbuffer.obj"
 	-@erase "$(INTDIR)\pqsignal.obj"
 	-@erase "$(INTDIR)\win32.obj"
@@ -133,6 +134,7 @@ LIB32_OBJS= \
 	"$(INTDIR)\fe-misc.obj" \
 	"$(INTDIR)\fe-print.obj" \
 	"$(INTDIR)\fe-secure.obj" \
+	"$(INTDIR)\libpq-events.obj" \
 	"$(INTDIR)\pqexpbuffer.obj" \
 	"$(INTDIR)\pqsignal.obj" \
 	"$(INTDIR)\wchar.obj" \
@@ -180,8 +182,8 @@ LINK32_FLAGS = -Gn -L$(BCB)\lib;$(INTDIR); -x -Tpd -v
 <<
 	implib -w "$(OUTDIR)\blibpqdll.lib" blibpqdll.def $@
 
-"$(INTDIR)\libpq.res" : "$(INTDIR)" libpq.rc
-	$(RSC) $(RSC_PROJ) libpq.rc
+"$(INTDIR)\libpq.res" : "$(INTDIR)" libpq-dist.rc
+	$(RSC) $(RSC_PROJ) libpq-dist.rc
 
 "$(OUTDIR)\blibpq.lib": $(LIB32_OBJS)
 	$(LIB32) $@ @<<

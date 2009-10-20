@@ -24,7 +24,7 @@
 
 static const char *modulename = gettext_noop("archiver (db)");
 
-static void _check_database_version(ArchiveHandle *AH, bool ignoreVersion);
+static void _check_database_version(ArchiveHandle *AH);
 static PGconn *_connectDB(ArchiveHandle *AH, const char *newdbname, const char *newUser);
 static void notice_processor(void *arg, const char *message);
 static char *_sendSQLLine(ArchiveHandle *AH, char *qry, char *eos);
@@ -48,7 +48,7 @@ _parse_version(ArchiveHandle *AH, const char *versionString)
 }
 
 static void
-_check_database_version(ArchiveHandle *AH, bool ignoreVersion)
+_check_database_version(ArchiveHandle *AH)
 {
 	int			myversion;
 	const char *remoteversion_str;
@@ -71,10 +71,7 @@ _check_database_version(ArchiveHandle *AH, bool ignoreVersion)
 	{
 		write_msg(NULL, "server version: %s; %s version: %s\n",
 				  remoteversion_str, progname, PG_VERSION);
-		if (ignoreVersion)
-			write_msg(NULL, "proceeding despite version mismatch\n");
-		else
-			die_horribly(AH, NULL, "aborting because of version mismatch  (Use the -i option to proceed anyway.)\n");
+		die_horribly(AH, NULL, "aborting because of server version mismatch\n");
 	}
 }
 
@@ -119,29 +116,36 @@ ReconnectToServer(ArchiveHandle *AH, const char *dbname, const char *username)
 
 /*
  * Connect to the db again.
+ *
+ * Note: it's not really all that sensible to use a single-entry password
+ * cache if the username keeps changing.  In current usage, however, the
+ * username never does change, so one savedPassword is sufficient.	We do
+ * update the cache on the off chance that the password has changed since the
+ * start of the run.
  */
 static PGconn *
 _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
 {
 	PGconn	   *newConn;
-	char	   *newdb;
-	char	   *newuser;
-	char	   *password = NULL;
+	const char *newdb;
+	const char *newuser;
+	char	   *password = AH->savedPassword;
 	bool		new_pass;
 
 	if (!reqdb)
 		newdb = PQdb(AH->connection);
 	else
-		newdb = (char *) reqdb;
+		newdb = reqdb;
 
-	if (!requser || (strlen(requser) == 0))
+	if (!requser || strlen(requser) == 0)
 		newuser = PQuser(AH->connection);
 	else
-		newuser = (char *) requser;
+		newuser = requser;
 
-	ahlog(AH, 1, "connecting to database \"%s\" as user \"%s\"\n", newdb, newuser);
+	ahlog(AH, 1, "connecting to database \"%s\" as user \"%s\"\n",
+		  newdb, newuser);
 
-	if (AH->requirePassword)
+	if (AH->promptPassword == TRI_YES && password == NULL)
 	{
 		password = simple_prompt("Password: ", 100, false);
 		if (password == NULL)
@@ -172,16 +176,22 @@ _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
 
 			if (password)
 				free(password);
-			password = simple_prompt("Password: ", 100, false);
+
+			if (AH->promptPassword != TRI_NO)
+				password = simple_prompt("Password: ", 100, false);
+			else
+				die_horribly(AH, modulename, "connection needs password\n");
+
+			if (password == NULL)
+				die_horribly(AH, modulename, "out of memory\n");
 			new_pass = true;
 		}
 	} while (new_pass);
 
-	if (password)
-		free(password);
+	AH->savedPassword = password;
 
 	/* check for version mismatch */
-	_check_database_version(AH, true);
+	_check_database_version(AH);
 
 	PQsetNoticeProcessor(newConn, notice_processor, NULL);
 
@@ -193,6 +203,10 @@ _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
  * Make a database connection with the given parameters.  The
  * connection handle is returned, the parameters are stored in AHX.
  * An interactive password prompt is automatically issued if required.
+ *
+ * Note: it's not really all that sensible to use a single-entry password
+ * cache if the username keeps changing.  In current usage, however, the
+ * username never does change, so one savedPassword is sufficient.
  */
 PGconn *
 ConnectDatabase(Archive *AHX,
@@ -200,25 +214,22 @@ ConnectDatabase(Archive *AHX,
 				const char *pghost,
 				const char *pgport,
 				const char *username,
-				const int reqPwd,
-				const int ignoreVersion)
+				enum trivalue prompt_password)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	char	   *password = NULL;
+	char	   *password = AH->savedPassword;
 	bool		new_pass;
 
 	if (AH->connection)
 		die_horribly(AH, modulename, "already connected to a database\n");
 
-	if (reqPwd)
+	if (prompt_password == TRI_YES && password == NULL)
 	{
 		password = simple_prompt("Password: ", 100, false);
 		if (password == NULL)
 			die_horribly(AH, modulename, "out of memory\n");
-		AH->requirePassword = true;
 	}
-	else
-		AH->requirePassword = false;
+	AH->promptPassword = prompt_password;
 
 	/*
 	 * Start the connection.  Loop until we have a password if requested by
@@ -236,16 +247,17 @@ ConnectDatabase(Archive *AHX,
 		if (PQstatus(AH->connection) == CONNECTION_BAD &&
 			PQconnectionNeedsPassword(AH->connection) &&
 			password == NULL &&
-			!feof(stdin))
+			prompt_password != TRI_NO)
 		{
 			PQfinish(AH->connection);
 			password = simple_prompt("Password: ", 100, false);
+			if (password == NULL)
+				die_horribly(AH, modulename, "out of memory\n");
 			new_pass = true;
 		}
 	} while (new_pass);
 
-	if (password)
-		free(password);
+	AH->savedPassword = password;
 
 	/* check to see that the backend connection was successfully made */
 	if (PQstatus(AH->connection) == CONNECTION_BAD)
@@ -253,7 +265,7 @@ ConnectDatabase(Archive *AHX,
 					 PQdb(AH->connection), PQerrorMessage(AH->connection));
 
 	/* check for version mismatch */
-	_check_database_version(AH, ignoreVersion);
+	_check_database_version(AH);
 
 	PQsetNoticeProcessor(AH->connection, notice_processor, NULL);
 
@@ -278,7 +290,7 @@ ExecuteSqlCommand(ArchiveHandle *AH, const char *qry, const char *desc)
 	char		errStmt[DB_MAX_ERR_STMT];
 
 #ifdef NOT_USED
-	 fprintf(stderr, "Executing: '%s'\n\n", qry);
+	fprintf(stderr, "Executing: '%s'\n\n", qry);
 #endif
 	res = PQexec(conn, qry);
 

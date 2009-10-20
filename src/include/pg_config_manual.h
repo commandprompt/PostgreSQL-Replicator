@@ -11,61 +11,9 @@
  */
 
 /*
- * Size of a disk block --- this also limits the size of a tuple.  You
- * can set it bigger if you need bigger tuples (although TOAST should
- * reduce the need to have large tuples, since fields can be spread
- * across multiple tuples).
- *
- * BLCKSZ must be a power of 2.  The maximum possible value of BLCKSZ
- * is currently 2^15 (32768).  This is determined by the 15-bit widths
- * of the lp_off and lp_len fields in ItemIdData (see
- * include/storage/itemid.h).
- *
- * Changing BLCKSZ requires an initdb.
- */
-#define BLCKSZ	8192
-
-/*
- * RELSEG_SIZE is the maximum number of blocks allowed in one disk
- * file.  Thus, the maximum size of a single file is RELSEG_SIZE *
- * BLCKSZ; relations bigger than that are divided into multiple files.
- *
- * RELSEG_SIZE * BLCKSZ must be less than your OS' limit on file size.
- * This is often 2 GB or 4GB in a 32-bit operating system, unless you
- * have large file support enabled.  By default, we make the limit 1
- * GB to avoid any possible integer-overflow problems within the OS.
- * A limit smaller than necessary only means we divide a large
- * relation into more chunks than necessary, so it seems best to err
- * in the direction of a small limit.  (Besides, a power-of-2 value
- * saves a few cycles in md.c.)
- *
- * Changing RELSEG_SIZE requires an initdb.
- */
-#define RELSEG_SIZE (0x40000000 / BLCKSZ)
-
-/*
- * Size of a WAL file block.  This need have no particular relation to BLCKSZ.
- * XLOG_BLCKSZ must be a power of 2, and if your system supports O_DIRECT I/O,
- * XLOG_BLCKSZ must be a multiple of the alignment requirement for direct-I/O
- * buffers, else direct I/O may fail.
- *
- * Changing XLOG_BLCKSZ requires an initdb.
- */
-#define XLOG_BLCKSZ		8192
-
-/*
- * XLOG_SEG_SIZE is the size of a single WAL file.	This must be a power of 2
- * and larger than XLOG_BLCKSZ (preferably, a great deal larger than
- * XLOG_BLCKSZ).
- *
- * Changing XLOG_SEG_SIZE requires an initdb.
- */
-#define XLOG_SEG_SIZE	(16*1024*1024)
-
-/*
  * Maximum length for identifiers (e.g. table names, column names,
- * function names).  It must be a multiple of sizeof(int) (typically
- * 4).
+ * function names).  Names actually are limited to one less byte than this,
+ * because the length must include a trailing zero byte.
  *
  * Changing this requires an initdb.
  */
@@ -95,25 +43,20 @@
 #define INDEX_MAX_KEYS		32
 
 /*
+ * Set the upper and lower bounds of sequence values.
+ */
+#ifndef INT64_IS_BUSTED
+#define SEQ_MAXVALUE	INT64CONST(0x7FFFFFFFFFFFFFFF)
+#else							/* INT64_IS_BUSTED */
+#define SEQ_MAXVALUE	((int64) 0x7FFFFFFF)
+#endif   /* INT64_IS_BUSTED */
+
+#define SEQ_MINVALUE	(-SEQ_MAXVALUE)
+
+/*
  * Number of spare LWLocks to allocate for user-defined add-on code.
  */
 #define NUM_USER_DEFINED_LWLOCKS	4
-
-/*
- * Define this to make libpgtcl's "pg_result -assign" command process
- * C-style backslash sequences in returned tuple data and convert
- * PostgreSQL array values into Tcl lists.	CAUTION: This conversion
- * is *wrong* unless you install the routines in
- * contrib/string/string_io to make the server produce C-style
- * backslash sequences in the first place.
- */
-/* #define TCL_ARRAYS */
-
-/*
- * Define this if you want psql to _always_ ask for a username and a
- * password for password authentication.
- */
-/* #define PSQL_ALWAYS_GET_PASSWORDS */
 
 /*
  * Define this if you want to allow the lo_import and lo_export SQL
@@ -163,7 +106,7 @@
 #define ALIGNOF_BUFFER	32
 
 /*
- * Disable UNIX sockets for those operating system.
+ * Disable UNIX sockets for certain operating systems.
  */
 #if defined(WIN32)
 #undef HAVE_UNIX_SOCKETS
@@ -174,6 +117,25 @@
  */
 #if !defined(WIN32) && !defined(__CYGWIN__)
 #define HAVE_WORKING_LINK 1
+#endif
+
+/*
+ * USE_POSIX_FADVISE controls whether Postgres will attempt to use the
+ * posix_fadvise() kernel call.  Usually the automatic configure tests are
+ * sufficient, but some older Linux distributions had broken versions of
+ * posix_fadvise().  If necessary you can remove the #define here.
+ */
+#if HAVE_DECL_POSIX_FADVISE && defined(HAVE_POSIX_FADVISE)
+#define USE_POSIX_FADVISE
+#endif
+
+/*
+ * USE_PREFETCH code should be compiled only if we have a way to implement
+ * prefetching.  (This is decoupled from USE_POSIX_FADVISE because there
+ * might in future be support for alternative low-level prefetch APIs.)
+ */
+#ifdef USE_POSIX_FADVISE
+#define USE_PREFETCH
 #endif
 
 /*
@@ -207,9 +169,8 @@
 
 /*
  * Define this to cause pfree()'d memory to be cleared immediately, to
- * facilitate catching bugs that refer to already-freed values.  XXX
- * Right now, this gets defined automatically if --enable-cassert.	In
- * the long term it probably doesn't need to be on by default.
+ * facilitate catching bugs that refer to already-freed values.
+ * Right now, this gets defined automatically if --enable-cassert.
  */
 #ifdef USE_ASSERT_CHECKING
 #define CLOBBER_FREED_MEMORY
@@ -218,12 +179,18 @@
 /*
  * Define this to check memory allocation errors (scribbling on more
  * bytes than were allocated).	Right now, this gets defined
- * automatically if --enable-cassert.  In the long term it probably
- * doesn't need to be on by default.
+ * automatically if --enable-cassert.
  */
 #ifdef USE_ASSERT_CHECKING
 #define MEMORY_CONTEXT_CHECKING
 #endif
+
+/*
+ * Define this to cause palloc()'d memory to be filled with random data, to
+ * facilitate catching code that depends on the contents of uninitialized
+ * memory.	Caution: this is horrendously expensive.
+ */
+/* #define RANDOMIZE_ALLOCATED_MEMORY */
 
 /*
  * Define this to force all parse and plan trees to be passed through

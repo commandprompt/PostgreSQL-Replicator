@@ -3,7 +3,7 @@
  * fmgr.c
  *	  The Postgres function manager.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,14 +15,15 @@
 
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/tuptoaster.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
 #include "executor/functions.h"
 #include "executor/spi.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
-#include "parser/parse_expr.h"
+#include "nodes/nodeFuncs.h"
+#include "pgstat.h"
 #include "utils/builtins.h"
 #include "utils/fmgrtab.h"
 #include "utils/guc.h"
@@ -167,8 +168,7 @@ fmgr_info_cxt(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt)
 
 /*
  * This one does the actual work.  ignore_security is ordinarily false
- * but is set to true by fmgr_security_definer to avoid infinite
- * recursive lookups.
+ * but is set to true by fmgr_security_definer to avoid recursion.
  */
 static void
 fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
@@ -199,6 +199,7 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 		finfo->fn_nargs = fbp->nargs;
 		finfo->fn_strict = fbp->strict;
 		finfo->fn_retset = fbp->retset;
+		finfo->fn_stats = TRACK_FUNC_ALL;		/* ie, never track */
 		finfo->fn_addr = fbp->func;
 		finfo->fn_oid = functionId;
 		return;
@@ -218,13 +219,23 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 
 	/*
 	 * If it has prosecdef set, or non-null proconfig, use
-	 * fmgr_security_definer call handler.
+	 * fmgr_security_definer call handler --- unless we are being called again
+	 * by fmgr_security_definer.
+	 *
+	 * When using fmgr_security_definer, function stats tracking is always
+	 * disabled at the outer level, and instead we set the flag properly in
+	 * fmgr_security_definer's private flinfo and implement the tracking
+	 * inside fmgr_security_definer.  This loses the ability to charge the
+	 * overhead of fmgr_security_definer to the function, but gains the
+	 * ability to set the track_functions GUC as a local GUC parameter of an
+	 * interesting function and have the right things happen.
 	 */
 	if (!ignore_security &&
 		(procedureStruct->prosecdef ||
 		 !heap_attisnull(procedureTuple, Anum_pg_proc_proconfig)))
 	{
 		finfo->fn_addr = fmgr_security_definer;
+		finfo->fn_stats = TRACK_FUNC_ALL;		/* ie, never track */
 		finfo->fn_oid = functionId;
 		ReleaseSysCache(procedureTuple);
 		return;
@@ -247,8 +258,7 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 										  Anum_pg_proc_prosrc, &isnull);
 			if (isnull)
 				elog(ERROR, "null prosrc");
-			prosrc = DatumGetCString(DirectFunctionCall1(textout,
-														 prosrcdatum));
+			prosrc = TextDatumGetCString(prosrcdatum);
 			fbp = fmgr_lookupByName(prosrc);
 			if (fbp == NULL)
 				ereport(ERROR,
@@ -258,18 +268,23 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 			pfree(prosrc);
 			/* Should we check that nargs, strict, retset match the table? */
 			finfo->fn_addr = fbp->func;
+			/* note this policy is also assumed in fast path above */
+			finfo->fn_stats = TRACK_FUNC_ALL;	/* ie, never track */
 			break;
 
 		case ClanguageId:
 			fmgr_info_C_lang(functionId, finfo, procedureTuple);
+			finfo->fn_stats = TRACK_FUNC_PL;	/* ie, track if ALL */
 			break;
 
 		case SQLlanguageId:
 			finfo->fn_addr = fmgr_sql;
+			finfo->fn_stats = TRACK_FUNC_PL;	/* ie, track if ALL */
 			break;
 
 		default:
 			fmgr_info_other_lang(functionId, finfo, procedureTuple);
+			finfo->fn_stats = TRACK_FUNC_OFF;	/* ie, track if not OFF */
 			break;
 	}
 
@@ -310,21 +325,21 @@ fmgr_info_C_lang(Oid functionId, FmgrInfo *finfo, HeapTuple procedureTuple)
 		void	   *libraryhandle;
 
 		/*
-		 * Get prosrc and probin strings (link symbol and library filename)
+		 * Get prosrc and probin strings (link symbol and library filename).
+		 * While in general these columns might be null, that's not allowed
+		 * for C-language functions.
 		 */
 		prosrcattr = SysCacheGetAttr(PROCOID, procedureTuple,
 									 Anum_pg_proc_prosrc, &isnull);
 		if (isnull)
-			elog(ERROR, "null prosrc for function %u", functionId);
-		prosrcstring = DatumGetCString(DirectFunctionCall1(textout,
-														   prosrcattr));
+			elog(ERROR, "null prosrc for C function %u", functionId);
+		prosrcstring = TextDatumGetCString(prosrcattr);
 
 		probinattr = SysCacheGetAttr(PROCOID, procedureTuple,
 									 Anum_pg_proc_probin, &isnull);
 		if (isnull)
-			elog(ERROR, "null probin for function %u", functionId);
-		probinstring = DatumGetCString(DirectFunctionCall1(textout,
-														   probinattr));
+			elog(ERROR, "null probin for C function %u", functionId);
+		probinstring = TextDatumGetCString(probinattr);
 
 		/* Look up the function itself */
 		user_fn = load_external_function(probinstring, prosrcstring, true,
@@ -831,7 +846,7 @@ fmgr_oldstyle(PG_FUNCTION_ARGS)
 			break;
 	}
 
-	return (Datum) returnValue;
+	return PointerGetDatum(returnValue);
 }
 
 
@@ -867,6 +882,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 	Oid			save_userid;
 	bool		save_secdefcxt;
 	volatile int save_nestlevel;
+	PgStat_FunctionCallUsage fcusage;
 
 	if (!fcinfo->flinfo->fn_extra)
 	{
@@ -930,7 +946,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 
 	/*
 	 * We don't need to restore GUC or userid settings on error, because the
-	 * ensuing xact or subxact abort will do that.  The PG_TRY block is only
+	 * ensuing xact or subxact abort will do that.	The PG_TRY block is only
 	 * needed to clean up the flinfo link.
 	 */
 	save_flinfo = fcinfo->flinfo;
@@ -939,7 +955,19 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 	{
 		fcinfo->flinfo = &fcache->flinfo;
 
+		/* See notes in fmgr_info_cxt_security */
+		pgstat_init_function_usage(fcinfo, &fcusage);
+
 		result = FunctionCallInvoke(fcinfo);
+
+		/*
+		 * We could be calling either a regular or a set-returning function,
+		 * so we have to test to see what finalize flag to use.
+		 */
+		pgstat_end_function_usage(&fcusage,
+								  (fcinfo->resultinfo == NULL ||
+								   !IsA(fcinfo->resultinfo, ReturnSetInfo) ||
+								   ((ReturnSetInfo *) fcinfo->resultinfo)->isDone != ExprMultipleResult));
 	}
 	PG_CATCH();
 	{
@@ -1822,7 +1850,7 @@ OidFunctionCall9(Oid functionId, Datum arg1, Datum arg2,
  *
  * One important difference from the bare function call is that we will
  * push any active SPI context, allowing SPI-using I/O functions to be
- * called from other SPI functions without extra notation.  This is a hack,
+ * called from other SPI functions without extra notation.	This is a hack,
  * but the alternative of expecting all SPI functions to do SPI_push/SPI_pop
  * around I/O calls seems worse.
  */
@@ -2048,7 +2076,7 @@ fmgr(Oid procedureId,...)
 					flinfo.fn_oid, n_arguments, FUNC_MAX_ARGS)));
 		va_start(pvar, procedureId);
 		for (i = 0; i < n_arguments; i++)
-			fcinfo.arg[i] = (Datum) va_arg(pvar, char *);
+			fcinfo.arg[i] = PointerGetDatum(va_arg(pvar, char *));
 		va_end(pvar);
 	}
 
@@ -2058,21 +2086,27 @@ fmgr(Oid procedureId,...)
 	if (fcinfo.isnull)
 		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
 
-	return (char *) result;
+	return DatumGetPointer(result);
 }
 
 
 /*-------------------------------------------------------------------------
- *		Support routines for standard pass-by-reference datatypes
+ *		Support routines for standard maybe-pass-by-reference datatypes
  *
- * Note: at some point, at least on some platforms, these might become
- * pass-by-value types.  Obviously Datum must be >= 8 bytes to allow
- * int64 or float8 to be pass-by-value.  I think that Float4GetDatum
- * and Float8GetDatum will need to be out-of-line routines anyway,
- * since just casting from float to Datum will not do the right thing;
- * some kind of trick with pointer-casting or a union will be needed.
+ * int8, float4, and float8 can be passed by value if Datum is wide enough.
+ * (For backwards-compatibility reasons, we allow pass-by-ref to be chosen
+ * at compile time even if pass-by-val is possible.)  For the float types,
+ * we need a support routine even if we are passing by value, because many
+ * machines pass int and float function parameters/results differently;
+ * so we need to play weird games with unions.
+ *
+ * Note: there is only one switch controlling the pass-by-value option for
+ * both int8 and float8; this is to avoid making things unduly complicated
+ * for the timestamp types, which might have either representation.
  *-------------------------------------------------------------------------
  */
+
+#ifndef USE_FLOAT8_BYVAL		/* controls int8 too */
 
 Datum
 Int64GetDatum(int64 X)
@@ -2096,24 +2130,80 @@ Int64GetDatum(int64 X)
 	return PointerGetDatum(retval);
 #endif   /* INT64_IS_BUSTED */
 }
+#endif   /* USE_FLOAT8_BYVAL */
 
 Datum
 Float4GetDatum(float4 X)
 {
+#ifdef USE_FLOAT4_BYVAL
+	union
+	{
+		float4		value;
+		int32		retval;
+	}			myunion;
+
+	myunion.value = X;
+	return SET_4_BYTES(myunion.retval);
+#else
 	float4	   *retval = (float4 *) palloc(sizeof(float4));
 
 	*retval = X;
 	return PointerGetDatum(retval);
+#endif
 }
+
+#ifdef USE_FLOAT4_BYVAL
+
+float4
+DatumGetFloat4(Datum X)
+{
+	union
+	{
+		int32		value;
+		float4		retval;
+	}			myunion;
+
+	myunion.value = GET_4_BYTES(X);
+	return myunion.retval;
+}
+#endif   /* USE_FLOAT4_BYVAL */
 
 Datum
 Float8GetDatum(float8 X)
 {
+#ifdef USE_FLOAT8_BYVAL
+	union
+	{
+		float8		value;
+		int64		retval;
+	}			myunion;
+
+	myunion.value = X;
+	return SET_8_BYTES(myunion.retval);
+#else
 	float8	   *retval = (float8 *) palloc(sizeof(float8));
 
 	*retval = X;
 	return PointerGetDatum(retval);
+#endif
 }
+
+#ifdef USE_FLOAT8_BYVAL
+
+float8
+DatumGetFloat8(Datum X)
+{
+	union
+	{
+		int64		value;
+		float8		retval;
+	}			myunion;
+
+	myunion.value = GET_8_BYTES(X);
+	return myunion.retval;
+}
+#endif   /* USE_FLOAT8_BYVAL */
+
 
 /*-------------------------------------------------------------------------
  *		Support routines for toastable datatypes
@@ -2166,6 +2256,7 @@ pg_detoast_datum_packed(struct varlena * datum)
  *
  * These are needed by polymorphic functions, which accept multiple possible
  * input types and need help from the parser to know what they've got.
+ * Also, some functions might be interested in whether a parameter is constant.
  *-------------------------------------------------------------------------
  */
 
@@ -2236,6 +2327,8 @@ get_call_expr_argtype(Node *expr, int argnum)
 		args = list_make1(((ArrayCoerceExpr *) expr)->arg);
 	else if (IsA(expr, NullIfExpr))
 		args = ((NullIfExpr *) expr)->args;
+	else if (IsA(expr, WindowFunc))
+		args = ((WindowFunc *) expr)->args;
 	else
 		return InvalidOid;
 
@@ -2257,4 +2350,74 @@ get_call_expr_argtype(Node *expr, int argnum)
 		argtype = get_element_type(argtype);
 
 	return argtype;
+}
+
+/*
+ * Find out whether a specific function argument is constant for the
+ * duration of a query
+ *
+ * Returns false if information is not available
+ */
+bool
+get_fn_expr_arg_stable(FmgrInfo *flinfo, int argnum)
+{
+	/*
+	 * can't return anything useful if we have no FmgrInfo or if its fn_expr
+	 * node has not been initialized
+	 */
+	if (!flinfo || !flinfo->fn_expr)
+		return false;
+
+	return get_call_expr_arg_stable(flinfo->fn_expr, argnum);
+}
+
+/*
+ * Find out whether a specific function argument is constant for the
+ * duration of a query, but working from the calling expression tree
+ *
+ * Returns false if information is not available
+ */
+bool
+get_call_expr_arg_stable(Node *expr, int argnum)
+{
+	List	   *args;
+	Node	   *arg;
+
+	if (expr == NULL)
+		return false;
+
+	if (IsA(expr, FuncExpr))
+		args = ((FuncExpr *) expr)->args;
+	else if (IsA(expr, OpExpr))
+		args = ((OpExpr *) expr)->args;
+	else if (IsA(expr, DistinctExpr))
+		args = ((DistinctExpr *) expr)->args;
+	else if (IsA(expr, ScalarArrayOpExpr))
+		args = ((ScalarArrayOpExpr *) expr)->args;
+	else if (IsA(expr, ArrayCoerceExpr))
+		args = list_make1(((ArrayCoerceExpr *) expr)->arg);
+	else if (IsA(expr, NullIfExpr))
+		args = ((NullIfExpr *) expr)->args;
+	else if (IsA(expr, WindowFunc))
+		args = ((WindowFunc *) expr)->args;
+	else
+		return false;
+
+	if (argnum < 0 || argnum >= list_length(args))
+		return false;
+
+	arg = (Node *) list_nth(args, argnum);
+
+	/*
+	 * Either a true Const or an external Param will have a value that doesn't
+	 * change during the execution of the query.  In future we might want to
+	 * consider other cases too, e.g. now().
+	 */
+	if (IsA(arg, Const))
+		return true;
+	if (IsA(arg, Param) &&
+		((Param *) arg)->paramkind == PARAM_EXTERN)
+		return true;
+
+	return false;
 }

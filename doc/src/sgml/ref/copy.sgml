@@ -7,6 +7,7 @@ PostgreSQL documentation
 <refentry id="SQL-COPY">
  <refmeta>
   <refentrytitle id="sql-copy-title">COPY</refentrytitle>
+  <manvolnum>7</manvolnum>
   <refmiscinfo>SQL - Language Statements</refmiscinfo>
  </refmeta>
 
@@ -182,8 +183,8 @@ COPY { <replaceable class="parameter">tablename</replaceable> [ ( <replaceable c
     <listitem>
      <para>
       The string that represents a null value. The default is
-      <literal>\N</literal> (backslash-N) in text mode, and a empty
-      value with no quotes in <literal>CSV</> mode. You might prefer an
+      <literal>\N</literal> (backslash-N) in text mode, and an unquoted empty
+      string in <literal>CSV</> mode. You might prefer an
       empty string even in text mode for cases where you don't want to
       distinguish nulls from empty strings.
      </para>
@@ -297,13 +298,18 @@ COPY <replaceable class="parameter">count</replaceable>
     somewhat faster than the normal text mode, but a binary-format
     file is less portable across machine architectures and
     <productname>PostgreSQL</productname> versions.
+    Also, the binary format is very data type specific; for example
+    it will not work to output binary data from a <type>smallint</> column
+    and read it into an <type>integer</> column, even though that would work
+    fine in text format.
    </para>
 
    <para>
     You must have select privilege on the table
     whose values are read by <command>COPY TO</command>, and
     insert privilege on the table into which values
-    are inserted by <command>COPY FROM</command>.
+    are inserted by <command>COPY FROM</command>.  It is sufficient
+    to have column privileges on the column(s) listed in the command.
    </para>
 
    <para>
@@ -349,7 +355,11 @@ COPY <replaceable class="parameter">count</replaceable>
     <productname>PostgreSQL</productname> installations that might use
     non-default <varname>DateStyle</varname> settings,
     <varname>DateStyle</varname> should be set to <literal>ISO</> before
-    using <command>COPY TO</>.
+    using <command>COPY TO</>.  It is also a good idea to avoid dumping
+    data with <varname>IntervalStyle</varname> set to
+    <literal>sql_standard</>, because negative interval values might be
+    misinterpreted by a server that has a different setting for
+    <varname>IntervalStyle</varname>.
    </para>
 
    <para>
@@ -535,15 +545,15 @@ COPY <replaceable class="parameter">count</replaceable>
     non-<literal>NULL</> values in specific columns.
    </para>
 
-   <para> 
+   <para>
     The <literal>CSV</> format has no standard way to distinguish a
     <literal>NULL</> value from an empty string.
-    <productname>PostgreSQL</>'s <command>COPY</> handles this by
-    quoting. A <literal>NULL</> is output as the <literal>NULL</>
-    string and is not quoted, while a data value matching the
-    <literal>NULL</> string is quoted. Therefore, using the default
-    settings, a <literal>NULL</> is written as an unquoted empty
-    string, while an empty string is written with double quotes
+    <productname>PostgreSQL</>'s <command>COPY</> handles this by quoting.
+    A <literal>NULL</> is output as the <literal>NULL</> parameter string
+    and is not quoted, while a non-<literal>NULL</> value matching the
+    <literal>NULL</> parameter string is quoted.  For example, with the
+    default settings, a <literal>NULL</> is written as an unquoted empty
+    string, while an empty string data value is written with double quotes
     (<literal>""</>). Reading values follows similar rules. You can
     use <literal>FORCE NOT NULL</> to prevent <literal>NULL</> input
     comparisons for specific columns.

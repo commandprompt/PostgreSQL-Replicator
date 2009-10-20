@@ -3,7 +3,7 @@
  * encode.c
  *	  Various data encoding/decoding things.
  *
- * Copyright (c) 2001-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2009, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -46,7 +46,7 @@ binary_encode(PG_FUNCTION_ARGS)
 
 	datalen = VARSIZE(data) - VARHDRSZ;
 
-	namebuf = DatumGetCString(DirectFunctionCall1(textout, name));
+	namebuf = TextDatumGetCString(name);
 
 	enc = pg_find_encoding(namebuf);
 	if (enc == NULL)
@@ -82,7 +82,7 @@ binary_decode(PG_FUNCTION_ARGS)
 
 	datalen = VARSIZE(data) - VARHDRSZ;
 
-	namebuf = DatumGetCString(DirectFunctionCall1(textout, name));
+	namebuf = TextDatumGetCString(name);
 
 	enc = pg_find_encoding(namebuf);
 	if (enc == NULL)

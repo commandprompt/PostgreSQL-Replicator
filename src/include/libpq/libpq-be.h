@@ -8,7 +8,7 @@
  *	  Structs that need to be client-visible are in pqcomm.h.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -47,6 +47,9 @@
 
 #ifdef ENABLE_SSPI
 #define SECURITY_WIN32
+#if defined(WIN32) && !defined(WIN32_ONLY_COMPILER)
+#include <ntsecapi.h>
+#endif
 #include <security.h>
 #undef SECURITY_WIN32
 
@@ -58,7 +61,7 @@ typedef struct
 {
 	void	   *value;
 	int			length;
-}	gss_buffer_desc;
+} gss_buffer_desc;
 #endif
 #endif   /* ENABLE_SSPI */
 
@@ -69,7 +72,8 @@ typedef struct
 
 typedef enum CAC_state
 {
-	CAC_OK, CAC_STARTUP, CAC_SHUTDOWN, CAC_RECOVERY, CAC_TOOMANY
+	CAC_OK, CAC_STARTUP, CAC_SHUTDOWN, CAC_RECOVERY, CAC_TOOMANY,
+	CAC_WAITBACKUP
 } CAC_state;
 
 
@@ -85,7 +89,7 @@ typedef struct
 	gss_ctx_id_t ctx;			/* GSSAPI connection context */
 	gss_name_t	name;			/* GSSAPI client name */
 #endif
-}	pg_gssinfo;
+} pg_gssinfo;
 #endif
 
 /*
@@ -120,10 +124,8 @@ typedef struct Port
 	/*
 	 * Information that needs to be held during the authentication cycle.
 	 */
-	UserAuth	auth_method;
-	char	   *auth_arg;
+	HbaLine    *hba;
 	char		md5Salt[4];		/* Password salt */
-	char		cryptSalt[2];	/* Password salt */
 
 	/*
 	 * Information that really has no business at all being in struct Port,

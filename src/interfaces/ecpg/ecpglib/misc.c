@@ -15,6 +15,7 @@
 #include "pgtypes_date.h"
 #include "pgtypes_timestamp.h"
 #include "pgtypes_interval.h"
+#include "pg_config_paths.h"
 
 #ifdef HAVE_LONG_LONG_INT_64
 #ifndef LONG_LONG_MIN
@@ -109,7 +110,7 @@ ecpg_init(const struct connection * con, const char *connection_name, const int 
 	if (con == NULL)
 	{
 		ecpg_raise(lineno, ECPG_NO_CONN, ECPG_SQLSTATE_CONNECTION_DOES_NOT_EXIST,
-				   connection_name ? connection_name : "NULL");
+				   connection_name ? connection_name : ecpg_gettext("NULL"));
 		return (false);
 	}
 
@@ -178,7 +179,7 @@ ECPGtrans(int lineno, const char *connection_name, const char *transaction)
 	if (!ecpg_init(con, connection_name, lineno))
 		return (false);
 
-	ecpg_log("ECPGtrans line %d action = %s connection = %s\n", lineno, transaction, con ? con->name : "(nil)");
+	ecpg_log("ECPGtrans on line %d: action \"%s\"; connection \"%s\"\n", lineno, transaction, con ? con->name : "null");
 
 	/* if we have no connection we just simulate the command */
 	if (con && con->connection)
@@ -203,7 +204,7 @@ ECPGtrans(int lineno, const char *connection_name, const char *transaction)
 		PQclear(res);
 	}
 
-	if (strcmp(transaction, "commit") == 0 || strcmp(transaction, "rollback") == 0)
+	if (strncmp(transaction, "commit", 6) == 0 || strncmp(transaction, "rollback", 8) == 0)
 		con->committed = true;
 	else
 		con->committed = false;
@@ -241,45 +242,50 @@ ecpg_log(const char *format,...)
 {
 	va_list		ap;
 	struct sqlca_t *sqlca = ECPGget_sqlca();
+	const char *intl_format;
+	int			bufsize;
+	char	   *fmt;
 
-	if (simple_debug)
-	{
-		int			bufsize = strlen(format) + 100;
-		char	   *f = (char *) malloc(bufsize);
+	if (!simple_debug)
+		return;
 
-		if (f == NULL)
-			return;
+	/* internationalize the error message string */
+	intl_format = ecpg_gettext(format);
 
-		/*
-		 * regression tests set this environment variable to get the same
-		 * output for every run.
-		 */
-		if (ecpg_internal_regression_mode)
-			snprintf(f, bufsize, "[NO_PID]: %s", format);
-		else
-			snprintf(f, bufsize, "[%d]: %s", (int) getpid(), format);
+	/*
+	 * Insert PID into the format, unless ecpg_internal_regression_mode is set
+	 * (regression tests want unchanging output).
+	 */
+	bufsize = strlen(intl_format) + 100;
+	fmt = (char *) malloc(bufsize);
+	if (fmt == NULL)
+		return;
 
-#ifdef ENABLE_THREAD_SAFETY
-		pthread_mutex_lock(&debug_mutex);
-#endif
-
-		va_start(ap, format);
-		vfprintf(debugstream, f, ap);
-		va_end(ap);
-
-		/* dump out internal sqlca variables */
-		if (ecpg_internal_regression_mode)
-			fprintf(debugstream, "[NO_PID]: sqlca: code: %ld, state: %s\n",
-					sqlca->sqlcode, sqlca->sqlstate);
-
-		fflush(debugstream);
+	if (ecpg_internal_regression_mode)
+		snprintf(fmt, bufsize, "[NO_PID]: %s", intl_format);
+	else
+		snprintf(fmt, bufsize, "[%d]: %s", (int) getpid(), intl_format);
 
 #ifdef ENABLE_THREAD_SAFETY
-		pthread_mutex_unlock(&debug_mutex);
+	pthread_mutex_lock(&debug_mutex);
 #endif
 
-		free(f);
-	}
+	va_start(ap, format);
+	vfprintf(debugstream, fmt, ap);
+	va_end(ap);
+
+	/* dump out internal sqlca variables */
+	if (ecpg_internal_regression_mode)
+		fprintf(debugstream, "[NO_PID]: sqlca: code: %ld, state: %s\n",
+				sqlca->sqlcode, sqlca->sqlstate);
+
+	fflush(debugstream);
+
+#ifdef ENABLE_THREAD_SAFETY
+	pthread_mutex_unlock(&debug_mutex);
+#endif
+
+	free(fmt);
 }
 
 void
@@ -420,11 +426,11 @@ win32_pthread_mutex(volatile pthread_mutex_t *mutex)
 {
 	if (mutex->handle == NULL)
 	{
-		while (InterlockedExchange((LONG *) & mutex->initlock, 1) == 1)
+		while (InterlockedExchange((LONG *) &mutex->initlock, 1) == 1)
 			Sleep(0);
 		if (mutex->handle == NULL)
 			mutex->handle = CreateMutex(NULL, FALSE, NULL);
-		InterlockedExchange((LONG *) & mutex->initlock, 0);
+		InterlockedExchange((LONG *) &mutex->initlock, 0);
 	}
 }
 
@@ -445,5 +451,39 @@ win32_pthread_once(volatile pthread_once_t *once, void (*fn) (void))
 	}
 }
 #endif   /* ENABLE_THREAD_SAFETY */
-
 #endif   /* WIN32 */
+
+#ifdef ENABLE_NLS
+
+char *
+ecpg_gettext(const char *msgid)
+{
+	static bool already_bound = false;
+
+	if (!already_bound)
+	{
+		/* dgettext() preserves errno, but bindtextdomain() doesn't */
+#ifdef WIN32
+		int			save_errno = GetLastError();
+#else
+		int			save_errno = errno;
+#endif
+		const char *ldir;
+
+		already_bound = true;
+		/* No relocatable lookup here because the binary could be anywhere */
+		ldir = getenv("PGLOCALEDIR");
+		if (!ldir)
+			ldir = LOCALEDIR;
+		bindtextdomain(PG_TEXTDOMAIN("ecpglib"), ldir);
+#ifdef WIN32
+		SetLastError(save_errno);
+#else
+		errno = save_errno;
+#endif
+	}
+
+	return dgettext(PG_TEXTDOMAIN("ecpg"), msgid);
+}
+
+#endif   /* ENABLE_NLS */

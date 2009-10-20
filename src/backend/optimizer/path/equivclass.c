@@ -6,7 +6,7 @@
  * See src/backend/optimizer/README for discussion of EquivalenceClasses.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -17,6 +17,7 @@
 #include "postgres.h"
 
 #include "access/skey.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/paths.h"
@@ -114,6 +115,19 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 	item2_relids = restrictinfo->right_relids;
 
 	/*
+	 * Reject clauses of the form X=X.  These are not as redundant as they
+	 * might seem at first glance: assuming the operator is strict, this is
+	 * really an expensive way to write X IS NOT NULL.  So we must not risk
+	 * just losing the clause, which would be possible if there is already
+	 * a single-element EquivalenceClass containing X.  The case is not
+	 * common enough to be worth contorting the EC machinery for, so just
+	 * reject the clause and let it be processed as a normal restriction
+	 * clause.
+	 */
+	if (equal(item1, item2))
+		return false;			/* X=X is not a useful equivalence */
+
+	/*
 	 * If below outer join, check for strictness, else reject.
 	 */
 	if (below_outer_join)
@@ -151,13 +165,10 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 	 *
 	 * 4. We find neither.	Make a new, two-entry EC.
 	 *
-	 * Note: since all ECs are built through this process, it's impossible
-	 * that we'd match an item in more than one existing EC.  It is possible
-	 * to match more than once within an EC, if someone fed us something silly
-	 * like "WHERE X=X".  (However, we can't simply discard such clauses,
-	 * since they should fail when X is null; so we will build a 2-member EC
-	 * to ensure the correct restriction clause gets generated.  Hence there
-	 * is no shortcut here for item1 and item2 equal.)
+	 * Note: since all ECs are built through this process or the similar
+	 * search in get_eclass_for_sort_expr(), it's impossible that we'd match
+	 * an item in more than one existing nonvolatile EC.  So it's okay to stop
+	 * at the first match.
 	 */
 	ec1 = ec2 = NULL;
 	em1 = em2 = NULL;
@@ -355,8 +366,8 @@ add_eq_member(EquivalenceClass *ec, Expr *expr, Relids relids,
  *	  class it is a member of; if none, build a new single-member
  *	  EquivalenceClass for it.
  *
- * sortref is the SortGroupRef of the originating SortClause, if any,
- * or zero if not.
+ * sortref is the SortGroupRef of the originating SortGroupClause, if any,
+ * or zero if not.  (It should never be zero if the expression is volatile!)
  *
  * This can be used safely both before and after EquivalenceClass merging;
  * since it never causes merging it does not invalidate any existing ECs
@@ -387,8 +398,12 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 		EquivalenceClass *cur_ec = (EquivalenceClass *) lfirst(lc1);
 		ListCell   *lc2;
 
-		/* Never match to a volatile EC */
-		if (cur_ec->ec_has_volatile)
+		/*
+		 * Never match to a volatile EC, except when we are looking at another
+		 * reference to the same volatile SortGroupClause.
+		 */
+		if (cur_ec->ec_has_volatile &&
+			(sortref == 0 || sortref != cur_ec->ec_sortref))
 			continue;
 
 		if (!equal(opfamilies, cur_ec->ec_opfamilies))
@@ -432,19 +447,25 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 	newec->ec_broken = false;
 	newec->ec_sortref = sortref;
 	newec->ec_merged = NULL;
+
+	if (newec->ec_has_volatile && sortref == 0)		/* should not happen */
+		elog(ERROR, "volatile EquivalenceClass has no sortref");
+
 	newem = add_eq_member(newec, expr, pull_varnos((Node *) expr),
 						  false, expr_datatype);
 
 	/*
 	 * add_eq_member doesn't check for volatile functions, set-returning
-	 * functions, or aggregates, but such could appear in sort expressions; so
-	 * we have to check whether its const-marking was correct.
+	 * functions, aggregates, or window functions, but such could appear in
+	 * sort expressions; so we have to check whether its const-marking was
+	 * correct.
 	 */
 	if (newec->ec_has_const)
 	{
 		if (newec->ec_has_volatile ||
 			expression_returns_set((Node *) expr) ||
-			contain_agg_clause((Node *) expr))
+			contain_agg_clause((Node *) expr) ||
+			contain_window_function((Node *) expr))
 		{
 			newec->ec_has_const = false;
 			newem->em_is_const = false;
@@ -560,11 +581,11 @@ generate_base_implied_equalities_const(PlannerInfo *root,
 	ListCell   *lc;
 
 	/*
-	 * In the trivial case where we just had one "var = const" clause,
-	 * push the original clause back into the main planner machinery.  There
-	 * is nothing to be gained by doing it differently, and we save the
-	 * effort to re-build and re-analyze an equality clause that will be
-	 * exactly equivalent to the old one.
+	 * In the trivial case where we just had one "var = const" clause, push
+	 * the original clause back into the main planner machinery.  There is
+	 * nothing to be gained by doing it differently, and we save the effort to
+	 * re-build and re-analyze an equality clause that will be exactly
+	 * equivalent to the old one.
 	 */
 	if (list_length(ec->ec_members) == 2 &&
 		list_length(ec->ec_sources) == 1)
@@ -686,7 +707,8 @@ generate_base_implied_equalities_no_const(PlannerInfo *root,
 	foreach(lc, ec->ec_members)
 	{
 		EquivalenceMember *cur_em = (EquivalenceMember *) lfirst(lc);
-		List	   *vars = pull_var_clause((Node *) cur_em->em_expr, false);
+		List	   *vars = pull_var_clause((Node *) cur_em->em_expr,
+										   PVC_INCLUDE_PLACEHOLDERS);
 
 		add_vars_to_targetlist(root, vars, ec->ec_relids);
 		list_free(vars);
@@ -1162,7 +1184,7 @@ create_join_clause(PlannerInfo *root,
  *
  * Outer join clauses that are marked outerjoin_delayed are special: this
  * condition means that one or both VARs might go to null due to a lower
- * outer join.  We can still push a constant through the clause, but only
+ * outer join.	We can still push a constant through the clause, but only
  * if its operator is strict; and we *have to* throw the clause back into
  * regular joinclause processing.  By keeping the strict join clause,
  * we ensure that any null-extended rows that are mistakenly generated due
@@ -1197,7 +1219,8 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 					list_delete_cell(root->left_join_clauses, cell, prev);
 				/* we throw it back anyway (see notes above) */
 				/* but the thrown-back clause has no extra selectivity */
-				rinfo->this_selec = 2.0;
+				rinfo->norm_selec = 2.0;
+				rinfo->outer_selec = 1.0;
 				distribute_restrictinfo_to_rels(root, rinfo);
 			}
 			else
@@ -1219,7 +1242,8 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 					list_delete_cell(root->right_join_clauses, cell, prev);
 				/* we throw it back anyway (see notes above) */
 				/* but the thrown-back clause has no extra selectivity */
-				rinfo->this_selec = 2.0;
+				rinfo->norm_selec = 2.0;
+				rinfo->outer_selec = 1.0;
 				distribute_restrictinfo_to_rels(root, rinfo);
 			}
 			else
@@ -1241,7 +1265,8 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 					list_delete_cell(root->full_join_clauses, cell, prev);
 				/* we throw it back anyway (see notes above) */
 				/* but the thrown-back clause has no extra selectivity */
-				rinfo->this_selec = 2.0;
+				rinfo->norm_selec = 2.0;
+				rinfo->outer_selec = 1.0;
 				distribute_restrictinfo_to_rels(root, rinfo);
 			}
 			else
@@ -1809,11 +1834,11 @@ have_relevant_eclass_joinclause(PlannerInfo *root,
 		 * path to look through ec_sources.  Checking the members anyway is OK
 		 * as a possibly-overoptimistic heuristic.
 		 *
-		 * We don't test ec_has_const either, even though a const eclass
-		 * won't generate real join clauses.  This is because if we had
-		 * "WHERE a.x = b.y and a.x = 42", it is worth considering a join
-		 * between a and b, since the join result is likely to be small even
-		 * though it'll end up being an unqualified nestloop.
+		 * We don't test ec_has_const either, even though a const eclass won't
+		 * generate real join clauses.	This is because if we had "WHERE a.x =
+		 * b.y and a.x = 42", it is worth considering a join between a and b,
+		 * since the join result is likely to be small even though it'll end
+		 * up being an unqualified nestloop.
 		 */
 
 		/* Needn't scan if it couldn't contain members from each rel */
@@ -1883,11 +1908,11 @@ has_relevant_eclass_joinclause(PlannerInfo *root, RelOptInfo *rel1)
 		 * path to look through ec_sources.  Checking the members anyway is OK
 		 * as a possibly-overoptimistic heuristic.
 		 *
-		 * We don't test ec_has_const either, even though a const eclass
-		 * won't generate real join clauses.  This is because if we had
-		 * "WHERE a.x = b.y and a.x = 42", it is worth considering a join
-		 * between a and b, since the join result is likely to be small even
-		 * though it'll end up being an unqualified nestloop.
+		 * We don't test ec_has_const either, even though a const eclass won't
+		 * generate real join clauses.	This is because if we had "WHERE a.x =
+		 * b.y and a.x = 42", it is worth considering a join between a and b,
+		 * since the join result is likely to be small even though it'll end
+		 * up being an unqualified nestloop.
 		 */
 
 		/* Needn't scan if it couldn't contain members from each rel */

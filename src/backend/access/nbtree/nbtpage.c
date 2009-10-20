@@ -4,7 +4,7 @@
  *	  BTree-specific page management code for the Postgres btree access
  *	  method.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -25,9 +25,12 @@
 #include "access/nbtree.h"
 #include "access/transam.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "storage/freespace.h"
+#include "storage/indexfsm.h"
 #include "storage/lmgr.h"
 #include "utils/inval.h"
+#include "utils/snapmgr.h"
 
 
 /*
@@ -434,8 +437,7 @@ _bt_checkpage(Relation rel, Buffer buf)
 	/*
 	 * Additionally check that the special area looks sane.
 	 */
-	if (((PageHeader) (page))->pd_special !=
-		(BLCKSZ - MAXALIGN(sizeof(BTPageOpaqueData))))
+	if (PageGetSpecialSize(page) != MAXALIGN(sizeof(BTPageOpaqueData)))
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("index \"%s\" contains corrupted page at block %u",
@@ -500,7 +502,7 @@ _bt_getbuf(Relation rel, BlockNumber blkno, int access)
 		 */
 		for (;;)
 		{
-			blkno = GetFreeIndexPage(&rel->rd_node);
+			blkno = GetFreeIndexPage(rel);
 			if (blkno == InvalidBlockNumber)
 				break;
 			buf = ReadBuffer(rel, blkno);
@@ -553,7 +555,7 @@ _bt_getbuf(Relation rel, BlockNumber blkno, int access)
 
 		/* Initialize the new page before returning it */
 		page = BufferGetPage(buf);
-		Assert(PageIsNew((PageHeader) page));
+		Assert(PageIsNew(page));
 		_bt_pageinit(page, BufferGetPageSize(buf));
 	}
 
@@ -567,8 +569,12 @@ _bt_getbuf(Relation rel, BlockNumber blkno, int access)
  * This is equivalent to _bt_relbuf followed by _bt_getbuf, with the
  * exception that blkno may not be P_NEW.  Also, if obuf is InvalidBuffer
  * then it reduces to just _bt_getbuf; allowing this case simplifies some
- * callers. The motivation for using this is to avoid two entries to the
- * bufmgr when one will do.
+ * callers.
+ *
+ * The original motivation for using this was to avoid two entries to the
+ * bufmgr when one would do.  However, now it's mainly just a notational
+ * convenience.  The only case where it saves work over _bt_relbuf/_bt_getbuf
+ * is when the target page is the same one already in the buffer.
  */
 Buffer
 _bt_relandgetbuf(Relation rel, Buffer obuf, BlockNumber blkno, int access)

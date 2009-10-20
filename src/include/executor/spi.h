@@ -3,7 +3,7 @@
  * spi.h
  *				Server Programming Interface public declarations
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -13,37 +13,10 @@
 #ifndef SPI_H
 #define SPI_H
 
-/*
- * This file may be used by client modules that haven't already
- * included postgres.h
- */
-#include "postgres.h"
-
-/*
- *	Most of these are not needed by this file, but may be used by
- *	user-written code that uses SPI
- */
-#include "access/heapam.h"
-#include "access/xact.h"
-#include "catalog/pg_language.h"
-#include "catalog/pg_proc.h"
-#include "catalog/pg_type.h"
-#include "executor/execdefs.h"
-#include "executor/executor.h"
-#include "nodes/execnodes.h"
-#include "nodes/params.h"
 #include "nodes/parsenodes.h"
-#include "nodes/plannodes.h"
-#include "nodes/primnodes.h"
-#include "nodes/relation.h"
-#include "tcop/dest.h"
-#include "tcop/pquery.h"
-#include "tcop/tcopprot.h"
-#include "tcop/utility.h"
-#include "utils/builtins.h"
-#include "utils/datum.h"
 #include "utils/portal.h"
-#include "utils/syscache.h"
+#include "utils/relcache.h"
+#include "utils/snapshot.h"
 
 
 typedef struct SPITupleTable
@@ -83,6 +56,7 @@ typedef struct _SPI_plan *SPIPlanPtr;
 #define SPI_OK_INSERT_RETURNING 11
 #define SPI_OK_DELETE_RETURNING 12
 #define SPI_OK_UPDATE_RETURNING 13
+#define SPI_OK_REWRITTEN		14
 
 extern PGDLLIMPORT uint32 SPI_processed;
 extern PGDLLIMPORT Oid SPI_lastoid;
@@ -107,6 +81,10 @@ extern int SPI_execute_snapshot(SPIPlanPtr plan,
 					 Snapshot snapshot,
 					 Snapshot crosscheck_snapshot,
 					 bool read_only, bool fire_triggers, long tcount);
+extern int SPI_execute_with_args(const char *src,
+					  int nargs, Oid *argtypes,
+					  Datum *Values, const char *Nulls,
+					  bool read_only, long tcount);
 extern SPIPlanPtr SPI_prepare(const char *src, int nargs, Oid *argtypes);
 extern SPIPlanPtr SPI_prepare_cursor(const char *src, int nargs, Oid *argtypes,
 				   int cursorOptions);
@@ -139,6 +117,11 @@ extern void SPI_freetuptable(SPITupleTable *tuptable);
 
 extern Portal SPI_cursor_open(const char *name, SPIPlanPtr plan,
 				Datum *Values, const char *Nulls, bool read_only);
+extern Portal SPI_cursor_open_with_args(const char *name,
+						  const char *src,
+						  int nargs, Oid *argtypes,
+						  Datum *Values, const char *Nulls,
+						  bool read_only, int cursorOptions);
 extern Portal SPI_cursor_find(const char *name);
 extern void SPI_cursor_fetch(Portal portal, bool forward, long count);
 extern void SPI_cursor_move(Portal portal, bool forward, long count);

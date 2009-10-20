@@ -12,7 +12,7 @@
  * We may also need junk tlist entries for Vars used in the RETURNING list.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -24,6 +24,7 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/sysattr.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/prep.h"
@@ -33,6 +34,7 @@
 #include "parser/analyze.h"
 #include "parser/parsetree.h"
 #include "parser/parse_coerce.h"
+#include "utils/rel.h"
 
 
 static List *expand_targetlist(List *tlist, int command_type,
@@ -66,7 +68,7 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 	}
 
 	/*
-	 * for heap_formtuple to work, the targetlist must match the exact order
+	 * for heap_form_tuple to work, the targetlist must match the exact order
 	 * of the attributes. We also need to fill in any missing attributes. -ay
 	 * 10/94
 	 */
@@ -136,6 +138,11 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 			char	   *resname;
 			TargetEntry *tle;
 
+			/* ignore child rels */
+			if (rc->rti != rc->prti)
+				continue;
+
+			/* always need the ctid */
 			var = makeVar(rc->rti,
 						  SelfItemPointerAttributeNumber,
 						  TIDOID,
@@ -151,6 +158,26 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 								  true);
 
 			tlist = lappend(tlist, tle);
+
+			/* if parent of inheritance tree, need the tableoid too */
+			if (rc->isParent)
+			{
+				var = makeVar(rc->rti,
+							  TableOidAttributeNumber,
+							  OIDOID,
+							  -1,
+							  0);
+
+				resname = (char *) palloc(32);
+				snprintf(resname, 32, "tableoid%u", rc->rti);
+
+				tle = makeTargetEntry((Expr *) var,
+									  list_length(tlist) + 1,
+									  resname,
+									  true);
+
+				tlist = lappend(tlist, tle);
+			}
 		}
 	}
 
@@ -166,13 +193,15 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 		List	   *vars;
 		ListCell   *l;
 
-		vars = pull_var_clause((Node *) parse->returningList, false);
+		vars = pull_var_clause((Node *) parse->returningList,
+							   PVC_INCLUDE_PLACEHOLDERS);
 		foreach(l, vars)
 		{
 			Var		   *var = (Var *) lfirst(l);
 			TargetEntry *tle;
 
-			if (var->varno == result_relation)
+			if (IsA(var, Var) &&
+				var->varno == result_relation)
 				continue;		/* don't need it */
 
 			if (tlist_member((Node *) var, tlist))
@@ -290,6 +319,7 @@ expand_targetlist(List *tlist, int command_type,
 													InvalidOid, -1,
 													atttype,
 													COERCE_IMPLICIT_CAST,
+													-1,
 													false,
 													false);
 					}

@@ -1,21 +1,30 @@
 /*
+ * pgbench.c
+ *
+ * A simple benchmark program for PostgreSQL
+ * Originally written by Tatsuo Ishii and enhanced by many contributors.
+ *
  * $PostgreSQL$
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
+ * ALL RIGHTS RESERVED;
  *
- * pgbench: a simple benchmark program for PostgreSQL
- * written by Tatsuo Ishii
+ * Permission to use, copy, modify, and distribute this software and its
+ * documentation for any purpose, without fee, and without a written agreement
+ * is hereby granted, provided that the above copyright notice and this
+ * paragraph and the following two paragraphs appear in all copies.
  *
- * Copyright (c) 2000-2007	Tatsuo Ishii
+ * IN NO EVENT SHALL THE AUTHOR OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+ * DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
+ * LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS
+ * DOCUMENTATION, EVEN IF THE AUTHOR OR DISTRIBUTORS HAVE BEEN ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  *
- * Permission to use, copy, modify, and distribute this software and
- * its documentation for any purpose and without fee is hereby
- * granted, provided that the above copyright notice appear in all
- * copies and that both that copyright notice and this permission
- * notice appear in supporting documentation, and that the name of the
- * author not be used in advertising or publicity pertaining to
- * distribution of the software without specific, written prior
- * permission. The author makes no representations about the
- * suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * THE AUTHOR AND DISTRIBUTORS SPECIFICALLY DISCLAIMS ANY WARRANTIES,
+ * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+ * AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+ * ON AN "AS IS" BASIS, AND THE AUTHOR AND DISTRIBUTORS HAS NO OBLIGATIONS TO
+ * PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+ *
  */
 
 #ifdef WIN32
@@ -25,12 +34,14 @@
 #include "postgres_fe.h"
 
 #include "libpq-fe.h"
+#include "pqsignal.h"
 
 #include <ctype.h>
 
 #ifdef WIN32
 #include <win32.h>
 #else
+#include <signal.h>
 #include <sys/time.h>
 #include <unistd.h>
 #endif   /* ! WIN32 */
@@ -61,12 +72,15 @@ extern int	optind;
 #define MAXCLIENTS	1024
 #endif
 
+#define DEFAULT_NXACTS	10		/* default nxacts */
+
 int			nclients = 1;		/* default number of simulated clients */
-int			nxacts = 10;		/* default number of transactions per clients */
+int			nxacts = 0;			/* number of transactions per client */
+int			duration = 0;		/* duration in seconds */
 
 /*
- * scaling factor. for example, scale = 10 will make 1000000 tuples of
- * accounts table.
+ * scaling factor. for example, scale = 10 will make 1000000 tuples in
+ * pgbench_accounts table.
  */
 int			scale = 1;
 
@@ -99,12 +113,16 @@ char	   *pgtty = NULL;
 char	   *login = NULL;
 char	   *dbName;
 
+volatile bool timer_exceeded = false;	/* flag from signal handler */
+
 /* variable definitions */
 typedef struct
 {
 	char	   *name;			/* variable name */
 	char	   *value;			/* its value */
-}	Variable;
+} Variable;
+
+#define MAX_FILES		128		/* max number of SQL script files allowed */
 
 /*
  * structures used in custom query mode
@@ -125,7 +143,8 @@ typedef struct
 	int			nvariables;
 	struct timeval txn_begin;	/* used for measuring latencies */
 	int			use_file;		/* index in sql_files for this client */
-}	CState;
+	bool		prepared[MAX_FILES];
+} CState;
 
 /*
  * queries read from files
@@ -134,17 +153,26 @@ typedef struct
 #define META_COMMAND	2
 #define MAX_ARGS		10
 
+typedef enum QueryMode
+{
+	QUERY_SIMPLE,				/* simple query */
+	QUERY_EXTENDED,				/* extended query */
+	QUERY_PREPARED,				/* extended query with prepared statements */
+	NUM_QUERYMODE
+} QueryMode;
+
+static QueryMode querymode = QUERY_SIMPLE;
+static const char *QUERYMODE[] = {"simple", "extended", "prepared"};
+
 typedef struct
 {
 	int			type;			/* command type (SQL_COMMAND or META_COMMAND) */
 	int			argc;			/* number of commands */
 	char	   *argv[MAX_ARGS]; /* command list */
-}	Command;
-
-#define MAX_FILES		128		/* max number of SQL script files allowed */
+} Command;
 
 Command   **sql_files[MAX_FILES];		/* SQL script files */
-int			num_files;			/* its number */
+int			num_files;			/* number of script files */
 
 /* default scenario */
 static char *tpc_b = {
@@ -156,11 +184,11 @@ static char *tpc_b = {
 	"\\setrandom tid 1 :ntellers\n"
 	"\\setrandom delta -5000 5000\n"
 	"BEGIN;\n"
-	"UPDATE accounts SET abalance = abalance + :delta WHERE aid = :aid;\n"
-	"SELECT abalance FROM accounts WHERE aid = :aid;\n"
-	"UPDATE tellers SET tbalance = tbalance + :delta WHERE tid = :tid;\n"
-	"UPDATE branches SET bbalance = bbalance + :delta WHERE bid = :bid;\n"
-	"INSERT INTO history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);\n"
+	"UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;\n"
+	"SELECT abalance FROM pgbench_accounts WHERE aid = :aid;\n"
+	"UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;\n"
+	"UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;\n"
+	"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);\n"
 	"END;\n"
 };
 
@@ -174,9 +202,9 @@ static char *simple_update = {
 	"\\setrandom tid 1 :ntellers\n"
 	"\\setrandom delta -5000 5000\n"
 	"BEGIN;\n"
-	"UPDATE accounts SET abalance = abalance + :delta WHERE aid = :aid;\n"
-	"SELECT abalance FROM accounts WHERE aid = :aid;\n"
-	"INSERT INTO history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);\n"
+	"UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;\n"
+	"SELECT abalance FROM pgbench_accounts WHERE aid = :aid;\n"
+	"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);\n"
 	"END;\n"
 };
 
@@ -184,21 +212,95 @@ static char *simple_update = {
 static char *select_only = {
 	"\\set naccounts 100000 * :scale\n"
 	"\\setrandom aid 1 :naccounts\n"
-	"SELECT abalance FROM accounts WHERE aid = :aid;\n"
+	"SELECT abalance FROM pgbench_accounts WHERE aid = :aid;\n"
 };
 
+/* Connection overhead time */
+static struct timeval conn_total_time = {0, 0};
+
+/* Function prototypes */
+static void setalarm(int seconds);
+
+
+/* Calculate total time */
 static void
-usage(void)
+addTime(struct timeval * t1, struct timeval * t2, struct timeval * result)
 {
-	fprintf(stderr, "usage: pgbench [-h hostname][-p port][-c nclients][-t ntransactions][-s scaling_factor][-D varname=value][-n][-C][-v][-S][-N][-f filename][-l][-U login][-d][dbname]\n");
-	fprintf(stderr, "(initialize mode): pgbench -i [-h hostname][-p port][-s scaling_factor] [-F fillfactor] [-U login][-d][dbname]\n");
+	int			sec = t1->tv_sec + t2->tv_sec;
+	int			usec = t1->tv_usec + t2->tv_usec;
+
+	if (usec >= 1000000)
+	{
+		usec -= 1000000;
+		sec++;
+	}
+	result->tv_sec = sec;
+	result->tv_usec = usec;
 }
 
-/* random number generator */
+/* Calculate time difference */
+static void
+diffTime(struct timeval * t1, struct timeval * t2, struct timeval * result)
+{
+	int			sec = t1->tv_sec - t2->tv_sec;
+	int			usec = t1->tv_usec - t2->tv_usec;
+
+	if (usec < 0)
+	{
+		usec += 1000000;
+		sec--;
+	}
+	result->tv_sec = sec;
+	result->tv_usec = usec;
+}
+
+static void
+usage(const char *progname)
+{
+	printf("%s is a benchmarking tool for PostgreSQL.\n\n"
+		   "Usage:\n"
+		   "  %s [OPTIONS]... [DBNAME]\n"
+		   "\nInitialization options:\n"
+		   "  -i           invokes initialization mode\n"
+		   "  -F NUM       fill factor\n"
+		   "  -s NUM       scaling factor\n"
+		   "\nBenchmarking options:\n"
+		"  -c NUM       number of concurrent database clients (default: 1)\n"
+		   "  -C           establish new connection for each transaction\n"
+		   "  -D VARNAME=VALUE\n"
+		   "               define variable for use by custom script\n"
+		   "  -f FILENAME  read transaction script from FILENAME\n"
+		   "  -l           write transaction times to log file\n"
+		   "  -M {simple|extended|prepared}\n"
+		   "               protocol for submitting queries to server (default: simple)\n"
+		   "  -n           do not run VACUUM before tests\n"
+		   "  -N           do not update tables \"pgbench_tellers\" and \"pgbench_branches\"\n"
+		   "  -s NUM       report this scale factor in output\n"
+		   "  -S           perform SELECT-only transactions\n"
+	 "  -t NUM       number of transactions each client runs (default: 10)\n"
+		   "  -T NUM       duration of benchmark test in seconds\n"
+		   "  -v           vacuum all four standard tables before tests\n"
+		   "\nCommon options:\n"
+		   "  -d           print debugging output\n"
+		   "  -h HOSTNAME  database server host or socket directory\n"
+		   "  -p PORT      database server port number\n"
+		   "  -U USERNAME  connect as specified database user\n"
+		   "  --help       show this help, then exit\n"
+		   "  --version    output version information, then exit\n"
+		   "\n"
+		   "Report bugs to <pgsql-bugs@postgresql.org>.\n",
+		   progname, progname);
+}
+
+/* random number generator: uniform distribution from min to max inclusive */
 static int
 getrand(int min, int max)
 {
-	return min + (int) (((max - min) * (double) random()) / MAX_RANDOM_VALUE + 0.5);
+	/*
+	 * Odd coding is so that min and max have approximately the same chance of
+	 * being selected as do numbers between them.
+	 */
+	return min + (int) (((max - min + 1) * (double) random()) / (MAX_RANDOM_VALUE + 1.0));
 }
 
 /* call PQexec() and exit() on failure */
@@ -243,8 +345,7 @@ doConnect(void)
 
 		if (PQstatus(conn) == CONNECTION_BAD &&
 			PQconnectionNeedsPassword(conn) &&
-			password == NULL &&
-			!feof(stdin))
+			password == NULL)
 		{
 			PQfinish(conn);
 			password = simple_prompt("Password: ", 100, false);
@@ -261,14 +362,12 @@ doConnect(void)
 		return NULL;
 	}
 
-	executeStatement(conn, "SET search_path = public");
-
 	return conn;
 }
 
 /* throw away response from backend */
 static void
-discard_response(CState * state)
+discard_response(CState *state)
 {
 	PGresult   *res;
 
@@ -282,7 +381,7 @@ discard_response(CState * state)
 
 /* check to see if the SQL result was good */
 static int
-check(CState * state, PGresult *res, int n)
+check(CState *state, PGresult *res, int n)
 {
 	CState	   *st = &state[n];
 
@@ -311,7 +410,7 @@ compareVariables(const void *v1, const void *v2)
 }
 
 static char *
-getVariable(CState * st, char *name)
+getVariable(CState *st, char *name)
 {
 	Variable	key,
 			   *var;
@@ -333,7 +432,7 @@ getVariable(CState * st, char *name)
 }
 
 static int
-putVariable(CState * st, char *name, char *value)
+putVariable(CState *st, char *name, char *value)
 {
 	Variable	key,
 			   *var;
@@ -397,71 +496,110 @@ putVariable(CState * st, char *name, char *value)
 }
 
 static char *
-assignVariables(CState * st, char *sql)
+parseVariable(const char *sql, int *eaten)
 {
-	int			i,
-				j;
+	int			i = 0;
+	char	   *name;
+
+	do
+	{
+		i++;
+	} while (isalnum((unsigned char) sql[i]) || sql[i] == '_');
+	if (i == 1)
+		return NULL;
+
+	name = malloc(i);
+	if (name == NULL)
+		return NULL;
+	memcpy(name, &sql[1], i - 1);
+	name[i - 1] = '\0';
+
+	*eaten = i;
+	return name;
+}
+
+static char *
+replaceVariable(char **sql, char *param, int len, char *value)
+{
+	int			valueln = strlen(value);
+
+	if (valueln > len)
+	{
+		char	   *tmp;
+		size_t		offset = param - *sql;
+
+		tmp = realloc(*sql, strlen(*sql) - len + valueln + 1);
+		if (tmp == NULL)
+		{
+			free(*sql);
+			return NULL;
+		}
+		*sql = tmp;
+		param = *sql + offset;
+	}
+
+	if (valueln != len)
+		memmove(param + valueln, param + len, strlen(param + len) + 1);
+	strncpy(param, value, valueln);
+
+	return param + valueln;
+}
+
+static char *
+assignVariables(CState *st, char *sql)
+{
 	char	   *p,
 			   *name,
 			   *val;
-	void	   *tmp;
 
-	i = 0;
-	while ((p = strchr(&sql[i], ':')) != NULL)
+	p = sql;
+	while ((p = strchr(p, ':')) != NULL)
 	{
-		i = j = p - sql;
-		do
-		{
-			i++;
-		} while (isalnum((unsigned char) sql[i]) || sql[i] == '_');
-		if (i == j + 1)
-			continue;
+		int			eaten;
 
-		name = malloc(i - j);
+		name = parseVariable(p, &eaten);
 		if (name == NULL)
-			return NULL;
-		memcpy(name, &sql[j + 1], i - (j + 1));
-		name[i - (j + 1)] = '\0';
+		{
+			while (*p == ':')
+			{
+				p++;
+			}
+			continue;
+		}
+
 		val = getVariable(st, name);
 		free(name);
 		if (val == NULL)
+		{
+			p++;
 			continue;
-
-		if (strlen(val) > i - j)
-		{
-			tmp = realloc(sql, strlen(sql) - (i - j) + strlen(val) + 1);
-			if (tmp == NULL)
-			{
-				free(sql);
-				return NULL;
-			}
-			sql = tmp;
 		}
 
-		if (strlen(val) != i - j)
-			memmove(&sql[j + strlen(val)], &sql[i], strlen(&sql[i]) + 1);
-
-		strncpy(&sql[j], val, strlen(val));
-
-		if (strlen(val) < i - j)
-		{
-			tmp = realloc(sql, strlen(sql) + 1);
-			if (tmp == NULL)
-			{
-				free(sql);
-				return NULL;
-			}
-			sql = tmp;
-		}
-
-		i = j + strlen(val);
+		if ((p = replaceVariable(&sql, p, eaten, val)) == NULL)
+			return NULL;
 	}
 
 	return sql;
 }
 
 static void
-doCustom(CState * state, int n, int debug)
+getQueryParams(CState *st, const Command *command, const char **params)
+{
+	int			i;
+
+	for (i = 0; i < command->argc - 1; i++)
+		params[i] = getVariable(st, command->argv[i + 1]);
+}
+
+#define MAX_PREPARE_NAME		32
+static void
+preparedStatementName(char *buffer, int file, int state)
+{
+	sprintf(buffer, "P%d_%d", file, state);
+}
+
+static void
+doCustom(CState *state, int n, int debug)
 {
 	PGresult   *res;
 	CState	   *st = &state[n];
@@ -539,7 +677,8 @@ top:
 				st->con = NULL;
 			}
 
-			if (++st->cnt >= nxacts)
+			++st->cnt;
+			if ((st->cnt >= nxacts && duration <= 0) || timer_exceeded)
 			{
 				remains--;		/* I've done */
 				if (st->con != NULL)
@@ -563,6 +702,11 @@ top:
 
 	if (st->con == NULL)
 	{
+		struct timeval t1,
+					t2,
+					t3;
+
+		gettimeofday(&t1, NULL);
 		if ((st->con = doConnect()) == NULL)
 		{
 			fprintf(stderr, "Client %d aborted in establishing connection.\n",
@@ -572,6 +716,9 @@ top:
 			st->con = NULL;
 			return;
 		}
+		gettimeofday(&t2, NULL);
+		diffTime(&t2, &t1, &t3);
+		addTime(&conn_total_time, &t3, &conn_total_time);
 	}
 
 	if (use_log && st->state == 0)
@@ -579,29 +726,83 @@ top:
 
 	if (commands[st->state]->type == SQL_COMMAND)
 	{
-		char	   *sql;
+		const Command *command = commands[st->state];
+		int			r;
 
-		if ((sql = strdup(commands[st->state]->argv[0])) == NULL
-			|| (sql = assignVariables(st, sql)) == NULL)
+		if (querymode == QUERY_SIMPLE)
 		{
-			fprintf(stderr, "out of memory\n");
-			st->ecnt++;
-			return;
-		}
+			char	   *sql;
 
-		if (debug)
-			fprintf(stderr, "client %d sending %s\n", n, sql);
-		if (PQsendQuery(st->con, sql) == 0)
+			if ((sql = strdup(command->argv[0])) == NULL
+				|| (sql = assignVariables(st, sql)) == NULL)
+			{
+				fprintf(stderr, "out of memory\n");
+				st->ecnt++;
+				return;
+			}
+
+			if (debug)
+				fprintf(stderr, "client %d sending %s\n", n, sql);
+			r = PQsendQuery(st->con, sql);
+			free(sql);
+		}
+		else if (querymode == QUERY_EXTENDED)
+		{
+			const char *sql = command->argv[0];
+			const char *params[MAX_ARGS];
+
+			getQueryParams(st, command, params);
+
+			if (debug)
+				fprintf(stderr, "client %d sending %s\n", n, sql);
+			r = PQsendQueryParams(st->con, sql, command->argc - 1,
+								  NULL, params, NULL, NULL, 0);
+		}
+		else if (querymode == QUERY_PREPARED)
+		{
+			char		name[MAX_PREPARE_NAME];
+			const char *params[MAX_ARGS];
+
+			if (!st->prepared[st->use_file])
+			{
+				int			j;
+
+				for (j = 0; commands[j] != NULL; j++)
+				{
+					PGresult   *res;
+					char		name[MAX_PREPARE_NAME];
+
+					if (commands[j]->type != SQL_COMMAND)
+						continue;
+					preparedStatementName(name, st->use_file, j);
+					res = PQprepare(st->con, name,
+						  commands[j]->argv[0], commands[j]->argc - 1, NULL);
+					if (PQresultStatus(res) != PGRES_COMMAND_OK)
+						fprintf(stderr, "%s", PQerrorMessage(st->con));
+					PQclear(res);
+				}
+				st->prepared[st->use_file] = true;
+			}
+
+			getQueryParams(st, command, params);
+			preparedStatementName(name, st->use_file, st->state);
+
+			if (debug)
+				fprintf(stderr, "client %d sending %s\n", n, name);
+			r = PQsendQueryPrepared(st->con, name, command->argc - 1,
+									params, NULL, NULL, 0);
+		}
+		else	/* unknown sql mode */
+			r = 0;
+
+		if (r == 0)
 		{
 			if (debug)
-				fprintf(stderr, "PQsendQuery(%s)failed\n", sql);
+				fprintf(stderr, "client %d cannot send %s\n", n, command->argv[0]);
 			st->ecnt++;
 		}
 		else
-		{
 			st->listen = 1;		/* flags that should be listened */
-		}
-		free(sql);
 	}
 	else if (commands[st->state]->type == META_COMMAND)
 	{
@@ -793,7 +994,7 @@ top:
 
 /* discard connections */
 static void
-disconnect_all(CState * state)
+disconnect_all(CState *state)
 {
 	int			i;
 
@@ -808,25 +1009,34 @@ disconnect_all(CState * state)
 static void
 init(void)
 {
+	/*
+	 * Note: TPC-B requires at least 100 bytes per row, and the "filler"
+	 * fields in these table declarations were intended to comply with that.
+	 * But because they default to NULLs, they don't actually take any space.
+	 * We could fix that by giving them non-null default values. However, that
+	 * would completely break comparability of pgbench results with prior
+	 * versions.  Since pgbench has never pretended to be fully TPC-B
+	 * compliant anyway, we stick with the historical behavior.
+	 */
+	static char *DDLs[] = {
+		"drop table if exists pgbench_branches",
+		"create table pgbench_branches(bid int not null,bbalance int,filler char(88)) with (fillfactor=%d)",
+		"drop table if exists pgbench_tellers",
+		"create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=%d)",
+		"drop table if exists pgbench_accounts",
+		"create table pgbench_accounts(aid int not null,bid int,abalance int,filler char(84)) with (fillfactor=%d)",
+		"drop table if exists pgbench_history",
+		"create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))"
+	};
+	static char *DDLAFTERs[] = {
+		"alter table pgbench_branches add primary key (bid)",
+		"alter table pgbench_tellers add primary key (tid)",
+		"alter table pgbench_accounts add primary key (aid)"
+	};
+
 	PGconn	   *con;
 	PGresult   *res;
-	static char *DDLs[] = {
-		"drop table if exists branches",
-		"create table branches(bid int not null,bbalance int,filler char(88)) with (fillfactor=%d)",
-		"drop table if exists tellers",
-		"create table tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=%d)",
-		"drop table if exists accounts",
-		"create table accounts(aid int not null,bid int,abalance int,filler char(84)) with (fillfactor=%d)",
-		"drop table if exists history",
-	"create table history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))"};
-	static char *DDLAFTERs[] = {
-		"alter table branches add primary key (bid)",
-		"alter table tellers add primary key (tid)",
-	"alter table accounts add primary key (aid)"};
-
-
 	char		sql[256];
-
 	int			i;
 
 	if ((con = doConnect()) == NULL)
@@ -837,9 +1047,9 @@ init(void)
 		/*
 		 * set fillfactor for branches, tellers and accounts tables
 		 */
-		if ((strstr(DDLs[i], "create table branches") == DDLs[i]) ||
-			(strstr(DDLs[i], "create table tellers") == DDLs[i]) ||
-			(strstr(DDLs[i], "create table accounts") == DDLs[i]))
+		if ((strstr(DDLs[i], "create table pgbench_branches") == DDLs[i]) ||
+			(strstr(DDLs[i], "create table pgbench_tellers") == DDLs[i]) ||
+			(strstr(DDLs[i], "create table pgbench_accounts") == DDLs[i]))
 		{
 			char		ddl_stmt[128];
 
@@ -855,13 +1065,13 @@ init(void)
 
 	for (i = 0; i < nbranches * scale; i++)
 	{
-		snprintf(sql, 256, "insert into branches(bid,bbalance) values(%d,0)", i + 1);
+		snprintf(sql, 256, "insert into pgbench_branches(bid,bbalance) values(%d,0)", i + 1);
 		executeStatement(con, sql);
 	}
 
 	for (i = 0; i < ntellers * scale; i++)
 	{
-		snprintf(sql, 256, "insert into tellers(tid,bid,tbalance) values (%d,%d,0)"
+		snprintf(sql, 256, "insert into pgbench_tellers(tid,bid,tbalance) values (%d,%d,0)"
 				 ,i + 1, i / ntellers + 1);
 		executeStatement(con, sql);
 	}
@@ -869,14 +1079,14 @@ init(void)
 	executeStatement(con, "commit");
 
 	/*
-	 * fill the accounts table with some data
+	 * fill the pgbench_accounts table with some data
 	 */
 	fprintf(stderr, "creating tables...\n");
 
 	executeStatement(con, "begin");
-	executeStatement(con, "truncate accounts");
+	executeStatement(con, "truncate pgbench_accounts");
 
-	res = PQexec(con, "copy accounts from stdin");
+	res = PQexec(con, "copy pgbench_accounts from stdin");
 	if (PQresultStatus(res) != PGRES_COPY_IN)
 	{
 		fprintf(stderr, "%s", PQerrorMessage(con));
@@ -919,10 +1129,62 @@ init(void)
 
 	/* vacuum */
 	fprintf(stderr, "vacuum...");
-	executeStatement(con, "vacuum analyze");
+	executeStatement(con, "vacuum analyze pgbench_branches");
+	executeStatement(con, "vacuum analyze pgbench_tellers");
+	executeStatement(con, "vacuum analyze pgbench_accounts");
+	executeStatement(con, "vacuum analyze pgbench_history");
 
 	fprintf(stderr, "done.\n");
 	PQfinish(con);
+}
+
+/*
+ * Parse the raw sql and replace :param to $n.
+ */
+static bool
+parseQuery(Command *cmd, const char *raw_sql)
+{
+	char	   *sql,
+			   *p;
+
+	sql = strdup(raw_sql);
+	if (sql == NULL)
+		return false;
+	cmd->argc = 1;
+
+	p = sql;
+	while ((p = strchr(p, ':')) != NULL)
+	{
+		char		var[12];
+		char	   *name;
+		int			eaten;
+
+		name = parseVariable(p, &eaten);
+		if (name == NULL)
+		{
+			while (*p == ':')
+			{
+				p++;
+			}
+			continue;
+		}
+
+		if (cmd->argc >= MAX_ARGS)
+		{
+			fprintf(stderr, "statement has too many arguments (maximum is %d): %s\n", MAX_ARGS - 1, raw_sql);
+			return false;
+		}
+
+		sprintf(var, "$%d", cmd->argc);
+		if ((p = replaceVariable(&sql, p, eaten, var)) == NULL)
+			return false;
+
+		cmd->argv[cmd->argc] = name;
+		cmd->argc++;
+	}
+
+	cmd->argv[0] = sql;
+	return true;
 }
 
 static Command *
@@ -1031,10 +1293,21 @@ process_commands(char *buf)
 	{
 		my_commands->type = SQL_COMMAND;
 
-		if ((my_commands->argv[0] = strdup(p)) == NULL)
-			return NULL;
-
-		my_commands->argc++;
+		switch (querymode)
+		{
+			case QUERY_SIMPLE:
+				if ((my_commands->argv[0] = strdup(p)) == NULL)
+					return NULL;
+				my_commands->argc++;
+				break;
+			case QUERY_EXTENDED:
+			case QUERY_PREPARED:
+				if (!parseQuery(my_commands, p))
+					return NULL;
+				break;
+			default:
+				return NULL;
+		}
 	}
 
 	return my_commands;
@@ -1181,9 +1454,8 @@ process_builtin(char *tb)
 /* print out results */
 static void
 printResults(
-			 int ttype, CState * state,
-			 struct timeval * tv1, struct timeval * tv2,
-			 struct timeval * tv3)
+			 int ttype, CState *state,
+			 struct timeval * start_time, struct timeval * end_time)
 {
 	double		t1,
 				t2;
@@ -1194,16 +1466,17 @@ printResults(
 	for (i = 0; i < nclients; i++)
 		normal_xacts += state[i].cnt;
 
-	t1 = (tv3->tv_sec - tv1->tv_sec) * 1000000.0 + (tv3->tv_usec - tv1->tv_usec);
+	t1 = (end_time->tv_sec - start_time->tv_sec) * 1000000.0 + (end_time->tv_usec - start_time->tv_usec);
 	t1 = normal_xacts * 1000000.0 / t1;
 
-	t2 = (tv3->tv_sec - tv2->tv_sec) * 1000000.0 + (tv3->tv_usec - tv2->tv_usec);
+	t2 = (end_time->tv_sec - start_time->tv_sec - conn_total_time.tv_sec) * 1000000.0 +
+		(end_time->tv_usec - start_time->tv_usec - conn_total_time.tv_usec);
 	t2 = normal_xacts * 1000000.0 / t2;
 
 	if (ttype == 0)
 		s = "TPC-B (sort of)";
 	else if (ttype == 2)
-		s = "Update only accounts";
+		s = "Update only pgbench_accounts";
 	else if (ttype == 1)
 		s = "SELECT only";
 	else
@@ -1211,9 +1484,20 @@ printResults(
 
 	printf("transaction type: %s\n", s);
 	printf("scaling factor: %d\n", scale);
+	printf("query mode: %s\n", QUERYMODE[querymode]);
 	printf("number of clients: %d\n", nclients);
-	printf("number of transactions per client: %d\n", nxacts);
-	printf("number of transactions actually processed: %d/%d\n", normal_xacts, nxacts * nclients);
+	if (duration <= 0)
+	{
+		printf("number of transactions per client: %d\n", nxacts);
+		printf("number of transactions actually processed: %d/%d\n",
+			   normal_xacts, nxacts * nclients);
+	}
+	else
+	{
+		printf("duration: %d s\n", duration);
+		printf("number of transactions actually processed: %d\n",
+			   normal_xacts);
+	}
 	printf("tps = %f (including connections establishing)\n", t1);
 	printf("tps = %f (excluding connections establishing)\n", t2);
 }
@@ -1230,13 +1514,12 @@ main(int argc, char **argv)
 	int			ttype = 0;		/* transaction type. 0: TPC-B, 1: SELECT only,
 								 * 2: skip update of branches and tellers */
 	char	   *filename = NULL;
+	bool		scale_given = false;
 
 	CState	   *state;			/* status of clients */
 
-	struct timeval tv1;			/* start up time */
-	struct timeval tv2;			/* after establishing all connections to the
-								 * backend */
-	struct timeval tv3;			/* end time */
+	struct timeval start_time;	/* start up time */
+	struct timeval end_time;	/* end time */
 
 	int			i;
 
@@ -1256,6 +1539,24 @@ main(int argc, char **argv)
 	char	   *env;
 
 	char		val[64];
+
+	const char *progname;
+
+	progname = get_progname(argv[0]);
+
+	if (argc > 1)
+	{
+		if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-?") == 0)
+		{
+			usage(progname);
+			exit(0);
+		}
+		if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)
+		{
+			puts("pgbench (PostgreSQL) " PG_VERSION);
+			exit(0);
+		}
+	}
 
 #ifdef WIN32
 	/* stderr is buffered on Win32. */
@@ -1278,7 +1579,7 @@ main(int argc, char **argv)
 
 	memset(state, 0, sizeof(*state));
 
-	while ((c = getopt(argc, argv, "ih:nvp:dc:t:s:U:CNSlf:D:F:")) != -1)
+	while ((c = getopt(argc, argv, "ih:nvp:dSNc:Cs:t:T:U:lf:D:F:M:")) != -1)
 	{
 		switch (c)
 		{
@@ -1335,6 +1636,7 @@ main(int argc, char **argv)
 				is_connect = 1;
 				break;
 			case 's':
+				scale_given = true;
 				scale = atoi(optarg);
 				if (scale <= 0)
 				{
@@ -1343,10 +1645,28 @@ main(int argc, char **argv)
 				}
 				break;
 			case 't':
+				if (duration > 0)
+				{
+					fprintf(stderr, "specify either a number of transactions (-t) or a duration (-T), not both.\n");
+					exit(1);
+				}
 				nxacts = atoi(optarg);
 				if (nxacts <= 0)
 				{
 					fprintf(stderr, "invalid number of transactions: %d\n", nxacts);
+					exit(1);
+				}
+				break;
+			case 'T':
+				if (nxacts > 0)
+				{
+					fprintf(stderr, "specify either a number of transactions (-t) or a duration (-T), not both.\n");
+					exit(1);
+				}
+				duration = atoi(optarg);
+				if (duration <= 0)
+				{
+					fprintf(stderr, "invalid duration: %d\n", duration);
 					exit(1);
 				}
 				break;
@@ -1388,8 +1708,23 @@ main(int argc, char **argv)
 					exit(1);
 				}
 				break;
+			case 'M':
+				if (num_files > 0)
+				{
+					fprintf(stderr, "query mode (-M) should be specifiled before transaction scripts (-f)\n");
+					exit(1);
+				}
+				for (querymode = 0; querymode < NUM_QUERYMODE; querymode++)
+					if (strcmp(optarg, QUERYMODE[querymode]) == 0)
+						break;
+				if (querymode >= NUM_QUERYMODE)
+				{
+					fprintf(stderr, "invalid query mode (-M): %s\n", optarg);
+					exit(1);
+				}
+				break;
 			default:
-				usage();
+				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 				exit(1);
 				break;
 		}
@@ -1413,17 +1748,11 @@ main(int argc, char **argv)
 		exit(0);
 	}
 
-	remains = nclients;
+	/* Use DEFAULT_NXACTS if neither nxacts nor duration is specified. */
+	if (nxacts <= 0 && duration <= 0)
+		nxacts = DEFAULT_NXACTS;
 
-	if (getVariable(&state[0], "scale") == NULL)
-	{
-		snprintf(val, sizeof(val), "%d", scale);
-		if (putVariable(&state[0], "scale", val) == false)
-		{
-			fprintf(stderr, "Couldn't allocate memory for variable\n");
-			exit(1);
-		}
-	}
+	remains = nclients;
 
 	if (nclients > 1)
 	{
@@ -1436,8 +1765,7 @@ main(int argc, char **argv)
 
 		memset(state + 1, 0, sizeof(*state) * (nclients - 1));
 
-		snprintf(val, sizeof(val), "%d", scale);
-
+		/* copy any -D switch values to all clients */
 		for (i = 1; i < nclients; i++)
 		{
 			int			j;
@@ -1449,12 +1777,6 @@ main(int argc, char **argv)
 					fprintf(stderr, "Couldn't allocate memory for variable\n");
 					exit(1);
 				}
-			}
-
-			if (putVariable(&state[i], "scale", val) == false)
-			{
-				fprintf(stderr, "Couldn't allocate memory for variable\n");
-				exit(1);
 			}
 		}
 	}
@@ -1475,8 +1797,12 @@ main(int argc, char **argv)
 
 	if (debug)
 	{
-		printf("pghost: %s pgport: %s nclients: %d nxacts: %d dbName: %s\n",
-			   pghost, pgport, nclients, nxacts, dbName);
+		if (duration <= 0)
+			printf("pghost: %s pgport: %s nclients: %d nxacts: %d dbName: %s\n",
+				   pghost, pgport, nclients, nxacts, dbName);
+		else
+			printf("pghost: %s pgport: %s nclients: %d duration: %d dbName: %s\n",
+				   pghost, pgport, nclients, duration, dbName);
 	}
 
 	/* opening connection... */
@@ -1495,9 +1821,9 @@ main(int argc, char **argv)
 	{
 		/*
 		 * get the scaling factor that should be same as count(*) from
-		 * branches if this is not a custom query
+		 * pgbench_branches if this is not a custom query
 		 */
-		res = PQexec(con, "select count(*) from branches");
+		res = PQexec(con, "select count(*) from pgbench_branches");
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		{
 			fprintf(stderr, "%s", PQerrorMessage(con));
@@ -1506,27 +1832,31 @@ main(int argc, char **argv)
 		scale = atoi(PQgetvalue(res, 0, 0));
 		if (scale < 0)
 		{
-			fprintf(stderr, "count(*) from branches invalid (%d)\n", scale);
+			fprintf(stderr, "count(*) from pgbench_branches invalid (%d)\n", scale);
 			exit(1);
 		}
 		PQclear(res);
 
-		snprintf(val, sizeof(val), "%d", scale);
-		if (putVariable(&state[0], "scale", val) == false)
-		{
-			fprintf(stderr, "Couldn't allocate memory for variable\n");
-			exit(1);
-		}
+		/* warn if we override user-given -s switch */
+		if (scale_given)
+			fprintf(stderr,
+			"Scale option ignored, using pgbench_branches table count = %d\n",
+					scale);
+	}
 
-		if (nclients > 1)
+	/*
+	 * :scale variables normally get -s or database scale, but don't override
+	 * an explicit -D switch
+	 */
+	if (getVariable(&state[0], "scale") == NULL)
+	{
+		snprintf(val, sizeof(val), "%d", scale);
+		for (i = 0; i < nclients; i++)
 		{
-			for (i = 1; i < nclients; i++)
+			if (putVariable(&state[i], "scale", val) == false)
 			{
-				if (putVariable(&state[i], "scale", val) == false)
-				{
-					fprintf(stderr, "Couldn't allocate memory for variable\n");
-					exit(1);
-				}
+				fprintf(stderr, "Couldn't allocate memory for variable\n");
+				exit(1);
 			}
 		}
 	}
@@ -1534,30 +1864,36 @@ main(int argc, char **argv)
 	if (!is_no_vacuum)
 	{
 		fprintf(stderr, "starting vacuum...");
-		executeStatement(con, "vacuum branches");
-		executeStatement(con, "vacuum tellers");
-		executeStatement(con, "delete from history");
-		executeStatement(con, "vacuum history");
+		executeStatement(con, "vacuum pgbench_branches");
+		executeStatement(con, "vacuum pgbench_tellers");
+		executeStatement(con, "truncate pgbench_history");
 		fprintf(stderr, "end.\n");
 
 		if (do_vacuum_accounts)
 		{
-			fprintf(stderr, "starting vacuum accounts...");
-			executeStatement(con, "vacuum analyze accounts");
+			fprintf(stderr, "starting vacuum pgbench_accounts...");
+			executeStatement(con, "vacuum analyze pgbench_accounts");
 			fprintf(stderr, "end.\n");
 		}
 	}
 	PQfinish(con);
 
 	/* set random seed */
-	gettimeofday(&tv1, NULL);
-	srandom((unsigned int) tv1.tv_usec);
+	gettimeofday(&start_time, NULL);
+	srandom((unsigned int) start_time.tv_usec);
 
 	/* get start up time */
-	gettimeofday(&tv1, NULL);
+	gettimeofday(&start_time, NULL);
+
+	/* set alarm if duration is specified. */
+	if (duration > 0)
+		setalarm(duration);
 
 	if (is_connect == 0)
 	{
+		struct timeval t,
+					now;
+
 		/* make connections to the database */
 		for (i = 0; i < nclients; i++)
 		{
@@ -1565,10 +1901,11 @@ main(int argc, char **argv)
 			if ((state[i].con = doConnect()) == NULL)
 				exit(1);
 		}
+		/* time after connections set up */
+		gettimeofday(&now, NULL);
+		diffTime(&now, &start_time, &t);
+		addTime(&conn_total_time, &t, &conn_total_time);
 	}
-
-	/* time after connections set up */
-	gettimeofday(&tv2, NULL);
 
 	/* process bultin SQL scripts */
 	switch (ttype)
@@ -1616,8 +1953,8 @@ main(int argc, char **argv)
 		{						/* all done ? */
 			disconnect_all(state);
 			/* get end time */
-			gettimeofday(&tv3, NULL);
-			printResults(ttype, state, &tv1, &tv2, &tv3);
+			gettimeofday(&end_time, NULL);
+			printResults(ttype, state, &start_time, &end_time);
 			if (LOGFILE)
 				fclose(LOGFILE);
 			exit(0);
@@ -1648,7 +1985,8 @@ main(int argc, char **argv)
 				if (this_usec > 0 && (min_usec == 0 || this_usec < min_usec))
 					min_usec = this_usec;
 
-				FD_SET(sock, &input_mask);
+				FD_SET		(sock, &input_mask);
+
 				if (maxsock < sock)
 					maxsock = sock;
 			}
@@ -1661,7 +1999,8 @@ main(int argc, char **argv)
 					disconnect_all(state);
 					exit(1);
 				}
-				FD_SET(sock, &input_mask);
+				FD_SET		(sock, &input_mask);
+
 				if (maxsock < sock)
 					maxsock = sock;
 			}
@@ -1717,7 +2056,7 @@ main(int argc, char **argv)
 
 			if (state[i].ecnt > prev_ecnt && commands[state[i].state]->type == META_COMMAND)
 			{
-				fprintf(stderr, "Client %d aborted in state %d. Execution meta-command failed.\n", i, state[i].state);
+				fprintf(stderr, "Client %d aborted in state %d. Execution of meta-command failed.\n", i, state[i].state);
 				remains--;		/* I've aborted */
 				PQfinish(state[i].con);
 				state[i].con = NULL;
@@ -1725,3 +2064,50 @@ main(int argc, char **argv)
 		}
 	}
 }
+
+
+/*
+ * Support for duration option: set timer_exceeded after so many seconds.
+ */
+
+#ifndef WIN32
+
+static void
+handle_sig_alarm(SIGNAL_ARGS)
+{
+	timer_exceeded = true;
+}
+
+static void
+setalarm(int seconds)
+{
+	pqsignal(SIGALRM, handle_sig_alarm);
+	alarm(seconds);
+}
+#else							/* WIN32 */
+
+static VOID CALLBACK
+win32_timer_callback(PVOID lpParameter, BOOLEAN TimerOrWaitFired)
+{
+	timer_exceeded = true;
+}
+
+static void
+setalarm(int seconds)
+{
+	HANDLE		queue;
+	HANDLE		timer;
+
+	/* This function will be called at most once, so we can cheat a bit. */
+	queue = CreateTimerQueue();
+	if (seconds > ((DWORD) -1) / 1000 ||
+		!CreateTimerQueueTimer(&timer, queue,
+							   win32_timer_callback, NULL, seconds * 1000, 0,
+							   WT_EXECUTEINTIMERTHREAD | WT_EXECUTEONLYONCE))
+	{
+		fprintf(stderr, "Failed to set timer\n");
+		exit(1);
+	}
+}
+
+#endif   /* WIN32 */

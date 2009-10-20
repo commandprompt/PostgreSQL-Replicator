@@ -4,7 +4,7 @@
  *	  POSTGRES heap access method definitions.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -15,102 +15,21 @@
 #define HEAPAM_H
 
 #include "access/htup.h"
-#include "access/relscan.h"
 #include "access/sdir.h"
-#include "access/tupmacs.h"
-#include "access/xlogutils.h"
+#include "access/skey.h"
+#include "access/xlog.h"
 #include "nodes/primnodes.h"
-#include "storage/block.h"
-#include "storage/lmgr.h"
-#include "utils/rel.h"
-#include "utils/tqual.h"
-
-/* ----------------
- *		fastgetattr
- *
- *		Fetch a user attribute's value as a Datum (might be either a
- *		value, or a pointer into the data area of the tuple).
- *
- *		This must not be used when a system attribute might be requested.
- *		Furthermore, the passed attnum MUST be valid.  Use heap_getattr()
- *		instead, if in doubt.
- *
- *		This gets called many times, so we macro the cacheable and NULL
- *		lookups, and call nocachegetattr() for the rest.
- * ----------------
- */
-
-#if !defined(DISABLE_COMPLEX_MACRO)
-
-#define fastgetattr(tup, attnum, tupleDesc, isnull)					\
-(																	\
-	AssertMacro((attnum) > 0),										\
-	(((isnull) != NULL) ? (*(isnull) = false) : (dummyret)NULL),				\
-	HeapTupleNoNulls(tup) ?											\
-	(																\
-		(tupleDesc)->attrs[(attnum)-1]->attcacheoff >= 0 ?			\
-		(															\
-			fetchatt((tupleDesc)->attrs[(attnum)-1],				\
-				(char *) (tup)->t_data + (tup)->t_data->t_hoff +	\
-					(tupleDesc)->attrs[(attnum)-1]->attcacheoff)	\
-		)															\
-		:															\
-			nocachegetattr((tup), (attnum), (tupleDesc), (isnull))	\
-	)																\
-	:																\
-	(																\
-		att_isnull((attnum)-1, (tup)->t_data->t_bits) ?				\
-		(															\
-			(((isnull) != NULL) ? (*(isnull) = true) : (dummyret)NULL),		\
-			(Datum)NULL												\
-		)															\
-		:															\
-		(															\
-			nocachegetattr((tup), (attnum), (tupleDesc), (isnull))	\
-		)															\
-	)																\
-)
-#else							/* defined(DISABLE_COMPLEX_MACRO) */
-
-extern Datum fastgetattr(HeapTuple tup, int attnum, TupleDesc tupleDesc,
-			bool *isnull);
-#endif   /* defined(DISABLE_COMPLEX_MACRO) */
+#include "storage/bufpage.h"
+#include "storage/lock.h"
+#include "utils/relcache.h"
+#include "utils/snapshot.h"
 
 
-/* ----------------
- *		heap_getattr
- *
- *		Extract an attribute of a heap tuple and return it as a Datum.
- *		This works for either system or user attributes.  The given attnum
- *		is properly range-checked.
- *
- *		If the field in question has a NULL value, we return a zero Datum
- *		and set *isnull == true.  Otherwise, we set *isnull == false.
- *
- *		<tup> is the pointer to the heap tuple.  <attnum> is the attribute
- *		number of the column (field) caller wants.	<tupleDesc> is a
- *		pointer to the structure describing the row and all its fields.
- * ----------------
- */
-#define heap_getattr(tup, attnum, tupleDesc, isnull) \
-( \
-	AssertMacro((tup) != NULL), \
-	( \
-		((attnum) > 0) ? \
-		( \
-			((attnum) > (int) HeapTupleHeaderGetNatts((tup)->t_data)) ? \
-			( \
-				(((isnull) != NULL) ? (*(isnull) = true) : (dummyret)NULL), \
-				(Datum)NULL \
-			) \
-			: \
-				fastgetattr((tup), (attnum), (tupleDesc), (isnull)) \
-		) \
-		: \
-			heap_getsysattr((tup), (attnum), (tupleDesc), (isnull)) \
-	) \
-)
+/* "options" flag bits for heap_insert */
+#define HEAP_INSERT_SKIP_WAL	0x0001
+#define HEAP_INSERT_SKIP_FSM	0x0002
 
+typedef struct BulkInsertStateData *BulkInsertState;
 
 typedef enum
 {
@@ -130,14 +49,24 @@ typedef enum
 /* in heap/heapam.c */
 extern Relation relation_open(Oid relationId, LOCKMODE lockmode);
 extern Relation try_relation_open(Oid relationId, LOCKMODE lockmode);
-extern Relation relation_open_nowait(Oid relationId, LOCKMODE lockmode);
 extern Relation relation_openrv(const RangeVar *relation, LOCKMODE lockmode);
+extern Relation try_relation_openrv(const RangeVar *relation, LOCKMODE lockmode);
 extern void relation_close(Relation relation, LOCKMODE lockmode);
 
 extern Relation heap_open(Oid relationId, LOCKMODE lockmode);
 extern Relation heap_openrv(const RangeVar *relation, LOCKMODE lockmode);
+extern Relation try_heap_openrv(const RangeVar *relation, LOCKMODE lockmode);
 
 #define heap_close(r,l)  relation_close(r,l)
+
+/* struct definition appears in relscan.h */
+typedef struct HeapScanDescData *HeapScanDesc;
+
+/*
+ * HeapScanIsValid
+ *		True iff the heap scan is valid.
+ */
+#define HeapScanIsValid(scan) PointerIsValid(scan)
 
 extern HeapScanDesc heap_beginscan(Relation relation, Snapshot snapshot,
 			   int nkeys, ScanKey key);
@@ -153,9 +82,6 @@ extern HeapTuple heap_getnext(HeapScanDesc scan, ScanDirection direction);
 extern bool heap_fetch(Relation relation, Snapshot snapshot,
 		   HeapTuple tuple, Buffer *userbuf, bool keep_buf,
 		   Relation stats_relation);
-extern bool heap_release_fetch(Relation relation, Snapshot snapshot,
-				   HeapTuple tuple, Buffer *userbuf, bool keep_buf,
-				   Relation stats_relation);
 extern bool heap_hot_search_buffer(ItemPointer tid, Buffer buffer,
 					   Snapshot snapshot, bool *all_dead);
 extern bool heap_hot_search(ItemPointer tid, Relation relation,
@@ -165,8 +91,11 @@ extern void heap_get_latest_tid(Relation relation, Snapshot snapshot,
 					ItemPointer tid);
 extern void setLastTid(const ItemPointer tid);
 
+extern BulkInsertState GetBulkInsertState(void);
+extern void FreeBulkInsertState(BulkInsertState);
+
 extern Oid heap_insert(Relation relation, HeapTuple tup, CommandId cid,
-			bool use_wal, bool use_fsm);
+			int options, BulkInsertState bistate);
 extern HTSU_Result heap_delete(Relation relation, ItemPointer tid,
 			ItemPointer ctid, TransactionId *update_xmax,
 			CommandId cid, Snapshot crosscheck, bool wait);
@@ -199,7 +128,8 @@ extern void heap2_desc(StringInfo buf, uint8 xl_info, char *rec);
 
 extern XLogRecPtr log_heap_move(Relation reln, Buffer oldbuf,
 			  ItemPointerData from,
-			  Buffer newbuf, HeapTuple newtup);
+			  Buffer newbuf, HeapTuple newtup,
+			  bool all_visible_cleared, bool new_all_visible_cleared);
 extern XLogRecPtr log_heap_clean(Relation reln, Buffer buffer,
 			   OffsetNumber *redirected, int nredirected,
 			   OffsetNumber *nowdead, int ndead,
@@ -208,49 +138,8 @@ extern XLogRecPtr log_heap_clean(Relation reln, Buffer buffer,
 extern XLogRecPtr log_heap_freeze(Relation reln, Buffer buffer,
 				TransactionId cutoff_xid,
 				OffsetNumber *offsets, int offcnt);
-extern XLogRecPtr log_newpage(RelFileNode *rnode, BlockNumber blk, Page page);
-
-/* in common/heaptuple.c */
-extern Size heap_compute_data_size(TupleDesc tupleDesc,
-					   Datum *values, bool *isnull);
-extern void heap_fill_tuple(TupleDesc tupleDesc,
-				Datum *values, bool *isnull,
-				char *data, Size data_size,
-				uint16 *infomask, bits8 *bit);
-extern bool heap_attisnull(HeapTuple tup, int attnum);
-extern Datum nocachegetattr(HeapTuple tup, int attnum,
-			   TupleDesc att, bool *isnull);
-extern Datum heap_getsysattr(HeapTuple tup, int attnum, TupleDesc tupleDesc,
-				bool *isnull);
-extern HeapTuple heap_copytuple(HeapTuple tuple);
-extern void heap_copytuple_with_tuple(HeapTuple src, HeapTuple dest);
-extern HeapTuple heap_form_tuple(TupleDesc tupleDescriptor,
-				Datum *values, bool *isnull);
-extern HeapTuple heap_formtuple(TupleDesc tupleDescriptor,
-			   Datum *values, char *nulls);
-extern HeapTuple heap_modify_tuple(HeapTuple tuple,
-				  TupleDesc tupleDesc,
-				  Datum *replValues,
-				  bool *replIsnull,
-				  bool *doReplace);
-extern HeapTuple heap_modifytuple(HeapTuple tuple,
-				 TupleDesc tupleDesc,
-				 Datum *replValues,
-				 char *replNulls,
-				 char *replActions);
-extern void heap_deform_tuple(HeapTuple tuple, TupleDesc tupleDesc,
-				  Datum *values, bool *isnull);
-extern void heap_deformtuple(HeapTuple tuple, TupleDesc tupleDesc,
-				 Datum *values, char *nulls);
-extern void heap_freetuple(HeapTuple htup);
-extern MinimalTuple heap_form_minimal_tuple(TupleDesc tupleDescriptor,
-						Datum *values, bool *isnull);
-extern void heap_free_minimal_tuple(MinimalTuple mtup);
-extern MinimalTuple heap_copy_minimal_tuple(MinimalTuple mtup);
-extern HeapTuple heap_tuple_from_minimal_tuple(MinimalTuple mtup);
-extern MinimalTuple minimal_tuple_from_heap_tuple(HeapTuple htup);
-extern HeapTuple heap_addheader(int natts, bool withoid,
-			   Size structlen, void *structure);
+extern XLogRecPtr log_newpage(RelFileNode *rnode, ForkNumber forkNum,
+			BlockNumber blk, Page page);
 
 /* in heap/pruneheap.c */
 extern void heap_page_prune_opt(Relation relation, Buffer buffer,
@@ -258,7 +147,7 @@ extern void heap_page_prune_opt(Relation relation, Buffer buffer,
 extern int heap_page_prune(Relation relation, Buffer buffer,
 				TransactionId OldestXmin,
 				bool redirect_move, bool report_stats);
-extern void heap_page_prune_execute(Relation reln, Buffer buffer,
+extern void heap_page_prune_execute(Buffer buffer,
 						OffsetNumber *redirected, int nredirected,
 						OffsetNumber *nowdead, int ndead,
 						OffsetNumber *nowunused, int nunused,

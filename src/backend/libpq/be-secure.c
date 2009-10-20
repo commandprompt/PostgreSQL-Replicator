@@ -6,7 +6,7 @@
  *	  message integrity and endpoint authentication.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -44,32 +44,6 @@
  *	  Because the risk of cryptanalysis increases as large
  *	  amounts of data are sent with the same session key, the
  *	  session keys are periodically renegotiated.
- *
- * PATCH LEVEL
- *	  milestone 1: fix basic coding errors
- *	  [*] existing SSL code pulled out of existing files.
- *	  [*] SSL_get_error() after SSL_read() and SSL_write(),
- *		  SSL_shutdown(), default to TLSv1.
- *
- *	  milestone 2: provide endpoint authentication (server)
- *	  [*] client verifies server cert
- *	  [*] client verifies server hostname
- *
- *	  milestone 3: improve confidentially, support perfect forward secrecy
- *	  [ ] use 'random' file, read from '/dev/urandom?'
- *	  [*] emphermal DH keys, default values
- *	  [*] periodic renegotiation
- *	  [*] private key permissions
- *
- *	  milestone 4: provide endpoint authentication (client)
- *	  [*] server verifies client certificates
- *
- *	  milestone 5: provide informational callbacks
- *	  [*] provide informational callbacks
- *
- *	  other changes
- *	  [ ] tcp-wrappers
- *	  [ ] more informative psql
  *
  *-------------------------------------------------------------------------
  */
@@ -114,7 +88,6 @@ static DH  *tmp_dh_cb(SSL *s, int is_export, int keylength);
 static int	verify_cb(int, X509_STORE_CTX *);
 static void info_cb(const SSL *ssl, int type, int args);
 static void initialize_SSL(void);
-static void destroy_SSL(void);
 static int	open_server_SSL(Port *);
 static int open_client_SSL(Port *port);
 static void close_SSL(Port *);
@@ -129,6 +102,7 @@ static const char *SSLerrmessage(void);
 #define RENEGOTIATION_LIMIT (512 * 1024 * 1024)
 
 static SSL_CTX *SSL_context = NULL;
+static bool ssl_loaded_verify_locations = false;
 
 /* GUC variable controlling SSL cipher list */
 char	   *SSLCipherSuites = NULL;
@@ -219,14 +193,16 @@ secure_initialize(void)
 }
 
 /*
- *	Destroy global context
+ * Indicate if we have loaded the root CA store to verify certificates
  */
-void
-secure_destroy(void)
+bool
+secure_loaded_verify_locations(void)
 {
 #ifdef USE_SSL
-	destroy_SSL();
+	return ssl_loaded_verify_locations;
 #endif
+
+	return false;
 }
 
 /*
@@ -431,33 +407,59 @@ wloop:
 #ifdef USE_SSL
 
 /*
- * Private substitute BIO: this wraps the SSL library's standard socket BIO
- * so that we can enable and disable interrupts just while calling recv().
- * We cannot have interrupts occurring while the bulk of openssl runs,
- * because it uses malloc() and possibly other non-reentrant libc facilities.
+ * Private substitute BIO: this does the sending and receiving using send() and
+ * recv() instead. This is so that we can enable and disable interrupts
+ * just while calling recv(). We cannot have interrupts occurring while
+ * the bulk of openssl runs, because it uses malloc() and possibly other
+ * non-reentrant libc facilities. We also need to call send() and recv()
+ * directly so it gets passed through the socket/signals layer on Win32.
  *
- * As of openssl 0.9.7, we can use the reasonably clean method of interposing
- * a wrapper around the standard socket BIO's sock_read() method.  This relies
- * on the fact that sock_read() doesn't call anything non-reentrant, in fact
- * not much of anything at all except recv().  If this ever changes we'd
- * probably need to duplicate the code of sock_read() in order to push the
- * interrupt enable/disable down yet another level.
+ * They are closely modelled on the original socket implementations in OpenSSL.
+ *
  */
 
 static bool my_bio_initialized = false;
 static BIO_METHOD my_bio_methods;
-static int	(*std_sock_read) (BIO *h, char *buf, int size);
 
 static int
 my_sock_read(BIO *h, char *buf, int size)
 {
-	int			res;
+	int			res = 0;
 
 	prepare_for_client_read();
 
-	res = std_sock_read(h, buf, size);
+	if (buf != NULL)
+	{
+		res = recv(h->num, buf, size, 0);
+		BIO_clear_retry_flags(h);
+		if (res <= 0)
+		{
+			/* If we were interrupted, tell caller to retry */
+			if (errno == EINTR)
+			{
+				BIO_set_retry_read(h);
+			}
+		}
+	}
 
 	client_read_ended();
+
+	return res;
+}
+
+static int
+my_sock_write(BIO *h, const char *buf, int size)
+{
+	int			res = 0;
+
+	res = send(h->num, buf, size, 0);
+	if (res <= 0)
+	{
+		if (errno == EINTR)
+		{
+			BIO_set_retry_write(h);
+		}
+	}
 
 	return res;
 }
@@ -468,8 +470,8 @@ my_BIO_s_socket(void)
 	if (!my_bio_initialized)
 	{
 		memcpy(&my_bio_methods, BIO_s_socket(), sizeof(BIO_METHOD));
-		std_sock_read = my_bio_methods.bread;
 		my_bio_methods.bread = my_sock_read;
+		my_bio_methods.bwrite = my_sock_write;
 		my_bio_initialized = true;
 	}
 	return &my_bio_methods;
@@ -740,15 +742,14 @@ initialize_SSL(void)
 		/*
 		 * Load and verify certificate and private key
 		 */
-		if (SSL_CTX_use_certificate_file(SSL_context,
-										  SERVER_CERT_FILE,
-										  SSL_FILETYPE_PEM) != 1)
+		if (SSL_CTX_use_certificate_chain_file(SSL_context,
+											   SERVER_CERT_FILE) != 1)
 			ereport(FATAL,
 					(errcode(ERRCODE_CONFIG_FILE_ERROR),
 				  errmsg("could not load server certificate file \"%s\": %s",
 						 SERVER_CERT_FILE, SSLerrmessage())));
 
-		if (stat(SERVER_PRIVATE_KEY_FILE, &buf) == -1)
+		if (stat(SERVER_PRIVATE_KEY_FILE, &buf) != 0)
 			ereport(FATAL,
 					(errcode_for_file_access(),
 					 errmsg("could not access private key file \"%s\": %m",
@@ -763,18 +764,17 @@ initialize_SSL(void)
 		 * directory permission check in postmaster.c)
 		 */
 #if !defined(WIN32) && !defined(__CYGWIN__)
-		if (!S_ISREG(buf.st_mode) || (buf.st_mode & (S_IRWXG | S_IRWXO)) ||
-			buf.st_uid != geteuid())
+		if (!S_ISREG(buf.st_mode) || buf.st_mode & (S_IRWXG | S_IRWXO))
 			ereport(FATAL,
 					(errcode(ERRCODE_CONFIG_FILE_ERROR),
-					 errmsg("unsafe permissions on private key file \"%s\"",
-							SERVER_PRIVATE_KEY_FILE),
-					 errdetail("File must be owned by the database user and must have no permissions for \"group\" or \"other\".")));
+				  errmsg("private key file \"%s\" has group or world access",
+						 SERVER_PRIVATE_KEY_FILE),
+				   errdetail("Permissions should be u=rw (0600) or less.")));
 #endif
 
 		if (SSL_CTX_use_PrivateKey_file(SSL_context,
-										 SERVER_PRIVATE_KEY_FILE,
-										 SSL_FILETYPE_PEM) != 1)
+										SERVER_PRIVATE_KEY_FILE,
+										SSL_FILETYPE_PEM) != 1)
 			ereport(FATAL,
 					(errmsg("could not load private key file \"%s\": %s",
 							SERVER_PRIVATE_KEY_FILE, SSLerrmessage())));
@@ -794,15 +794,37 @@ initialize_SSL(void)
 		elog(FATAL, "could not set the cipher list (no valid ciphers available)");
 
 	/*
-	 * Require and check client certificates only if we have a root.crt file.
+	 * Attempt to load CA store, so we can verify client certificates if
+	 * needed.
 	 */
-	if (SSL_CTX_load_verify_locations(SSL_context, ROOT_CERT_FILE, NULL) != 1)
+	if (access(ROOT_CERT_FILE, R_OK))
 	{
-		/* Not fatal - we do not require client certificates */
-		ereport(LOG,
+		ssl_loaded_verify_locations = false;
+
+		/*
+		 * If root certificate file simply not found. Don't log an error here,
+		 * because it's quite likely the user isn't planning on using client
+		 * certificates. If we can't access it for other reasons, it is an
+		 * error.
+		 */
+		if (errno != ENOENT)
+		{
+			ereport(FATAL,
+				 (errmsg("could not access root certificate file \"%s\": %m",
+						 ROOT_CERT_FILE)));
+		}
+	}
+	else if (SSL_CTX_load_verify_locations(SSL_context, ROOT_CERT_FILE, NULL) != 1)
+	{
+		/*
+		 * File was there, but we could not load it. This means the file is
+		 * somehow broken, and we cannot do verification at all - so abort
+		 * here.
+		 */
+		ssl_loaded_verify_locations = false;
+		ereport(FATAL,
 				(errmsg("could not load root certificate file \"%s\": %s",
-						ROOT_CERT_FILE, SSLerrmessage()),
-				 errdetail("Will not verify client certificates.")));
+						ROOT_CERT_FILE, SSLerrmessage())));
 	}
 	else
 	{
@@ -835,26 +857,19 @@ initialize_SSL(void)
 								ROOT_CRL_FILE, SSLerrmessage()),
 						 errdetail("Certificates will not be checked against revocation list.")));
 			}
+
+			/*
+			 * Always ask for SSL client cert, but don't fail if it's not
+			 * presented. We'll fail later in this case, based on what we find
+			 * in pg_hba.conf.
+			 */
+			SSL_CTX_set_verify(SSL_context,
+							   (SSL_VERIFY_PEER |
+								SSL_VERIFY_CLIENT_ONCE),
+							   verify_cb);
+
+			ssl_loaded_verify_locations = true;
 		}
-
-		SSL_CTX_set_verify(SSL_context,
-						   (SSL_VERIFY_PEER |
-							SSL_VERIFY_FAIL_IF_NO_PEER_CERT |
-							SSL_VERIFY_CLIENT_ONCE),
-						   verify_cb);
-	}
-}
-
-/*
- *	Destroy global SSL context.
- */
-static void
-destroy_SSL(void)
-{
-	if (SSL_context)
-	{
-		SSL_CTX_free(SSL_context);
-		SSL_context = NULL;
 	}
 }
 

@@ -4,7 +4,7 @@
  *	  definitions for executor state nodes
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -14,11 +14,15 @@
 #ifndef EXECNODES_H
 #define EXECNODES_H
 
-#include "access/relscan.h"
+#include "access/genam.h"
+#include "access/heapam.h"
+#include "access/skey.h"
 #include "nodes/params.h"
 #include "nodes/plannodes.h"
 #include "nodes/tidbitmap.h"
 #include "utils/hsearch.h"
+#include "utils/rel.h"
+#include "utils/snapshot.h"
 #include "utils/tuplestore.h"
 
 
@@ -115,9 +119,12 @@ typedef struct ExprContext
 	ParamExecData *ecxt_param_exec_vals;		/* for PARAM_EXEC params */
 	ParamListInfo ecxt_param_list_info; /* for other param types */
 
-	/* Values to substitute for Aggref nodes in expression */
-	Datum	   *ecxt_aggvalues; /* precomputed values for Aggref nodes */
-	bool	   *ecxt_aggnulls;	/* null flags for Aggref nodes */
+	/*
+	 * Values to substitute for Aggref nodes in the expressions of an Agg
+	 * node, or for WindowFunc nodes within a WindowAgg node.
+	 */
+	Datum	   *ecxt_aggvalues; /* precomputed values for aggs/windowfuncs */
+	bool	   *ecxt_aggnulls;	/* null flags for aggs/windowfuncs */
 
 	/* Value to substitute for CaseTestExpr nodes in expression */
 	Datum		caseValue_datum;
@@ -147,12 +154,15 @@ typedef enum
 /*
  * Return modes for functions returning sets.  Note values must be chosen
  * as separate bits so that a bitmask can be formed to indicate supported
- * modes.
+ * modes.  SFRM_Materialize_Random and SFRM_Materialize_Preferred are
+ * auxiliary flags about SFRM_Materialize mode, rather than separate modes.
  */
 typedef enum
 {
 	SFRM_ValuePerCall = 0x01,	/* one value returned per call */
-	SFRM_Materialize = 0x02		/* result set instantiated in Tuplestore */
+	SFRM_Materialize = 0x02,	/* result set instantiated in Tuplestore */
+	SFRM_Materialize_Random = 0x04,		/* Tuplestore needs randomAccess */
+	SFRM_Materialize_Preferred = 0x08	/* caller prefers Tuplestore */
 } SetFunctionReturnMode;
 
 /*
@@ -191,16 +201,25 @@ typedef struct ReturnSetInfo
  *
  *		The planner very often produces tlists that consist entirely of
  *		simple Var references (lower levels of a plan tree almost always
- *		look like that).  So we have an optimization to handle that case
- *		with minimum overhead.
+ *		look like that).  And top-level tlists are often mostly Vars too.
+ *		We therefore optimize execution of simple-Var tlist entries.
+ *		The pi_targetlist list actually contains only the tlist entries that
+ *		aren't simple Vars, while those that are Vars are processed using the
+ *		varSlotOffsets/varNumbers/varOutputCols arrays.
  *
- *		targetlist		target list for projection
+ *		The lastXXXVar fields are used to optimize fetching of fields from
+ *		input tuples: they let us do a slot_getsomeattrs() call to ensure
+ *		that all needed attributes are extracted in one pass.
+ *
+ *		targetlist		target list for projection (non-Var expressions only)
  *		exprContext		expression context in which to evaluate targetlist
  *		slot			slot to place projection result in
- *		itemIsDone		workspace for ExecProject
- *		isVarList		TRUE if simple-Var-list optimization applies
+ *		itemIsDone		workspace array for ExecProject
+ *		directMap		true if varOutputCols[] is an identity map
+ *		numSimpleVars	number of simple Vars found in original tlist
  *		varSlotOffsets	array indicating which slot each simple Var is from
- *		varNumbers		array indicating attr numbers of simple Vars
+ *		varNumbers		array containing input attr numbers of simple Vars
+ *		varOutputCols	array containing output attr numbers of simple Vars
  *		lastInnerVar	highest attnum from inner tuple slot (0 if none)
  *		lastOuterVar	highest attnum from outer tuple slot (0 if none)
  *		lastScanVar		highest attnum from scan tuple slot (0 if none)
@@ -213,9 +232,11 @@ typedef struct ProjectionInfo
 	ExprContext *pi_exprContext;
 	TupleTableSlot *pi_slot;
 	ExprDoneCond *pi_itemIsDone;
-	bool		pi_isVarList;
+	bool		pi_directMap;
+	int			pi_numSimpleVars;
 	int		   *pi_varSlotOffsets;
 	int		   *pi_varNumbers;
+	int		   *pi_varOutputCols;
 	int			pi_lastInnerVar;
 	int			pi_lastOuterVar;
 	int			pi_lastScanVar;
@@ -324,10 +345,6 @@ typedef struct EState
 	List	   *es_trig_target_relations;		/* trigger-only ResultRelInfos */
 	TupleTableSlot *es_trig_tuple_slot; /* for trigger output tuples */
 
-	/* Stuff used for SELECT INTO: */
-	Relation	es_into_relation_descriptor;
-	bool		es_into_relation_use_wal;
-
 	/* Parameter info: */
 	ParamListInfo es_param_list_info;	/* values of external params */
 	ParamExecData *es_param_exec_vals;	/* values of internal params */
@@ -365,14 +382,20 @@ typedef struct EState
 } EState;
 
 
-/* es_rowMarks is a list of these structs: */
+/*
+ * es_rowMarks is a list of these structs.	See RowMarkClause for details
+ * about rti and prti.	toidAttno is not used in a "plain" rowmark.
+ */
 typedef struct ExecRowMark
 {
 	Relation	relation;		/* opened and RowShareLock'd relation */
 	Index		rti;			/* its range table index */
+	Index		prti;			/* parent range table index, if child */
 	bool		forUpdate;		/* true = FOR UPDATE, false = FOR SHARE */
 	bool		noWait;			/* NOWAIT option */
 	AttrNumber	ctidAttNo;		/* resno of its ctid junk attribute */
+	AttrNumber	toidAttNo;		/* resno of tableoid junk attribute, if any */
+	ItemPointerData curCtid;	/* ctid of currently locked tuple, if any */
 } ExecRowMark;
 
 
@@ -503,6 +526,17 @@ typedef struct AggrefExprState
 } AggrefExprState;
 
 /* ----------------
+ *		WindowFuncExprState node
+ * ----------------
+ */
+typedef struct WindowFuncExprState
+{
+	ExprState	xprstate;
+	List	   *args;			/* states of argument expressions */
+	int			wfuncno;		/* ID number for wfunc within its plan node */
+} WindowFuncExprState;
+
+/* ----------------
  *		ArrayRefExprState node
  *
  * Note: array types can be fixed-length (typlen > 0), but only when the
@@ -538,13 +572,30 @@ typedef struct FuncExprState
 
 	/*
 	 * Function manager's lookup info for the target function.  If func.fn_oid
-	 * is InvalidOid, we haven't initialized it yet.
+	 * is InvalidOid, we haven't initialized it yet (nor any of the following
+	 * fields).
 	 */
 	FmgrInfo	func;
 
 	/*
-	 * We also need to store argument values across calls when evaluating a
-	 * function-returning-set.
+	 * For a set-returning function (SRF) that returns a tuplestore, we keep
+	 * the tuplestore here and dole out the result rows one at a time. The
+	 * slot holds the row currently being returned.
+	 */
+	Tuplestorestate *funcResultStore;
+	TupleTableSlot *funcResultSlot;
+
+	/*
+	 * In some cases we need to compute a tuple descriptor for the function's
+	 * output.	If so, it's stored here.
+	 */
+	TupleDesc	funcResultDesc;
+	bool		funcReturnsTuple;		/* valid when funcResultDesc isn't
+										 * NULL */
+
+	/*
+	 * We need to store argument values across calls when evaluating a SRF
+	 * that uses value-per-call mode.
 	 *
 	 * setArgsValid is true when we are evaluating a set-valued function and
 	 * we are in the middle of a call series; we want to pass the same
@@ -556,14 +607,15 @@ typedef struct FuncExprState
 	/*
 	 * Flag to remember whether we found a set-valued argument to the
 	 * function. This causes the function result to be a set as well. Valid
-	 * only when setArgsValid is true.
+	 * only when setArgsValid is true or funcResultStore isn't NULL.
 	 */
 	bool		setHasSetArg;	/* some argument returns a set */
 
 	/*
 	 * Flag to remember whether we have registered a shutdown callback for
-	 * this FuncExprState.	We do so only if setArgsValid has been true at
-	 * least once (since all the callback is for is to clear setArgsValid).
+	 * this FuncExprState.	We do so only if funcResultStore or setArgsValid
+	 * has been set at least once (since all the callback is for is to release
+	 * the tuplestore or clear setArgsValid).
 	 */
 	bool		shutdown_reg;	/* a shutdown callback is registered */
 
@@ -626,6 +678,17 @@ typedef struct SubPlanState
 	FmgrInfo   *lhs_hash_funcs; /* hash functions for lefthand datatype(s) */
 	FmgrInfo   *cur_eq_funcs;	/* equality functions for LHS vs. table */
 } SubPlanState;
+
+/* ----------------
+ *		AlternativeSubPlanState node
+ * ----------------
+ */
+typedef struct AlternativeSubPlanState
+{
+	ExprState	xprstate;
+	List	   *subplans;		/* states of alternative subplans */
+	int			active;			/* list index of the one we're using */
+} AlternativeSubPlanState;
 
 /* ----------------
  *		FieldSelectState node
@@ -785,7 +848,6 @@ typedef struct XmlExprState
 {
 	ExprState	xprstate;
 	List	   *named_args;		/* ExprStates for named arguments */
-	FmgrInfo   *named_outfuncs; /* array of output fns for named arguments */
 	List	   *args;			/* ExprStates for other arguments */
 } XmlExprState;
 
@@ -857,7 +919,7 @@ typedef struct PlanState
 
 	Plan	   *plan;			/* associated Plan node */
 
-	EState	   *state;			/* at execution time, state's of individual
+	EState	   *state;			/* at execution time, states of individual
 								 * nodes point to one EState for the whole
 								 * top-level plan */
 
@@ -885,7 +947,6 @@ typedef struct PlanState
 	/*
 	 * Other run-time state needed by most if not all node types.
 	 */
-	TupleTableSlot *ps_OuterTupleSlot;	/* slot for current "outer" tuple */
 	TupleTableSlot *ps_ResultTupleSlot; /* slot for my result tuples */
 	ExprContext *ps_ExprContext;	/* node's expression-evaluation context */
 	ProjectionInfo *ps_ProjInfo;	/* info for doing tuple projection */
@@ -934,6 +995,32 @@ typedef struct AppendState
 	int			as_firstplan;
 	int			as_lastplan;
 } AppendState;
+
+/* ----------------
+ *	 RecursiveUnionState information
+ *
+ *		RecursiveUnionState is used for performing a recursive union.
+ *
+ *		recursing			T when we're done scanning the non-recursive term
+ *		intermediate_empty	T if intermediate_table is currently empty
+ *		working_table		working table (to be scanned by recursive term)
+ *		intermediate_table	current recursive output (next generation of WT)
+ * ----------------
+ */
+typedef struct RecursiveUnionState
+{
+	PlanState	ps;				/* its first field is NodeTag */
+	bool		recursing;
+	bool		intermediate_empty;
+	Tuplestorestate *working_table;
+	Tuplestorestate *intermediate_table;
+	/* Remaining fields are unused in UNION ALL case */
+	FmgrInfo   *eqfunctions;	/* per-grouping-field equality fns */
+	FmgrInfo   *hashfunctions;	/* per-grouping-field hash fns */
+	MemoryContext tempContext;	/* short-term context for comparisons */
+	TupleHashTable hashtable;	/* hash table for tuples already seen */
+	MemoryContext tableContext; /* memory context containing hash table */
+} RecursiveUnionState;
 
 /* ----------------
  *	 BitmapAndState information
@@ -999,6 +1086,7 @@ typedef struct
 {
 	ScanKey		scan_key;		/* scankey to put value into */
 	ExprState  *key_expr;		/* expr to evaluate to get value */
+	bool		key_toastable;	/* is expr's result a toastable datatype? */
 } IndexRuntimeKeyInfo;
 
 typedef struct
@@ -1076,7 +1164,11 @@ typedef struct BitmapIndexScanState
  *
  *		bitmapqualorig	   execution state for bitmapqualorig expressions
  *		tbm				   bitmap obtained from child index scan(s)
+ *		tbmiterator		   iterator for scanning current pages
  *		tbmres			   current-page data
+ *		prefetch_iterator  iterator for prefetching ahead of current page
+ *		prefetch_pages	   # pages prefetch iterator is ahead of current
+ *		prefetch_target    target prefetch distance
  * ----------------
  */
 typedef struct BitmapHeapScanState
@@ -1084,7 +1176,11 @@ typedef struct BitmapHeapScanState
 	ScanState	ss;				/* its first field is NodeTag */
 	List	   *bitmapqualorig;
 	TIDBitmap  *tbm;
+	TBMIterator *tbmiterator;
 	TBMIterateResult *tbmres;
+	TBMIterator *prefetch_iterator;
+	int			prefetch_pages;
+	int			prefetch_target;
 } BitmapHeapScanState;
 
 /* ----------------
@@ -1127,6 +1223,7 @@ typedef struct SubqueryScanState
  *		Function nodes are used to scan the results of a
  *		function appearing in FROM (typically a function returning set).
  *
+ *		eflags				node's capability flags
  *		tupdesc				expected return tuple description
  *		tuplestorestate		private state of tuplestore.c
  *		funcexpr			state for function expression being evaluated
@@ -1135,6 +1232,7 @@ typedef struct SubqueryScanState
 typedef struct FunctionScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
+	int			eflags;
 	TupleDesc	tupdesc;
 	Tuplestorestate *tuplestorestate;
 	ExprState  *funcexpr;
@@ -1167,6 +1265,43 @@ typedef struct ValuesScanState
 	int			curr_idx;
 	int			marked_idx;
 } ValuesScanState;
+
+/* ----------------
+ *	 CteScanState information
+ *
+ *		CteScan nodes are used to scan a CommonTableExpr query.
+ *
+ * Multiple CteScan nodes can read out from the same CTE query.  We use
+ * a tuplestore to hold rows that have been read from the CTE query but
+ * not yet consumed by all readers.
+ * ----------------
+ */
+typedef struct CteScanState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+	int			eflags;			/* capability flags to pass to tuplestore */
+	int			readptr;		/* index of my tuplestore read pointer */
+	PlanState  *cteplanstate;	/* PlanState for the CTE query itself */
+	/* Link to the "leader" CteScanState (possibly this same node) */
+	struct CteScanState *leader;
+	/* The remaining fields are only valid in the "leader" CteScanState */
+	Tuplestorestate *cte_table; /* rows already read from the CTE query */
+	bool		eof_cte;		/* reached end of CTE query? */
+} CteScanState;
+
+/* ----------------
+ *	 WorkTableScanState information
+ *
+ *		WorkTableScan nodes are used to scan the work table created by
+ *		a RecursiveUnion node.	We locate the RecursiveUnion node
+ *		during executor startup.
+ * ----------------
+ */
+typedef struct WorkTableScanState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+	RecursiveUnionState *rustate;
+} WorkTableScanState;
 
 /* ----------------------------------------------------------------
  *				 Join State Information
@@ -1251,11 +1386,12 @@ typedef struct MergeJoinState
  *		hj_HashTable			hash table for the hashjoin
  *								(NULL if table not built yet)
  *		hj_CurHashValue			hash value for current outer tuple
- *		hj_CurBucketNo			bucket# for current outer tuple
+ *		hj_CurBucketNo			regular bucket# for current outer tuple
+ *		hj_CurSkewBucketNo		skew bucket# for current outer tuple
  *		hj_CurTuple				last inner tuple matched to current outer
  *								tuple, or NULL if starting search
- *								(CurHashValue, CurBucketNo and CurTuple are
- *								 undefined if OuterTupleSlot is empty!)
+ *								(hj_CurXXX variables are undefined if
+ *								OuterTupleSlot is empty!)
  *		hj_OuterHashKeys		the outer hash keys in the hashjoin condition
  *		hj_InnerHashKeys		the inner hash keys in the hashjoin condition
  *		hj_HashOperators		the join operators in the hashjoin condition
@@ -1280,6 +1416,7 @@ typedef struct HashJoinState
 	HashJoinTable hj_HashTable;
 	uint32		hj_CurHashValue;
 	int			hj_CurBucketNo;
+	int			hj_CurSkewBucketNo;
 	HashJoinTuple hj_CurTuple;
 	List	   *hj_OuterHashKeys;		/* list of ExprState nodes */
 	List	   *hj_InnerHashKeys;		/* list of ExprState nodes */
@@ -1313,7 +1450,7 @@ typedef struct MaterialState
 	ScanState	ss;				/* its first field is NodeTag */
 	int			eflags;			/* capability flags to pass to tuplestore */
 	bool		eof_underlying; /* reached end of underlying plan? */
-	void	   *tuplestorestate;	/* private state of tuplestore.c */
+	Tuplestorestate *tuplestorestate;
 } MaterialState;
 
 /* ----------------
@@ -1382,6 +1519,56 @@ typedef struct AggState
 } AggState;
 
 /* ----------------
+ *	WindowAggState information
+ * ----------------
+ */
+/* these structs are private in nodeWindowAgg.c: */
+typedef struct WindowStatePerFuncData *WindowStatePerFunc;
+typedef struct WindowStatePerAggData *WindowStatePerAgg;
+
+typedef struct WindowAggState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+
+	/* these fields are filled in by ExecInitExpr: */
+	List	   *funcs;			/* all WindowFunc nodes in targetlist */
+	int			numfuncs;		/* total number of window functions */
+	int			numaggs;		/* number that are plain aggregates */
+
+	WindowStatePerFunc perfunc; /* per-window-function information */
+	WindowStatePerAgg peragg;	/* per-plain-aggregate information */
+	FmgrInfo   *partEqfunctions;	/* equality funcs for partition columns */
+	FmgrInfo   *ordEqfunctions; /* equality funcs for ordering columns */
+	Tuplestorestate *buffer;	/* stores rows of current partition */
+	int			current_ptr;	/* read pointer # for current */
+	int			agg_ptr;		/* read pointer # for aggregates */
+	int64		spooled_rows;	/* total # of rows in buffer */
+	int64		currentpos;		/* position of current row in partition */
+	int64		frametailpos;	/* current frame tail position */
+	int64		aggregatedupto; /* rows before this one are aggregated */
+
+	MemoryContext wincontext;	/* context for partition-lifespan data */
+	ExprContext *tmpcontext;	/* short-term evaluation context */
+
+	bool		all_done;		/* true if the scan is finished */
+	bool		partition_spooled;		/* true if all tuples in current
+										 * partition have been spooled into
+										 * tuplestore */
+	bool		more_partitions;/* true if there's more partitions after this
+								 * one */
+	bool		frametail_valid;/* true if frametailpos is known up to date
+								 * for current row */
+
+	TupleTableSlot *first_part_slot;	/* first tuple of current or next
+										 * partition */
+
+	/* temporary slots for tuples fetched back from tuplestore */
+	TupleTableSlot *agg_row_slot;
+	TupleTableSlot *temp_slot_1;
+	TupleTableSlot *temp_slot_2;
+} WindowAggState;
+
+/* ----------------
  *	 UniqueState information
  *
  *		Unique nodes are used "on top of" sort nodes to discard
@@ -1414,21 +1601,31 @@ typedef struct HashState
 /* ----------------
  *	 SetOpState information
  *
- *		SetOp nodes are used "on top of" sort nodes to discard
- *		duplicate tuples returned from the sort phase.	These are
- *		more complex than a simple Unique since we have to count
- *		how many duplicates to return.
+ *		Even in "sorted" mode, SetOp nodes are more complex than a simple
+ *		Unique, since we have to count how many duplicates to return.  But
+ *		we also support hashing, so this is really more like a cut-down
+ *		form of Agg.
  * ----------------
  */
+/* this struct is private in nodeSetOp.c: */
+typedef struct SetOpStatePerGroupData *SetOpStatePerGroup;
+
 typedef struct SetOpState
 {
 	PlanState	ps;				/* its first field is NodeTag */
-	FmgrInfo   *eqfunctions;	/* per-field lookup data for equality fns */
-	bool		subplan_done;	/* has subplan returned EOF? */
-	long		numLeft;		/* number of left-input dups of cur group */
-	long		numRight;		/* number of right-input dups of cur group */
+	FmgrInfo   *eqfunctions;	/* per-grouping-field equality fns */
+	FmgrInfo   *hashfunctions;	/* per-grouping-field hash fns */
+	bool		setop_done;		/* indicates completion of output scan */
 	long		numOutput;		/* number of dups left to output */
 	MemoryContext tempContext;	/* short-term context for comparisons */
+	/* these fields are used in SETOP_SORTED mode: */
+	SetOpStatePerGroup pergroup;	/* per-group working state */
+	HeapTuple	grp_firstTuple; /* copy of first tuple of current group */
+	/* these fields are used in SETOP_HASHED mode: */
+	TupleHashTable hashtable;	/* hash table with one entry per group */
+	MemoryContext tableContext; /* memory context containing hash table */
+	bool		table_filled;	/* hash table filled yet? */
+	TupleHashIterator hashiter; /* for iterating through hash table */
 } SetOpState;
 
 /* ----------------

@@ -3,7 +3,7 @@
  * arrayfuncs.c
  *	  Support functions for arrays.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,7 +16,7 @@
 
 #include <ctype.h>
 
-#include "access/tupmacs.h"
+#include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
@@ -95,6 +95,11 @@ static void array_insert_slice(ArrayType *destArray, ArrayType *origArray,
 				   int *st, int *endp,
 				   int typlen, bool typbyval, char typalign);
 static int	array_cmp(FunctionCallInfo fcinfo);
+static ArrayType *create_array_envelope(int ndims, int *dimv, int *lbv, int nbytes,
+					  Oid elmtype, int dataoffset);
+static ArrayType *array_fill_internal(ArrayType *dims, ArrayType *lbs,
+					Datum value, bool isnull, Oid elmtype,
+					FunctionCallInfo fcinfo);
 
 
 /*
@@ -1030,9 +1035,7 @@ array_out(PG_FUNCTION_ARGS)
 				if (ch == '"' || ch == '\\')
 				{
 					needquote = true;
-#ifndef TCL_ARRAYS
 					overall_length += 1;
-#endif
 				}
 				else if (ch == '{' || ch == '}' || ch == typdelim ||
 						 isspace((unsigned char) ch))
@@ -1103,7 +1106,6 @@ array_out(PG_FUNCTION_ARGS)
 		if (needquotes[k])
 		{
 			APPENDCHAR('"');
-#ifndef TCL_ARRAYS
 			for (tmp = values[k]; *tmp; tmp++)
 			{
 				char		ch = *tmp;
@@ -1113,9 +1115,6 @@ array_out(PG_FUNCTION_ARGS)
 				*p++ = ch;
 			}
 			*p = '\0';
-#else
-			APPENDSTR(values[k]);
-#endif
 			APPENDCHAR('"');
 		}
 		else
@@ -1532,6 +1531,22 @@ array_send(PG_FUNCTION_ARGS)
 }
 
 /*
+ * array_ndims :
+ *		  returns the number of dimensions of the array pointed to by "v"
+ */
+Datum
+array_ndims(PG_FUNCTION_ARGS)
+{
+	ArrayType  *v = PG_GETARG_ARRAYTYPE_P(0);
+
+	/* Sanity check: does it look like an array at all? */
+	if (ARR_NDIM(v) <= 0 || ARR_NDIM(v) > MAXDIM)
+		PG_RETURN_NULL();
+
+	PG_RETURN_INT32(ARR_NDIM(v));
+}
+
+/*
  * array_dims :
  *		  returns the dimensions of the array pointed to by "v", as a "text"
  */
@@ -1539,39 +1554,33 @@ Datum
 array_dims(PG_FUNCTION_ARGS)
 {
 	ArrayType  *v = PG_GETARG_ARRAYTYPE_P(0);
-	text	   *result;
 	char	   *p;
-	int			nbytes,
-				i;
+	int			i;
 	int		   *dimv,
 			   *lb;
+
+	/*
+	 * 33 since we assume 15 digits per number + ':' +'[]'
+	 *
+	 * +1 for trailing null
+	 */
+	char		buf[MAXDIM * 33 + 1];
 
 	/* Sanity check: does it look like an array at all? */
 	if (ARR_NDIM(v) <= 0 || ARR_NDIM(v) > MAXDIM)
 		PG_RETURN_NULL();
 
-	nbytes = ARR_NDIM(v) * 33 + 1;
-
-	/*
-	 * 33 since we assume 15 digits per number + ':' +'[]'
-	 *
-	 * +1 allows for temp trailing null
-	 */
-
-	result = (text *) palloc(nbytes + VARHDRSZ);
-	p = VARDATA(result);
-
 	dimv = ARR_DIMS(v);
 	lb = ARR_LBOUND(v);
 
+	p = buf;
 	for (i = 0; i < ARR_NDIM(v); i++)
 	{
 		sprintf(p, "[%d:%d]", lb[i], dimv[i] + lb[i] - 1);
 		p += strlen(p);
 	}
-	SET_VARSIZE(result, strlen(VARDATA(result)) + VARHDRSZ);
 
-	PG_RETURN_TEXT_P(result);
+	PG_RETURN_TEXT_P(cstring_to_text(buf));
 }
 
 /*
@@ -1627,6 +1636,34 @@ array_upper(PG_FUNCTION_ARGS)
 	dimv = ARR_DIMS(v);
 
 	result = dimv[reqdim - 1] + lb[reqdim - 1] - 1;
+
+	PG_RETURN_INT32(result);
+}
+
+/*
+ * array_length :
+ *		returns the length, of the dimension requested, for
+ *		the array pointed to by "v", as an int4
+ */
+Datum
+array_length(PG_FUNCTION_ARGS)
+{
+	ArrayType  *v = PG_GETARG_ARRAYTYPE_P(0);
+	int			reqdim = PG_GETARG_INT32(1);
+	int		   *dimv;
+	int			result;
+
+	/* Sanity check: does it look like an array at all? */
+	if (ARR_NDIM(v) <= 0 || ARR_NDIM(v) > MAXDIM)
+		PG_RETURN_NULL();
+
+	/* Sanity check: was the requested dim valid */
+	if (reqdim <= 0 || reqdim > ARR_NDIM(v))
+		PG_RETURN_NULL();
+
+	dimv = ARR_DIMS(v);
+
+	result = dimv[reqdim - 1];
 
 	PG_RETURN_INT32(result);
 }
@@ -4142,9 +4179,21 @@ accumArrayResult(ArrayBuildState *astate,
 		}
 	}
 
-	/* Use datumCopy to ensure pass-by-ref stuff is copied into mcontext */
+	/*
+	 * Ensure pass-by-ref stuff is copied into mcontext; and detoast it too
+	 * if it's varlena.  (You might think that detoasting is not needed here
+	 * because construct_md_array can detoast the array elements later.
+	 * However, we must not let construct_md_array modify the ArrayBuildState
+	 * because that would mean array_agg_finalfn damages its input, which
+	 * is verboten.  Also, this way frequently saves one copying step.)
+	 */
 	if (!disnull && !astate->typbyval)
-		dvalue = datumCopy(dvalue, astate->typbyval, astate->typlen);
+	{
+		if (astate->typlen == -1)
+			dvalue = PointerGetDatum(PG_DETOAST_DATUM_COPY(dvalue));
+		else
+			dvalue = datumCopy(dvalue, astate->typbyval, astate->typlen);
+	}
 
 	astate->dvalues[astate->nelems] = dvalue;
 	astate->dnulls[astate->nelems] = disnull;
@@ -4171,7 +4220,7 @@ makeArrayResult(ArrayBuildState *astate,
 	dims[0] = astate->nelems;
 	lbs[0] = 1;
 
-	return makeMdArrayResult(astate, 1, dims, lbs, rcontext);
+	return makeMdArrayResult(astate, 1, dims, lbs, rcontext, true);
 }
 
 /*
@@ -4182,13 +4231,15 @@ makeArrayResult(ArrayBuildState *astate,
  *
  *	astate is working state (not NULL)
  *	rcontext is where to construct result
+ *	release is true if okay to release working state
  */
 Datum
 makeMdArrayResult(ArrayBuildState *astate,
 				  int ndims,
 				  int *dims,
 				  int *lbs,
-				  MemoryContext rcontext)
+				  MemoryContext rcontext,
+				  bool release)
 {
 	ArrayType  *result;
 	MemoryContext oldcontext;
@@ -4209,7 +4260,8 @@ makeMdArrayResult(ArrayBuildState *astate,
 	MemoryContextSwitchTo(oldcontext);
 
 	/* Clean up all the junk */
-	MemoryContextDelete(astate->mcontext);
+	if (release)
+		MemoryContextDelete(astate->mcontext);
 
 	return PointerGetDatum(result);
 }
@@ -4242,4 +4294,469 @@ array_smaller(PG_FUNCTION_ARGS)
 	result = ((array_cmp(fcinfo) < 0) ? v1 : v2);
 
 	PG_RETURN_ARRAYTYPE_P(result);
+}
+
+
+typedef struct generate_subscripts_fctx
+{
+	int4		lower;
+	int4		upper;
+	bool		reverse;
+} generate_subscripts_fctx;
+
+/*
+ * generate_subscripts(array anyarray, dim int [, reverse bool])
+ *		Returns all subscripts of the array for any dimension
+ */
+Datum
+generate_subscripts(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	MemoryContext oldcontext;
+	generate_subscripts_fctx *fctx;
+
+	/* stuff done only on the first call of the function */
+	if (SRF_IS_FIRSTCALL())
+	{
+		ArrayType  *v = PG_GETARG_ARRAYTYPE_P(0);
+		int			reqdim = PG_GETARG_INT32(1);
+		int		   *lb,
+				   *dimv;
+
+		/* create a function context for cross-call persistence */
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* Sanity check: does it look like an array at all? */
+		if (ARR_NDIM(v) <= 0 || ARR_NDIM(v) > MAXDIM)
+			SRF_RETURN_DONE(funcctx);
+
+		/* Sanity check: was the requested dim valid */
+		if (reqdim <= 0 || reqdim > ARR_NDIM(v))
+			SRF_RETURN_DONE(funcctx);
+
+		/*
+		 * switch to memory context appropriate for multiple function calls
+		 */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		fctx = (generate_subscripts_fctx *) palloc(sizeof(generate_subscripts_fctx));
+
+		lb = ARR_LBOUND(v);
+		dimv = ARR_DIMS(v);
+
+		fctx->lower = lb[reqdim - 1];
+		fctx->upper = dimv[reqdim - 1] + lb[reqdim - 1] - 1;
+		fctx->reverse = (PG_NARGS() < 3) ? false : PG_GETARG_BOOL(2);
+
+		funcctx->user_fctx = fctx;
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	fctx = funcctx->user_fctx;
+
+	if (fctx->lower <= fctx->upper)
+	{
+		if (!fctx->reverse)
+			SRF_RETURN_NEXT(funcctx, Int32GetDatum(fctx->lower++));
+		else
+			SRF_RETURN_NEXT(funcctx, Int32GetDatum(fctx->upper--));
+	}
+	else
+		/* done when there are no more elements left */
+		SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * generate_subscripts_nodir
+ *		Implements the 2-argument version of generate_subscripts
+ */
+Datum
+generate_subscripts_nodir(PG_FUNCTION_ARGS)
+{
+	/* just call the other one -- it can handle both cases */
+	return generate_subscripts(fcinfo);
+}
+
+/*
+ * array_fill_with_lower_bounds
+ *		Create and fill array with defined lower bounds.
+ */
+Datum
+array_fill_with_lower_bounds(PG_FUNCTION_ARGS)
+{
+	ArrayType  *dims;
+	ArrayType  *lbs;
+	ArrayType  *result;
+	Oid			elmtype;
+	Datum		value;
+	bool		isnull;
+
+	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+			   errmsg("dimension array or low bound array cannot be NULL")));
+
+	dims = PG_GETARG_ARRAYTYPE_P(1);
+	lbs = PG_GETARG_ARRAYTYPE_P(2);
+
+	if (!PG_ARGISNULL(0))
+	{
+		value = PG_GETARG_DATUM(0);
+		isnull = false;
+	}
+	else
+	{
+		value = 0;
+		isnull = true;
+	}
+
+	elmtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	if (!OidIsValid(elmtype))
+		elog(ERROR, "could not determine data type of input");
+
+	result = array_fill_internal(dims, lbs, value, isnull, elmtype, fcinfo);
+	PG_RETURN_ARRAYTYPE_P(result);
+}
+
+/*
+ * array_fill
+ *		Create and fill array with default lower bounds.
+ */
+Datum
+array_fill(PG_FUNCTION_ARGS)
+{
+	ArrayType  *dims;
+	ArrayType  *result;
+	Oid			elmtype;
+	Datum		value;
+	bool		isnull;
+
+	if (PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+			   errmsg("dimension array or low bound array cannot be NULL")));
+
+	dims = PG_GETARG_ARRAYTYPE_P(1);
+
+	if (!PG_ARGISNULL(0))
+	{
+		value = PG_GETARG_DATUM(0);
+		isnull = false;
+	}
+	else
+	{
+		value = 0;
+		isnull = true;
+	}
+
+	elmtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	if (!OidIsValid(elmtype))
+		elog(ERROR, "could not determine data type of input");
+
+	result = array_fill_internal(dims, NULL, value, isnull, elmtype, fcinfo);
+	PG_RETURN_ARRAYTYPE_P(result);
+}
+
+static ArrayType *
+create_array_envelope(int ndims, int *dimv, int *lbsv, int nbytes,
+					  Oid elmtype, int dataoffset)
+{
+	ArrayType  *result;
+
+	result = (ArrayType *) palloc0(nbytes);
+	SET_VARSIZE(result, nbytes);
+	result->ndim = ndims;
+	result->dataoffset = dataoffset;
+	result->elemtype = elmtype;
+	memcpy(ARR_DIMS(result), dimv, ndims * sizeof(int));
+	memcpy(ARR_LBOUND(result), lbsv, ndims * sizeof(int));
+
+	return result;
+}
+
+static ArrayType *
+array_fill_internal(ArrayType *dims, ArrayType *lbs,
+					Datum value, bool isnull, Oid elmtype,
+					FunctionCallInfo fcinfo)
+{
+	ArrayType  *result;
+	int		   *dimv;
+	int		   *lbsv;
+	int			ndims;
+	int			nitems;
+	int			deflbs[MAXDIM];
+	int16		elmlen;
+	bool		elmbyval;
+	char		elmalign;
+	ArrayMetaState *my_extra;
+
+	/*
+	 * Params checks
+	 */
+	if (ARR_NDIM(dims) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("wrong number of array subscripts"),
+				 errdetail("Dimension array must be one dimensional.")));
+
+	if (ARR_LBOUND(dims)[0] != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("wrong range of array subscripts"),
+				 errdetail("Lower bound of dimension array must be one.")));
+
+	if (ARR_HASNULL(dims))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("dimension values cannot be null")));
+
+	dimv = (int *) ARR_DATA_PTR(dims);
+	ndims = ARR_DIMS(dims)[0];
+
+	if (ndims < 0)				/* we do allow zero-dimension arrays */
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid number of dimensions: %d", ndims)));
+	if (ndims > MAXDIM)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("number of array dimensions (%d) exceeds the maximum allowed (%d)",
+						ndims, MAXDIM)));
+
+	if (lbs != NULL)
+	{
+		if (ARR_NDIM(lbs) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+					 errmsg("wrong number of array subscripts"),
+					 errdetail("Dimension array must be one dimensional.")));
+
+		if (ARR_LBOUND(lbs)[0] != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+					 errmsg("wrong range of array subscripts"),
+				  errdetail("Lower bound of dimension array must be one.")));
+
+		if (ARR_HASNULL(lbs))
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("dimension values cannot be null")));
+
+		if (ARR_DIMS(lbs)[0] != ndims)
+			ereport(ERROR,
+					(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+					 errmsg("wrong number of array subscripts"),
+					 errdetail("Low bound array has different size than dimensions array.")));
+
+		lbsv = (int *) ARR_DATA_PTR(lbs);
+	}
+	else
+	{
+		int			i;
+
+		for (i = 0; i < MAXDIM; i++)
+			deflbs[i] = 1;
+
+		lbsv = deflbs;
+	}
+
+	/* fast track for empty array */
+	if (ndims == 0)
+		return construct_empty_array(elmtype);
+
+	nitems = ArrayGetNItems(ndims, dimv);
+
+	/*
+	 * We arrange to look up info about element type only once per series of
+	 * calls, assuming the element type doesn't change underneath us.
+	 */
+	my_extra = (ArrayMetaState *) fcinfo->flinfo->fn_extra;
+	if (my_extra == NULL)
+	{
+		fcinfo->flinfo->fn_extra = MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+													  sizeof(ArrayMetaState));
+		my_extra = (ArrayMetaState *) fcinfo->flinfo->fn_extra;
+		my_extra->element_type = InvalidOid;
+	}
+
+	if (my_extra->element_type != elmtype)
+	{
+		/* Get info about element type */
+		get_typlenbyvalalign(elmtype,
+							 &my_extra->typlen,
+							 &my_extra->typbyval,
+							 &my_extra->typalign);
+		my_extra->element_type = elmtype;
+	}
+
+	elmlen = my_extra->typlen;
+	elmbyval = my_extra->typbyval;
+	elmalign = my_extra->typalign;
+
+	/* compute required space */
+	if (!isnull)
+	{
+		int			i;
+		char	   *p;
+		int			nbytes;
+		int			totbytes;
+
+		/* make sure data is not toasted */
+		if (elmlen == -1)
+			value = PointerGetDatum(PG_DETOAST_DATUM(value));
+
+		nbytes = att_addlength_datum(0, elmlen, value);
+		nbytes = att_align_nominal(nbytes, elmalign);
+		Assert(nbytes > 0);
+
+		totbytes = nbytes * nitems;
+
+		/* check for overflow of multiplication or total request */
+		if (totbytes / nbytes != nitems ||
+			!AllocSizeIsValid(totbytes))
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("array size exceeds the maximum allowed (%d)",
+							(int) MaxAllocSize)));
+
+		/*
+		 * This addition can't overflow, but it might cause us to go past
+		 * MaxAllocSize.  We leave it to palloc to complain in that case.
+		 */
+		totbytes += ARR_OVERHEAD_NONULLS(ndims);
+
+		result = create_array_envelope(ndims, dimv, lbsv, totbytes,
+									   elmtype, 0);
+
+		p = ARR_DATA_PTR(result);
+		for (i = 0; i < nitems; i++)
+			p += ArrayCastAndSet(value, elmlen, elmbyval, elmalign, p);
+	}
+	else
+	{
+		int			nbytes;
+		int			dataoffset;
+
+		dataoffset = ARR_OVERHEAD_WITHNULLS(ndims, nitems);
+		nbytes = dataoffset;
+
+		result = create_array_envelope(ndims, dimv, lbsv, nbytes,
+									   elmtype, dataoffset);
+
+		/* create_array_envelope already zeroed the bitmap, so we're done */
+	}
+
+	return result;
+}
+
+
+/*
+ * UNNEST
+ */
+Datum
+array_unnest(PG_FUNCTION_ARGS)
+{
+	typedef struct
+	{
+		ArrayType  *arr;
+		int			nextelem;
+		int			numelems;
+		char	   *elemdataptr;	/* this moves with nextelem */
+		bits8	   *arraynullsptr;		/* this does not */
+		int16		elmlen;
+		bool		elmbyval;
+		char		elmalign;
+	} array_unnest_fctx;
+
+	FuncCallContext *funcctx;
+	array_unnest_fctx *fctx;
+	MemoryContext oldcontext;
+
+	/* stuff done only on the first call of the function */
+	if (SRF_IS_FIRSTCALL())
+	{
+		ArrayType  *arr;
+
+		/* create a function context for cross-call persistence */
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/*
+		 * switch to memory context appropriate for multiple function calls
+		 */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/*
+		 * Get the array value and detoast if needed.  We can't do this
+		 * earlier because if we have to detoast, we want the detoasted copy
+		 * to be in multi_call_memory_ctx, so it will go away when we're done
+		 * and not before.	(If no detoast happens, we assume the originally
+		 * passed array will stick around till then.)
+		 */
+		arr = PG_GETARG_ARRAYTYPE_P(0);
+
+		/* allocate memory for user context */
+		fctx = (array_unnest_fctx *) palloc(sizeof(array_unnest_fctx));
+
+		/* initialize state */
+		fctx->arr = arr;
+		fctx->nextelem = 0;
+		fctx->numelems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+
+		fctx->elemdataptr = ARR_DATA_PTR(arr);
+		fctx->arraynullsptr = ARR_NULLBITMAP(arr);
+
+		get_typlenbyvalalign(ARR_ELEMTYPE(arr),
+							 &fctx->elmlen,
+							 &fctx->elmbyval,
+							 &fctx->elmalign);
+
+		funcctx->user_fctx = fctx;
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	/* stuff done on every call of the function */
+	funcctx = SRF_PERCALL_SETUP();
+	fctx = funcctx->user_fctx;
+
+	if (fctx->nextelem < fctx->numelems)
+	{
+		int			offset = fctx->nextelem++;
+		Datum		elem;
+
+		/*
+		 * Check for NULL array element
+		 */
+		if (array_get_isnull(fctx->arraynullsptr, offset))
+		{
+			fcinfo->isnull = true;
+			elem = (Datum) 0;
+			/* elemdataptr does not move */
+		}
+		else
+		{
+			/*
+			 * OK, get the element
+			 */
+			char	   *ptr = fctx->elemdataptr;
+
+			fcinfo->isnull = false;
+			elem = ArrayCast(ptr, fctx->elmbyval, fctx->elmlen);
+
+			/*
+			 * Advance elemdataptr over it
+			 */
+			ptr = att_addlength_pointer(ptr, fctx->elmlen, ptr);
+			ptr = (char *) att_align_nominal(ptr, fctx->elmalign);
+			fctx->elemdataptr = ptr;
+		}
+
+		SRF_RETURN_NEXT(funcctx, elem);
+	}
+	else
+	{
+		/* do when there is no more left */
+		SRF_RETURN_DONE(funcctx);
+	}
 }

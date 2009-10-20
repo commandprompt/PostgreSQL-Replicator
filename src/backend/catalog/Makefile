@@ -12,23 +12,22 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = catalog.o dependency.o heap.o index.o indexing.o namespace.o aclchk.o \
        pg_aggregate.o pg_constraint.o pg_conversion.o pg_depend.o pg_enum.o \
-       pg_largeobject.o pg_namespace.o pg_operator.o pg_proc.o pg_shdepend.o \
-	   pg_type.o toasting.o replication.o
+       pg_inherits.o pg_largeobject.o pg_namespace.o pg_operator.o pg_proc.o \
+       pg_shdepend.o pg_type.o storage.o toasting.o replication.o
 
 BKIFILES = postgres.bki postgres.description postgres.shdescription mammoth.bki
 MAMMOTH_SQL = mammoth_pk_indexes.sql
 
-all: SUBSYS.o $(BKIFILES) $(MAMMOTH_SQL)
+include $(top_srcdir)/src/backend/common.mk
 
-SUBSYS.o: $(OBJS)
-	$(LD) $(LDREL) $(LDOUT) SUBSYS.o $(OBJS)
+all: $(BKIFILES) $(MAMMOTH_SQL)
 
 # Note: there are some undocumented dependencies on the ordering in which
 # the catalog header files are assembled into postgres.bki.  In particular,
 # indexing.h had better be last, and toasting.h just before it.
 
 POSTGRES_BKI_SRCS = $(addprefix $(top_srcdir)/src/include/catalog/,\
-	pg_proc.h pg_type.h pg_attribute.h pg_class.h pg_autovacuum.h \
+	pg_proc.h pg_type.h pg_attribute.h pg_class.h \
 	pg_attrdef.h pg_constraint.h pg_inherits.h pg_index.h pg_operator.h \
 	pg_opfamily.h pg_opclass.h pg_am.h pg_amop.h pg_amproc.h \
 	pg_language.h pg_largeobject.h pg_aggregate.h pg_statistic.h \
@@ -38,6 +37,7 @@ POSTGRES_BKI_SRCS = $(addprefix $(top_srcdir)/src/include/catalog/,\
 	pg_authid.h pg_auth_members.h pg_shdepend.h pg_shdescription.h \
 	pg_ts_config.h pg_ts_config_map.h pg_ts_dict.h \
 	pg_ts_parser.h pg_ts_template.h \
+	pg_foreign_data_wrapper.h pg_foreign_server.h pg_user_mapping.h \
 	toasting.h indexing.h \
     )
 
@@ -82,4 +82,4 @@ uninstall-data:
 	rm -f $(addprefix '$(DESTDIR)$(datadir)'/, $(BKIFILES) system_views.sql information_schema.sql sql_features.txt '$(MAMMOTH_SQL)')
 
 clean:
-	rm -f SUBSYS.o $(OBJS) $(BKIFILES) $(MAMMOTH_SQL)
+	rm -f $(BKIFILES) $(MAMMOTH_SQL)

@@ -1,13 +1,17 @@
 /*
+ * $PostgreSQL$
+ *
+ *
  * refint.c --	set of functions to define referential integrity
  *		constraints using general triggers.
  */
+#include "postgres.h"
 
-#include "executor/spi.h"		/* this is what you need to work with SPI */
-
-#include "commands/trigger.h"	/* -"- and triggers */
 #include <ctype.h>
 
+#include "commands/trigger.h"
+#include "executor/spi.h"
+#include "utils/builtins.h"
 
 PG_MODULE_MAGIC;
 
@@ -20,14 +24,14 @@ typedef struct
 	char	   *ident;
 	int			nplans;
 	SPIPlanPtr *splan;
-}	EPlan;
+} EPlan;
 
 static EPlan *FPlans = NULL;
 static int	nFPlans = 0;
 static EPlan *PPlans = NULL;
 static int	nPPlans = 0;
 
-static EPlan *find_plan(char *ident, EPlan ** eplan, int *nplans);
+static EPlan *find_plan(char *ident, EPlan **eplan, int *nplans);
 
 /*
  * check_primary_key () -- check that key in tuple being inserted/updated
@@ -609,7 +613,7 @@ check_foreign_key(PG_FUNCTION_ARGS)
 }
 
 static EPlan *
-find_plan(char *ident, EPlan ** eplan, int *nplans)
+find_plan(char *ident, EPlan **eplan, int *nplans)
 {
 	EPlan	   *newp;
 	int			i;

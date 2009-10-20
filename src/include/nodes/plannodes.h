@@ -4,7 +4,7 @@
  *	  definitions for query plan nodes
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -17,6 +17,7 @@
 #include "access/sdir.h"
 #include "nodes/bitmapset.h"
 #include "nodes/primnodes.h"
+#include "storage/itemptr.h"
 
 
 /* ----------------------------------------------------------------
@@ -71,6 +72,8 @@ typedef struct PlannedStmt
 	List	   *rowMarks;		/* a list of RowMarkClause's */
 
 	List	   *relationOids;	/* OIDs of relations the plan depends on */
+
+	List	   *invalItems;		/* other dependencies, as PlanInvalItems */
 
 	int			nParamExec;		/* number of PARAM_EXEC Params used */
 } PlannedStmt;
@@ -180,6 +183,26 @@ typedef struct Append
 } Append;
 
 /* ----------------
+ *	RecursiveUnion node -
+ *		Generate a recursive union of two subplans.
+ *
+ * The "outer" subplan is always the non-recursive term, and the "inner"
+ * subplan is the recursive term.
+ * ----------------
+ */
+typedef struct RecursiveUnion
+{
+	Plan		plan;
+	int			wtParam;		/* ID of Param representing work table */
+	/* Remaining fields are zero/null in UNION ALL case */
+	int			numCols;		/* number of columns to check for
+								 * duplicate-ness */
+	AttrNumber *dupColIdx;		/* their indexes in the target list */
+	Oid		   *dupOperators;	/* equality operators to compare with */
+	long		numGroups;		/* estimated number of groups in input */
+} RecursiveUnion;
+
+/* ----------------
  *	 BitmapAnd node -
  *		Generate the intersection of the results of sub-plans.
  *
@@ -241,10 +264,6 @@ typedef Scan SeqScan;
  * table).	This is a bit hokey ... would be cleaner to use a special-purpose
  * node type that could not be mistaken for a regular Var.	But it will do
  * for now.
- *
- * indexstrategy and indexsubtype are lists corresponding one-to-one with
- * indexqual; they give information about the indexable operators that appear
- * at the top of each indexqual.
  * ----------------
  */
 typedef struct IndexScan
@@ -253,8 +272,6 @@ typedef struct IndexScan
 	Oid			indexid;		/* OID of index to scan */
 	List	   *indexqual;		/* list of index quals (OpExprs) */
 	List	   *indexqualorig;	/* the same in original form */
-	List	   *indexstrategy;	/* integer list of strategy numbers */
-	List	   *indexsubtype;	/* OID list of strategy subtypes */
 	ScanDirection indexorderdir;	/* forward or backward or don't care */
 } IndexScan;
 
@@ -281,8 +298,6 @@ typedef struct BitmapIndexScan
 	Oid			indexid;		/* OID of index to scan */
 	List	   *indexqual;		/* list of index quals (OpExprs) */
 	List	   *indexqualorig;	/* the same in original form */
-	List	   *indexstrategy;	/* integer list of strategy numbers */
-	List	   *indexsubtype;	/* OID list of strategy subtypes */
 } BitmapIndexScan;
 
 /* ----------------
@@ -363,6 +378,28 @@ typedef struct ValuesScan
 	List	   *values_lists;	/* list of expression lists */
 } ValuesScan;
 
+/* ----------------
+ *		CteScan node
+ * ----------------
+ */
+typedef struct CteScan
+{
+	Scan		scan;
+	int			ctePlanId;		/* ID of init SubPlan for CTE */
+	int			cteParam;		/* ID of Param representing CTE output */
+} CteScan;
+
+/* ----------------
+ *		WorkTableScan node
+ * ----------------
+ */
+typedef struct WorkTableScan
+{
+	Scan		scan;
+	int			wtParam;		/* ID of Param representing work table */
+} WorkTableScan;
+
+
 /*
  * ==========
  * Join nodes
@@ -423,7 +460,7 @@ typedef struct MergeJoin
 } MergeJoin;
 
 /* ----------------
- *		hash join (probe) node
+ *		hash join node
  * ----------------
  */
 typedef struct HashJoin
@@ -500,6 +537,23 @@ typedef struct Agg
 } Agg;
 
 /* ----------------
+ *		window aggregate node
+ * ----------------
+ */
+typedef struct WindowAgg
+{
+	Plan		plan;
+	Index		winref;			/* ID referenced by window functions */
+	int			partNumCols;	/* number of columns in partition clause */
+	AttrNumber *partColIdx;		/* their indexes in the target list */
+	Oid		   *partOperators;	/* equality operators for partition columns */
+	int			ordNumCols;		/* number of columns in ordering clause */
+	AttrNumber *ordColIdx;		/* their indexes in the target list */
+	Oid		   *ordOperators;	/* equality operators for ordering columns */
+	int			frameOptions;	/* frame_clause options, see WindowDef */
+} WindowAgg;
+
+/* ----------------
  *		unique node
  * ----------------
  */
@@ -513,11 +567,20 @@ typedef struct Unique
 
 /* ----------------
  *		hash build node
+ *
+ * If the executor is supposed to try to apply skew join optimization, then
+ * skewTable/skewColumn identify the outer relation's join key column, from
+ * which the relevant MCV statistics can be fetched.  Also, its type
+ * information is provided to save a lookup.
  * ----------------
  */
 typedef struct Hash
 {
 	Plan		plan;
+	Oid			skewTable;		/* outer join key's table OID, or InvalidOid */
+	AttrNumber	skewColumn;		/* outer join key's column #, or zero */
+	Oid			skewColType;	/* datatype of the outer key column */
+	int32		skewColTypmod;	/* typmod of the outer key column */
 	/* all other info is in the parent HashJoin node */
 } Hash;
 
@@ -533,15 +596,24 @@ typedef enum SetOpCmd
 	SETOPCMD_EXCEPT_ALL
 } SetOpCmd;
 
+typedef enum SetOpStrategy
+{
+	SETOP_SORTED,				/* input must be sorted */
+	SETOP_HASHED				/* use internal hashtable */
+} SetOpStrategy;
+
 typedef struct SetOp
 {
 	Plan		plan;
 	SetOpCmd	cmd;			/* what to do */
+	SetOpStrategy strategy;		/* how to do it */
 	int			numCols;		/* number of columns to check for
 								 * duplicate-ness */
 	AttrNumber *dupColIdx;		/* their indexes in the target list */
 	Oid		   *dupOperators;	/* equality operators to compare with */
 	AttrNumber	flagColIdx;		/* where is the flag column, if any */
+	int			firstFlag;		/* flag value for first input relation */
+	long		numGroups;		/* estimated number of groups in input */
 } SetOp;
 
 /* ----------------
@@ -557,5 +629,22 @@ typedef struct Limit
 	Node	   *limitOffset;	/* OFFSET parameter, or NULL if none */
 	Node	   *limitCount;		/* COUNT parameter, or NULL if none */
 } Limit;
+
+
+/*
+ * Plan invalidation info
+ *
+ * We track the objects on which a PlannedStmt depends in two ways:
+ * relations are recorded as a simple list of OIDs, and everything else
+ * is represented as a list of PlanInvalItems.	A PlanInvalItem is designed
+ * to be used with the syscache invalidation mechanism, so it identifies a
+ * system catalog entry by cache ID and tuple TID.
+ */
+typedef struct PlanInvalItem
+{
+	NodeTag		type;
+	int			cacheId;		/* a syscache ID, see utils/syscache.h */
+	ItemPointerData tupleId;	/* TID of the object's catalog tuple */
+} PlanInvalItem;
 
 #endif   /* PLANNODES_H */

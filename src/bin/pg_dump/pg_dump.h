@@ -3,7 +3,7 @@
  * pg_dump.h
  *	  Common header file for the pg_dump utility
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -15,25 +15,6 @@
 #define PG_DUMP_H
 
 #include "postgres_fe.h"
-
-/*
- * WIN32 does not provide 64-bit off_t, but does provide the functions operating
- * with 64-bit offsets.
- */
-#ifdef WIN32
-#define pgoff_t __int64
-#undef fseeko
-#undef ftello
-#ifdef WIN32_ONLY_COMPILER
-#define fseeko(stream, offset, origin) _fseeki64(stream, offset, origin)
-#define ftello(stream) _ftelli64(stream)
-#else
-#define fseeko(stream, offset, origin) fseeko64(stream, offset, origin)
-#define ftello(stream) ftello64(stream)
-#endif
-#else
-#define pgoff_t off_t
-#endif
 
 /*
  * pg_dump uses two different mechanisms for identifying database objects:
@@ -131,6 +112,8 @@ typedef enum
 	DO_TSDICT,
 	DO_TSTEMPLATE,
 	DO_TSCONFIG,
+	DO_FDW,
+	DO_FOREIGN_SERVER,
 	DO_BLOBS,
 	DO_BLOB_COMMENTS
 } DumpableObjectType;
@@ -238,11 +221,13 @@ typedef struct _tableInfo
 	char		relkind;
 	char	   *reltablespace;	/* relation tablespace */
 	char	   *reloptions;		/* options specified by WITH (...) */
+	char	   *toast_reloptions;		/* ditto, for the TOAST table */
 	bool		hasindex;		/* does it have any indexes? */
 	bool		hasrules;		/* does it have any rules? */
+	bool		hastriggers;	/* does it have any triggers? */
 	bool		hasoids;		/* does it have OIDs? */
+	uint32		frozenxid;		/* for restore frozen xid */
 	int			ncheck;			/* # of CHECK expressions */
-	int			ntrig;			/* # of triggers */
 	/* these two are set only if table is a sequence owned by a column: */
 	Oid			owning_tab;		/* OID of table owning sequence */
 	int			owning_col;		/* attr # of column owning sequence */
@@ -261,6 +246,8 @@ typedef struct _tableInfo
 	char	   *attstorage;		/* attribute storage scheme */
 	char	   *typstorage;		/* type storage scheme */
 	bool	   *attisdropped;	/* true if attr is dropped; don't dump it */
+	int		   *attlen;			/* attribute length, used by binary_upgrade */
+	char	   *attalign;		/* attribute align, used by binary_upgrade */
 	bool	   *attislocal;		/* true if attr has local definition */
 
 	/*
@@ -280,6 +267,7 @@ typedef struct _tableInfo
 	 */
 	int			numParents;		/* number of (immediate) parent tables */
 	struct _tableInfo **parents;	/* TableInfos of immediate parents */
+	struct _tableDataInfo *dataObj;		/* TableDataInfo, if dumping its data */
 } TableInfo;
 
 typedef struct _attrDefInfo
@@ -352,8 +340,9 @@ typedef struct _constraintInfo
 	TypeInfo   *condomain;		/* NULL if table constraint */
 	char		contype;
 	char	   *condef;			/* definition, if CHECK or FOREIGN KEY */
+	Oid			confrelid;		/* referenced table, if FOREIGN KEY */
 	DumpId		conindex;		/* identifies associated index if any */
-	bool		coninherited;	/* TRUE if appears to be inherited */
+	bool		conislocal;		/* TRUE if constraint has local definition */
 	bool		separate;		/* TRUE if must dump as separate item */
 } ConstraintInfo;
 
@@ -374,6 +363,7 @@ typedef struct _castInfo
 	Oid			casttarget;
 	Oid			castfunc;
 	char		castcontext;
+	char		castmethod;
 } CastInfo;
 
 /* InhInfo isn't a DumpableObject, just temporary state */
@@ -414,6 +404,26 @@ typedef struct _cfgInfo
 	char	   *rolname;
 	Oid			cfgparser;
 } TSConfigInfo;
+
+typedef struct _fdwInfo
+{
+	DumpableObject dobj;
+	char	   *rolname;
+	char	   *fdwvalidator;
+	char	   *fdwoptions;
+	char	   *fdwacl;
+} FdwInfo;
+
+typedef struct _foreignServerInfo
+{
+	DumpableObject dobj;
+	char	   *rolname;
+	Oid			srvfdw;
+	char	   *srvtype;
+	char	   *srvversion;
+	char	   *srvacl;
+	char	   *srvoptions;
+} ForeignServerInfo;
 
 /* global decls */
 extern bool force_quotes;		/* double-quotes for identifiers flag */
@@ -497,5 +507,7 @@ extern TSParserInfo *getTSParsers(int *numTSParsers);
 extern TSDictInfo *getTSDictionaries(int *numTSDicts);
 extern TSTemplateInfo *getTSTemplates(int *numTSTemplates);
 extern TSConfigInfo *getTSConfigurations(int *numTSConfigs);
+extern FdwInfo *getForeignDataWrappers(int *numForeignDataWrappers);
+extern ForeignServerInfo *getForeignServers(int *numForeignServers);
 
 #endif   /* PG_DUMP_H */

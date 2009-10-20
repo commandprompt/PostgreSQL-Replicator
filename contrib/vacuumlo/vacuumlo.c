@@ -3,7 +3,7 @@
  * vacuumlo.c
  *	  This removes orphaned large objects from a database.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -33,10 +33,17 @@ extern int	optind,
 			opterr,
 			optopt;
 
+enum trivalue
+{
+	TRI_DEFAULT,
+	TRI_NO,
+	TRI_YES
+};
+
 struct _param
 {
 	char	   *pg_user;
-	int			pg_prompt;
+	enum trivalue pg_prompt;
 	char	   *pg_port;
 	char	   *pg_host;
 	int			verbose;
@@ -44,7 +51,7 @@ struct _param
 };
 
 int			vacuumlo(char *, struct _param *);
-void		usage(void);
+void		usage(const char *progname);
 
 
 
@@ -64,7 +71,7 @@ vacuumlo(char *database, struct _param * param)
 	static char *password = NULL;
 	bool		new_pass;
 
-	if (param->pg_prompt && password == NULL)
+	if (param->pg_prompt == TRI_YES && password == NULL)
 		password = simple_prompt("Password: ", 100, false);
 
 	/*
@@ -92,7 +99,7 @@ vacuumlo(char *database, struct _param * param)
 		if (PQstatus(conn) == CONNECTION_BAD &&
 			PQconnectionNeedsPassword(conn) &&
 			password == NULL &&
-			!feof(stdin))
+			param->pg_prompt != TRI_NO)
 		{
 			PQfinish(conn);
 			password = simple_prompt("Password: ", 100, false);
@@ -300,17 +307,22 @@ vacuumlo(char *database, struct _param * param)
 }
 
 void
-usage(void)
+usage(const char *progname)
 {
-	fprintf(stdout, "vacuumlo removes unreferenced large objects from databases\n\n");
-	fprintf(stdout, "Usage:\n  vacuumlo [options] dbname [dbname ...]\n\n");
-	fprintf(stdout, "Options:\n");
-	fprintf(stdout, "  -v\t\tWrite a lot of progress messages\n");
-	fprintf(stdout, "  -n\t\tDon't remove large objects, just show what would be done\n");
-	fprintf(stdout, "  -U username\tUsername to connect as\n");
-	fprintf(stdout, "  -W\t\tForce password prompt\n");
-	fprintf(stdout, "  -h hostname\tDatabase server host\n");
-	fprintf(stdout, "  -p port\tDatabase server port\n\n");
+	printf("%s removes unreferenced large objects from databases.\n\n", progname);
+	printf("Usage:\n  %s [OPTION]... DBNAME...\n\n", progname);
+	printf("Options:\n");
+	printf("  -h HOSTNAME  database server host or socket directory\n");
+	printf("  -n           don't remove large objects, just show what would be done\n");
+	printf("  -p PORT      database server port\n");
+	printf("  -U USERNAME  user name to connect as\n");
+	printf("  -w           never prompt for password\n");
+	printf("  -W           force password prompt\n");
+	printf("  -v           write a lot of progress messages\n");
+	printf("  --help       show this help, then exit\n");
+	printf("  --version    output version information, then exit\n");
+	printf("\n");
+	printf("Report bugs to <pgsql-bugs@postgresql.org>.\n");
 }
 
 
@@ -321,29 +333,42 @@ main(int argc, char **argv)
 	struct _param param;
 	int			c;
 	int			port;
+	const char *progname;
+
+	progname = get_progname(argv[0]);
 
 	/* Parameter handling */
 	param.pg_user = NULL;
-	param.pg_prompt = 0;
+	param.pg_prompt = TRI_DEFAULT;
 	param.pg_host = NULL;
 	param.pg_port = NULL;
 	param.verbose = 0;
 	param.dry_run = 0;
 
+	if (argc > 1)
+	{
+		if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-?") == 0)
+		{
+			usage(progname);
+			exit(0);
+		}
+		if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)
+		{
+			puts("vacuumlo (PostgreSQL) " PG_VERSION);
+			exit(0);
+		}
+	}
+
 	while (1)
 	{
-		c = getopt(argc, argv, "?h:U:p:vnW");
+		c = getopt(argc, argv, "h:U:p:vnwW");
 		if (c == -1)
 			break;
 
 		switch (c)
 		{
 			case '?':
-				if (optopt == '?')
-				{
-					usage();
-					exit(0);
-				}
+				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 				exit(1);
 			case ':':
 				exit(1);
@@ -357,14 +382,17 @@ main(int argc, char **argv)
 			case 'U':
 				param.pg_user = strdup(optarg);
 				break;
+			case 'w':
+				param.pg_prompt = TRI_NO;
+				break;
 			case 'W':
-				param.pg_prompt = 1;
+				param.pg_prompt = TRI_YES;
 				break;
 			case 'p':
 				port = strtol(optarg, NULL, 10);
 				if ((port < 1) || (port > 65535))
 				{
-					fprintf(stderr, "[%s]: invalid port number '%s'\n", argv[0], optarg);
+					fprintf(stderr, "%s: invalid port number: %s\n", progname, optarg);
 					exit(1);
 				}
 				param.pg_port = strdup(optarg);

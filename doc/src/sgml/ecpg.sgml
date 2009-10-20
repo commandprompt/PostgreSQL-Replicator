@@ -717,9 +717,9 @@ EXEC SQL EXECUTE mystmt USING 42, 'foobar';
 </programlisting>
    If the statement you are executing returns values, then add an
    <literal>INTO</literal> clause:
-<programlisting>
+<programlisting><![CDATA[
 EXEC SQL BEGIN DECLARE SECTION;
-const char *stmt = "SELECT a, b, c FROM test1 WHERE a &gt; ?";
+const char *stmt = "SELECT a, b, c FROM test1 WHERE a > ?";
 int v1, v2;
 VARCHAR v3;
 EXEC SQL END DECLARE SECTION;
@@ -727,6 +727,7 @@ EXEC SQL END DECLARE SECTION;
 EXEC SQL PREPARE mystmt FROM :stmt;
  ...
 EXEC SQL EXECUTE mystmt INTO v1, v2, v3 USING 37;
+]]>
 </programlisting>
    An <command>EXECUTE</command> command can have an
    <literal>INTO</literal> clause, a <literal>USING</literal> clause,
@@ -749,10 +750,10 @@ EXEC SQL DEALLOCATE PREPARE <replaceable>name</replaceable>;
   <para>
    The pgtypes library maps <productname>PostgreSQL</productname> database
    types to C equivalents that can be used in C programs. It also offers
-   functions to do basic calculations with those types within C, i.e. without
+   functions to do basic calculations with those types within C, i.e., without
    the help of the <productname>PostgreSQL</productname> server. See the
    following example:
-<programlisting>
+<programlisting><![CDATA[
 EXEC SQL BEGIN DECLARE SECTION;
    date date1;
    timestamp ts1, tsout;
@@ -760,12 +761,13 @@ EXEC SQL BEGIN DECLARE SECTION;
    char *out;
 EXEC SQL END DECLARE SECTION;
 
-PGTYPESdate_today(&amp;date1);
+PGTYPESdate_today(&date1);
 EXEC SQL SELECT started, duration INTO :ts1, :iv1 FROM datetbl WHERE d=:date1;
-PGTYPEStimestamp_add_interval(&amp;ts1, &amp;iv1, &amp;tsout);
-out = PGTYPEStimestamp_to_asc(&amp;tsout);
+PGTYPEStimestamp_add_interval(&ts1, &iv1, &tsout);
+out = PGTYPEStimestamp_to_asc(&tsout);
 printf("Started + duration: %s\n", out);
 free(out);
+]]>
 </programlisting>
   </para>
 
@@ -1135,8 +1137,9 @@ date PGTYPESdate_from_asc(char *str, char **endptr);
         currently no variable to change that within ecpg.
        </para>
        <para>
-        The following input formats are allowed:
-        <table>
+        <xref linkend="ecpg-pgtypesdate-from-asc-table"> shows the allowed input formats.
+       </para>
+        <table id="ecpg-pgtypesdate-from-asc-table">
          <title>Valid input formats for <function>PGTYPESdate_from_asc</function></title>
          <tgroup cols="2">
           <thead>
@@ -1217,7 +1220,6 @@ date PGTYPESdate_from_asc(char *str, char **endptr);
           </tbody>
          </tgroup>
         </table>
-       </para>
       </listitem>
      </varlistentry>
 
@@ -1230,7 +1232,7 @@ date PGTYPESdate_from_asc(char *str, char **endptr);
 char *PGTYPESdate_to_asc(date dDate);
 </synopsis>
         The function receives the date <literal>dDate</> as its only parameter.
-        It will output the date in the form <literal>1999-01-18</>, i.e. in the
+        It will output the date in the form <literal>1999-01-18</>, i.e., in the
         <literal>YYYY-MM-DD</> format.
        </para>
       </listitem>
@@ -1390,10 +1392,11 @@ int PGTYPESdate_fmt_asc(date dDate, char *fmtstring, char *outbuf);
         All other characters are copied 1:1 to the output string.
        </para>
        <para>
-        The following table indicates a few possible formats. This will give
+        <xref linkend="ecpg-pgtypesdate-fmt-asc-example-table"> indicates a few possible formats. This will give
         you an idea of how to use this function. All output lines are based on
-        the same date: November, 23rd, 1959.
-        <table>
+        the same date: November 23, 1959.
+       </para>
+        <table id="ecpg-pgtypesdate-fmt-asc-example-table">
          <title>Valid input formats for <function>PGTYPESdate_fmt_asc</function></title>
          <tgroup cols="2">
           <thead>
@@ -1454,7 +1457,6 @@ int PGTYPESdate_fmt_asc(date dDate, char *fmtstring, char *outbuf);
           </tbody>
          </tgroup>
         </table>
-       </para>
       </listitem>
      </varlistentry>
 
@@ -1481,9 +1483,10 @@ int PGTYPESdate_defmt_asc(date *d, char *fmt, char *str);
         day.
        </para>
        <para>
-        The following table indicates a few possible formats. This will give
+        <xref linkend="ecpg-rdefmtdate-example-table"> indicates a few possible formats. This will give
         you an idea of how to use this function.
-        <table>
+       </para>
+        <table id="ecpg-rdefmtdate-example-table">
          <title>Valid input formats for <function>rdefmtdate</function></title>
          <tgroup cols="3">
           <thead>
@@ -1562,7 +1565,6 @@ int PGTYPESdate_defmt_asc(date *d, char *fmt, char *str);
           </tbody>
          </tgroup>
         </table>
-       </para>
       </listitem>
      </varlistentry>
     </variablelist>
@@ -1610,8 +1612,9 @@ timestamp PGTYPEStimestamp_from_asc(char *str, char **endptr);
         specifiers are silently discarded.
        </para>
        <para>
-        The following table contains a few examples for input strings:
-        <table>
+        <xref linkend="ecpg-pgtypestimestamp-from-asc-example-table"> contains a few examples for input strings.
+       </para>
+        <table id="ecpg-pgtypestimestamp-from-asc-example-table">
          <title>Valid input formats for <function>PGTYPEStimestamp_from_asc</function></title>
          <tgroup cols="2">
           <thead>
@@ -1640,7 +1643,6 @@ timestamp PGTYPEStimestamp_from_asc(char *str, char **endptr);
           </tbody>
          </tgroup>
         </table>
-       </para>
       </listitem>
      </varlistentry>
 
@@ -3449,14 +3451,15 @@ int rsetnull(int t, char *ptr);
 
        <para>
         Here is an example of a call to this function:
-<programlisting>
+<programlisting><![CDATA[
 $char c[] = "abc       ";
 $short s = 17;
 $int i = -74874;
 
 rsetnull(CCHARTYPE, (char *) c);
-rsetnull(CSHORTTYPE, (char *) &amp;s);
-rsetnull(CINTTYPE, (char *) &amp;i);
+rsetnull(CSHORTTYPE, (char *) &s);
+rsetnull(CINTTYPE, (char *) &i);
+]]>
 </programlisting>
        </para>
       </listitem>
@@ -3477,14 +3480,15 @@ int risnull(int t, char *ptr);
        </para>
        <para>
         Here is an example of how to use this function:
-<programlisting>
+<programlisting><![CDATA[
 $char c[] = "abc       ";
 $short s = 17;
 $int i = -74874;
 
 risnull(CCHARTYPE, (char *) c);
-risnull(CSHORTTYPE, (char *) &amp;s);
-risnull(CINTTYPE, (char *) &amp;i);
+risnull(CSHORTTYPE, (char *) &s);
+risnull(CINTTYPE, (char *) &i);
+]]>
 </programlisting>
        </para>
       </listitem>
@@ -4061,7 +4065,7 @@ struct
     struct
     {
         int sqlerrml;
-        char sqlerrmc[70];
+        char sqlerrmc[SQLERRMC_LEN];
     } sqlerrm;
     char sqlerrp[8];
     long sqlerrd[6];
@@ -4960,11 +4964,11 @@ EXEC SQL END DECLARE SECTION;
 EXEC SQL SELECT res INTO :result FROM mytable WHERE index = :index;
 </programlisting>
     is translated into:
-<programlisting>
+<programlisting><![CDATA[
 /* Processed by ecpg (2.6.0) */
 /* These two include files are added by the preprocessor */
-#include &lt;ecpgtype.h&gt;;
-#include &lt;ecpglib.h&gt;;
+#include <ecpgtype.h>;
+#include <ecpglib.h>;
 
 /* exec sql begin declare section */
 
@@ -4975,11 +4979,12 @@ EXEC SQL SELECT res INTO :result FROM mytable WHERE index = :index;
 /* exec sql end declare section */
 ...
 ECPGdo(__LINE__, NULL, "SELECT res FROM mytable WHERE index = ?     ",
-        ECPGt_int,&amp;(index),1L,1L,sizeof(int),
+        ECPGt_int,&(index),1L,1L,sizeof(int),
         ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT,
-        ECPGt_int,&amp;(result),1L,1L,sizeof(int),
+        ECPGt_int,&(result),1L,1L,sizeof(int),
         ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
 #line 147 "foo.pgc"
+]]>
 </programlisting>
     (The indentation here is added for readability and not
     something the preprocessor does.)

@@ -3,7 +3,7 @@
  * fe-auth.c
  *	   The front-end (client) authorization routines
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -38,10 +38,6 @@
 #include <netdb.h>				/* for MAXHOSTNAMELEN on some */
 #endif
 #include <pwd.h>
-#endif
-
-#ifdef HAVE_CRYPT_H
-#include <crypt.h>
 #endif
 
 #include "libpq-fe.h"
@@ -191,28 +187,6 @@ pg_krb5_destroy(struct krb5_info * info)
 	krb5_cc_close(info->pg_krb5_context, info->pg_krb5_ccache);
 	krb5_free_unparsed_name(info->pg_krb5_context, info->pg_krb5_name);
 	krb5_free_context(info->pg_krb5_context);
-}
-
-
-
-/*
- * pg_krb5_authname -- returns a copy of whatever name the user
- *					   has authenticated to the system, or NULL
- */
-static char *
-pg_krb5_authname(PQExpBuffer errorMessage)
-{
-	char	   *tmp_name;
-	struct krb5_info info;
-
-	info.pg_krb5_initialised = 0;
-
-	if (pg_krb5_init(errorMessage, &info) != STATUS_OK)
-		return NULL;
-	tmp_name = strdup(info.pg_krb5_name);
-	pg_krb5_destroy(&info);
-
-	return tmp_name;
 }
 
 
@@ -498,13 +472,13 @@ pg_GSS_startup(PGconn *conn)
  */
 
 static void
-pg_SSPI_error(PGconn *conn, char *mprefix, SECURITY_STATUS r)
+pg_SSPI_error(PGconn *conn, const char *mprefix, SECURITY_STATUS r)
 {
 	char		sysmsg[256];
 
 	if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, r, 0,
 					  sysmsg, sizeof(sysmsg), NULL) == 0)
-		printfPQExpBuffer(&conn->errorMessage, "%s: sspi error %x",
+		printfPQExpBuffer(&conn->errorMessage, "%s: SSPI error %x",
 						  mprefix, (unsigned int) r);
 	else
 		printfPQExpBuffer(&conn->errorMessage, "%s: %s (%x)",
@@ -606,13 +580,14 @@ pg_SSPI_continue(PGconn *conn)
 		}
 
 		/*
-		 * If the negotiation is complete, there may be zero bytes to send. The server is
-		 * at this point not expecting any more data, so don't send it.
+		 * If the negotiation is complete, there may be zero bytes to send.
+		 * The server is at this point not expecting any more data, so don't
+		 * send it.
 		 */
 		if (outbuf.pBuffers[0].cbBuffer > 0)
 		{
 			if (pqPacketSend(conn, 'p',
-					   outbuf.pBuffers[0].pvBuffer, outbuf.pBuffers[0].cbBuffer))
+				   outbuf.pBuffers[0].pvBuffer, outbuf.pBuffers[0].cbBuffer))
 			{
 				FreeContextBuffer(outbuf.pBuffers[0].pvBuffer);
 				return STATUS_ERROR;
@@ -649,10 +624,18 @@ pg_SSPI_startup(PGconn *conn, int use_negotiate)
 		return STATUS_ERROR;
 	}
 
-	r = AcquireCredentialsHandle(NULL, use_negotiate ? "negotiate" : "kerberos", SECPKG_CRED_OUTBOUND, NULL, NULL, NULL, NULL, conn->sspicred, &expire);
+	r = AcquireCredentialsHandle(NULL,
+								 use_negotiate ? "negotiate" : "kerberos",
+								 SECPKG_CRED_OUTBOUND,
+								 NULL,
+								 NULL,
+								 NULL,
+								 NULL,
+								 conn->sspicred,
+								 &expire);
 	if (r != SEC_E_OK)
 	{
-		pg_SSPI_error(conn, "acquire credentials failed", r);
+		pg_SSPI_error(conn, libpq_gettext("could not acquire SSPI credentials"), r);
 		free(conn->sspicred);
 		conn->sspicred = NULL;
 		return STATUS_ERROR;
@@ -785,14 +768,6 @@ pg_password_sendauth(PGconn *conn, const char *password, AuthRequest areq)
 					free(crypt_pwd);
 					return STATUS_ERROR;
 				}
-				break;
-			}
-		case AUTH_REQ_CRYPT:
-			{
-				char		salt[3];
-
-				strlcpy(salt, conn->cryptSalt, sizeof(salt));
-				crypt_pwd = crypt(password, salt);
 				break;
 			}
 		case AUTH_REQ_PASSWORD:
@@ -938,8 +913,12 @@ pg_fe_sendauth(AuthRequest areq, PGconn *conn)
 #endif
 
 
-		case AUTH_REQ_MD5:
 		case AUTH_REQ_CRYPT:
+			printfPQExpBuffer(&conn->errorMessage,
+					  libpq_gettext("Crypt authentication not supported\n"));
+			return STATUS_ERROR;
+
+		case AUTH_REQ_MD5:
 		case AUTH_REQ_PASSWORD:
 			conn->password_needed = true;
 			if (conn->pgpass == NULL || conn->pgpass[0] == '\0')
@@ -980,9 +959,6 @@ pg_fe_sendauth(AuthRequest areq, PGconn *conn)
 char *
 pg_fe_getauthname(PQExpBuffer errorMessage)
 {
-#ifdef KRB5
-	char	   *krb5_name = NULL;
-#endif
 	const char *name = NULL;
 	char	   *authn;
 
@@ -996,26 +972,13 @@ pg_fe_getauthname(PQExpBuffer errorMessage)
 #endif
 
 	/*
-	 * pglock_thread() really only needs to be called around
-	 * pg_krb5_authname(), but some users are using configure
-	 * --enable-thread-safety-force, so we might as well do the locking within
-	 * our library to protect pqGetpwuid(). In fact, application developers
-	 * can use getpwuid() in their application if they use the locking call we
-	 * provide, or install their own locking function using
-	 * PQregisterThreadLock().
+	 * Some users are using configure --enable-thread-safety-force, so we
+	 * might as well do the locking within our library to protect
+	 * pqGetpwuid(). In fact, application developers can use getpwuid() in
+	 * their application if they use the locking call we provide, or install
+	 * their own locking function using PQregisterThreadLock().
 	 */
 	pglock_thread();
-
-#ifdef KRB5
-
-	/*
-	 * pg_krb5_authname gives us a strdup'd value that we need to free later,
-	 * however, we don't want to free 'name' directly in case it's *not* a
-	 * Kerberos login and we fall through to name = pw->pw_name;
-	 */
-	krb5_name = pg_krb5_authname(errorMessage);
-	name = krb5_name;
-#endif
 
 	if (!name)
 	{
@@ -1029,12 +992,6 @@ pg_fe_getauthname(PQExpBuffer errorMessage)
 	}
 
 	authn = name ? strdup(name) : NULL;
-
-#ifdef KRB5
-	/* Free the strdup'd string from pg_krb5_authname, if we got one */
-	if (krb5_name)
-		free(krb5_name);
-#endif
 
 	pgunlock_thread();
 

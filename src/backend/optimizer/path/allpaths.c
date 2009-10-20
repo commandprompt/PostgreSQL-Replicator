@@ -3,7 +3,7 @@
  * allpaths.c
  *	  Routines to find possible search paths for processing a query
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,6 +15,9 @@
 
 #include "postgres.h"
 
+#include <math.h>
+
+#include "nodes/nodeFuncs.h"
 #ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
 #endif
@@ -26,9 +29,9 @@
 #include "optimizer/plancat.h"
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
+#include "optimizer/restrictinfo.h"
 #include "optimizer/var.h"
 #include "parser/parse_clause.h"
-#include "parser/parse_expr.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 
@@ -55,6 +58,10 @@ static void set_function_pathlist(PlannerInfo *root, RelOptInfo *rel,
 					  RangeTblEntry *rte);
 static void set_values_pathlist(PlannerInfo *root, RelOptInfo *rel,
 					RangeTblEntry *rte);
+static void set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel,
+				 RangeTblEntry *rte);
+static void set_worktable_pathlist(PlannerInfo *root, RelOptInfo *rel,
+					   RangeTblEntry *rte);
 static RelOptInfo *make_rel_from_joinlist(PlannerInfo *root, List *joinlist);
 static bool subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 						  bool *differentTypes);
@@ -171,13 +178,21 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	}
 	else if (rel->rtekind == RTE_FUNCTION)
 	{
-		/* RangeFunction --- generate a separate plan for it */
+		/* RangeFunction --- generate a suitable path for it */
 		set_function_pathlist(root, rel, rte);
 	}
 	else if (rel->rtekind == RTE_VALUES)
 	{
-		/* Values list --- generate a separate plan for it */
+		/* Values list --- generate a suitable path for it */
 		set_values_pathlist(root, rel, rte);
+	}
+	else if (rel->rtekind == RTE_CTE)
+	{
+		/* CTE reference --- generate a suitable path for it */
+		if (rte->self_reference)
+			set_worktable_pathlist(root, rel, rte);
+		else
+			set_cte_pathlist(root, rel, rte);
 	}
 	else
 	{
@@ -211,19 +226,25 @@ set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		return;
 	}
 
+	/*
+	 * Test any partial indexes of rel for applicability.  We must do this
+	 * first since partial unique indexes can affect size estimates.
+	 */
+	check_partial_indexes(root, rel);
+
 	/* Mark rel with estimated output rows, width, etc */
 	set_baserel_size_estimates(root, rel);
-
-	/* Test any partial indexes of rel for applicability */
-	check_partial_indexes(root, rel);
 
 	/*
 	 * Check to see if we can extract any restriction conditions from join
 	 * quals that are OR-of-AND structures.  If so, add them to the rel's
-	 * restriction list, and recompute the size estimates.
+	 * restriction list, and redo the above steps.
 	 */
 	if (create_or_index_quals(root, rel))
+	{
+		check_partial_indexes(root, rel);
 		set_baserel_size_estimates(root, rel);
+	}
 
 	/*
 	 * Generate paths and add them to the rel's pathlist.
@@ -263,24 +284,30 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 {
 	int			parentRTindex = rti;
 	List	   *subpaths = NIL;
+	double		parent_rows;
+	double		parent_size;
+	double	   *parent_attrsizes;
+	int			nattrs;
 	ListCell   *l;
 
 	/*
-	 * XXX for now, can't handle inherited expansion of FOR UPDATE/SHARE; can
-	 * we do better?  (This will take some redesign because the executor
-	 * currently supposes that every rowMark relation is involved in every row
-	 * returned by the query.)
+	 * Initialize to compute size estimates for whole append relation.
+	 *
+	 * We handle width estimates by weighting the widths of different child
+	 * rels proportionally to their number of rows.  This is sensible because
+	 * the use of width estimates is mainly to compute the total relation
+	 * "footprint" if we have to sort or hash it.  To do this, we sum the
+	 * total equivalent size (in "double" arithmetic) and then divide by the
+	 * total rowcount estimate.  This is done separately for the total rel
+	 * width and each attribute.
+	 *
+	 * Note: if you consider changing this logic, beware that child rels could
+	 * have zero rows and/or width, if they were excluded by constraints.
 	 */
-	if (get_rowmark(root->parse, parentRTindex))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("SELECT FOR UPDATE/SHARE is not supported for inheritance queries")));
-
-	/*
-	 * Initialize to compute size estimates for whole append relation
-	 */
-	rel->rows = 0;
-	rel->width = 0;
+	parent_rows = 0;
+	parent_size = 0;
+	nattrs = rel->max_attr - rel->min_attr + 1;
+	parent_attrsizes = (double *) palloc0(nattrs * sizeof(double));
 
 	/*
 	 * Generate access paths for each member relation, and pick the cheapest
@@ -292,6 +319,8 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		int			childRTindex;
 		RangeTblEntry *childRTE;
 		RelOptInfo *childrel;
+		List	   *childquals;
+		Node	   *childqual;
 		Path	   *childpath;
 		ListCell   *parentvars;
 		ListCell   *childvars;
@@ -316,10 +345,34 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		 * baserestrictinfo quals are needed before we can check for
 		 * constraint exclusion; so do that first and then check to see if we
 		 * can disregard this child.
+		 *
+		 * As of 8.4, the child rel's targetlist might contain non-Var
+		 * expressions, which means that substitution into the quals
+		 * could produce opportunities for const-simplification, and perhaps
+		 * even pseudoconstant quals.  To deal with this, we strip the
+		 * RestrictInfo nodes, do the substitution, do const-simplification,
+		 * and then reconstitute the RestrictInfo layer.
 		 */
-		childrel->baserestrictinfo = (List *)
-			adjust_appendrel_attrs((Node *) rel->baserestrictinfo,
-								   appinfo);
+		childquals = get_all_actual_clauses(rel->baserestrictinfo);
+		childquals = (List *) adjust_appendrel_attrs((Node *) childquals,
+													 appinfo);
+		childqual = eval_const_expressions(root, (Node *)
+										   make_ands_explicit(childquals));
+		if (childqual && IsA(childqual, Const) &&
+			(((Const *) childqual)->constisnull ||
+			 !DatumGetBool(((Const *) childqual)->constvalue)))
+		{
+			/*
+			 * Restriction reduces to constant FALSE or constant NULL after
+			 * substitution, so this child need not be scanned.
+			 */
+			set_dummy_rel_pathlist(childrel);
+			continue;
+		}
+		childquals = make_ands_implicit((Expr *) childqual);
+		childquals = make_restrictinfos_from_actual_clauses(root,
+															childquals);
+		childrel->baserestrictinfo = childquals;
 
 		if (relation_excluded_by_constraints(root, childrel, childRTE))
 		{
@@ -351,11 +404,11 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		}
 
 		/*
-		 * Note: we could compute appropriate attr_needed data for the
-		 * child's variables, by transforming the parent's attr_needed
-		 * through the translated_vars mapping.  However, currently there's
-		 * no need because attr_needed is only examined for base relations
-		 * not otherrels.  So we just leave the child's attr_needed empty.
+		 * Note: we could compute appropriate attr_needed data for the child's
+		 * variables, by transforming the parent's attr_needed through the
+		 * translated_vars mapping.  However, currently there's no need
+		 * because attr_needed is only examined for base relations not
+		 * otherrels.  So we just leave the child's attr_needed empty.
 		 */
 
 		/*
@@ -377,38 +430,57 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 			subpaths = lappend(subpaths, childpath);
 
 		/*
-		 * Propagate size information from the child back to the parent. For
-		 * simplicity, we use the largest widths from any child as the parent
-		 * estimates.  (If you want to change this, beware of child
-		 * attr_widths[] entries that haven't been set and are still 0.)
+		 * Accumulate size information from each child.
 		 */
-		rel->rows += childrel->rows;
-		if (childrel->width > rel->width)
-			rel->width = childrel->width;
-
-		forboth(parentvars, rel->reltargetlist,
-				childvars, childrel->reltargetlist)
+		if (childrel->rows > 0)
 		{
-			Var		   *parentvar = (Var *) lfirst(parentvars);
-			Var		   *childvar = (Var *) lfirst(childvars);
+			parent_rows += childrel->rows;
+			parent_size += childrel->width * childrel->rows;
 
-			if (IsA(parentvar, Var) &&
-				IsA(childvar, Var))
+			forboth(parentvars, rel->reltargetlist,
+					childvars, childrel->reltargetlist)
 			{
-				int			pndx = parentvar->varattno - rel->min_attr;
-				int			cndx = childvar->varattno - childrel->min_attr;
+				Var		   *parentvar = (Var *) lfirst(parentvars);
+				Var		   *childvar = (Var *) lfirst(childvars);
 
-				if (childrel->attr_widths[cndx] > rel->attr_widths[pndx])
-					rel->attr_widths[pndx] = childrel->attr_widths[cndx];
+				/*
+				 * Accumulate per-column estimates too.  Whole-row Vars and
+				 * PlaceHolderVars can be ignored here.
+				 */
+				if (IsA(parentvar, Var) &&
+					IsA(childvar, Var))
+				{
+					int			pndx = parentvar->varattno - rel->min_attr;
+					int			cndx = childvar->varattno - childrel->min_attr;
+
+					parent_attrsizes[pndx] += childrel->attr_widths[cndx] * childrel->rows;
+				}
 			}
 		}
 	}
 
 	/*
+	 * Save the finished size estimates.
+	 */
+	rel->rows = parent_rows;
+	if (parent_rows > 0)
+	{
+		int			i;
+
+		rel->width = rint(parent_size / parent_rows);
+		for (i = 0; i < nattrs; i++)
+			rel->attr_widths[i] = rint(parent_attrsizes[i] / parent_rows);
+	}
+	else
+		rel->width = 0;			/* attr_widths should be zero already */
+
+	/*
 	 * Set "raw tuples" count equal to "rows" for the appendrel; needed
 	 * because some places assume rel->tuples is valid for any baserel.
 	 */
-	rel->tuples = rel->rows;
+	rel->tuples = parent_rows;
+
+	pfree(parent_attrsizes);
 
 	/*
 	 * Finally, build Append path and install it as the only access path for
@@ -556,8 +628,8 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Generate the plan for the subquery */
 	rel->subplan = subquery_planner(root->glob, subquery,
-									root->query_level + 1,
-									tuple_fraction,
+									root,
+									false, tuple_fraction,
 									&subroot);
 	rel->subrtable = subroot->parse->rtable;
 
@@ -606,6 +678,105 @@ set_values_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 	/* Generate appropriate path */
 	add_path(rel, create_valuesscan_path(root, rel));
+
+	/* Select cheapest path (pretty easy in this case...) */
+	set_cheapest(rel);
+}
+
+/*
+ * set_cte_pathlist
+ *		Build the (single) access path for a non-self-reference CTE RTE
+ */
+static void
+set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	Plan	   *cteplan;
+	PlannerInfo *cteroot;
+	Index		levelsup;
+	int			ndx;
+	ListCell   *lc;
+	int			plan_id;
+
+	/*
+	 * Find the referenced CTE, and locate the plan previously made for it.
+	 */
+	levelsup = rte->ctelevelsup;
+	cteroot = root;
+	while (levelsup-- > 0)
+	{
+		cteroot = cteroot->parent_root;
+		if (!cteroot)			/* shouldn't happen */
+			elog(ERROR, "bad levelsup for CTE \"%s\"", rte->ctename);
+	}
+
+	/*
+	 * Note: cte_plan_ids can be shorter than cteList, if we are still working
+	 * on planning the CTEs (ie, this is a side-reference from another CTE).
+	 * So we mustn't use forboth here.
+	 */
+	ndx = 0;
+	foreach(lc, cteroot->parse->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+
+		if (strcmp(cte->ctename, rte->ctename) == 0)
+			break;
+		ndx++;
+	}
+	if (lc == NULL)				/* shouldn't happen */
+		elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
+	if (ndx >= list_length(cteroot->cte_plan_ids))
+		elog(ERROR, "could not find plan for CTE \"%s\"", rte->ctename);
+	plan_id = list_nth_int(cteroot->cte_plan_ids, ndx);
+	Assert(plan_id > 0);
+	cteplan = (Plan *) list_nth(root->glob->subplans, plan_id - 1);
+
+	/* Mark rel with estimated output rows, width, etc */
+	set_cte_size_estimates(root, rel, cteplan);
+
+	/* Generate appropriate path */
+	add_path(rel, create_ctescan_path(root, rel));
+
+	/* Select cheapest path (pretty easy in this case...) */
+	set_cheapest(rel);
+}
+
+/*
+ * set_worktable_pathlist
+ *		Build the (single) access path for a self-reference CTE RTE
+ */
+static void
+set_worktable_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	Plan	   *cteplan;
+	PlannerInfo *cteroot;
+	Index		levelsup;
+
+	/*
+	 * We need to find the non-recursive term's plan, which is in the plan
+	 * level that's processing the recursive UNION, which is one level *below*
+	 * where the CTE comes from.
+	 */
+	levelsup = rte->ctelevelsup;
+	if (levelsup == 0)			/* shouldn't happen */
+		elog(ERROR, "bad levelsup for CTE \"%s\"", rte->ctename);
+	levelsup--;
+	cteroot = root;
+	while (levelsup-- > 0)
+	{
+		cteroot = cteroot->parent_root;
+		if (!cteroot)			/* shouldn't happen */
+			elog(ERROR, "bad levelsup for CTE \"%s\"", rte->ctename);
+	}
+	cteplan = cteroot->non_recursive_plan;
+	if (!cteplan)				/* shouldn't happen */
+		elog(ERROR, "could not find plan for CTE \"%s\"", rte->ctename);
+
+	/* Mark rel with estimated output rows, width, etc */
+	set_cte_size_estimates(root, rel, cteplan);
+
+	/* Generate appropriate path */
+	add_path(rel, create_worktablescan_path(root, rel));
 
 	/* Select cheapest path (pretty easy in this case...) */
 	set_cheapest(rel);
@@ -799,10 +970,13 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
  * 1. If the subquery has a LIMIT clause, we must not push down any quals,
  * since that could change the set of rows returned.
  *
- * 2. If the subquery contains EXCEPT or EXCEPT ALL set ops we cannot push
+ * 2. If the subquery contains any window functions, we can't push quals
+ * into it, because that would change the results.
+ *
+ * 3. If the subquery contains EXCEPT or EXCEPT ALL set ops we cannot push
  * quals into it, because that would change the results.
  *
- * 3. For subqueries using UNION/UNION ALL/INTERSECT/INTERSECT ALL, we can
+ * 4. For subqueries using UNION/UNION ALL/INTERSECT/INTERSECT ALL, we can
  * push quals into each component query, but the quals can only reference
  * subquery columns that suffer no type coercions in the set operation.
  * Otherwise there are possible semantic gotchas.  So, we check the
@@ -818,6 +992,10 @@ subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 
 	/* Check point 1 */
 	if (subquery->limitOffset != NULL || subquery->limitCount != NULL)
+		return false;
+
+	/* Check point 2 */
+	if (subquery->hasWindowFuncs)
 		return false;
 
 	/* Are we at top level, or looking at a setop component? */
@@ -934,11 +1112,12 @@ compare_tlist_datatypes(List *tlist, List *colTypes,
  *
  * 4. If the subquery uses DISTINCT ON, we must not push down any quals that
  * refer to non-DISTINCT output columns, because that could change the set
- * of rows returned.  This condition is vacuous for DISTINCT, because then
- * there are no non-DISTINCT output columns, but unfortunately it's fairly
- * expensive to tell the difference between DISTINCT and DISTINCT ON in the
- * parsetree representation.  It's cheaper to just make sure all the Vars
- * in the qual refer to DISTINCT columns.
+ * of rows returned.  (This condition is vacuous for DISTINCT, because then
+ * there are no non-DISTINCT output columns, so we needn't check.  But note
+ * we are assuming that the qual can't distinguish values that the DISTINCT
+ * operator sees as equal.	This is a bit shaky but we have no way to test
+ * for the case, and it's unlikely enough that we shouldn't refuse the
+ * optimization just because it could theoretically happen.)
  *
  * 5. We must not push down any quals that refer to subselect outputs that
  * return sets, else we'd introduce functions-returning-sets into the
@@ -962,14 +1141,33 @@ qual_is_pushdown_safe(Query *subquery, Index rti, Node *qual,
 		return false;
 
 	/*
+	 * It would be unsafe to push down window function calls, but at least for
+	 * the moment we could never see any in a qual anyhow.
+	 */
+	Assert(!contain_window_function(qual));
+
+	/*
 	 * Examine all Vars used in clause; since it's a restriction clause, all
 	 * such Vars must refer to subselect output columns.
 	 */
-	vars = pull_var_clause(qual, false);
+	vars = pull_var_clause(qual, PVC_INCLUDE_PLACEHOLDERS);
 	foreach(vl, vars)
 	{
 		Var		   *var = (Var *) lfirst(vl);
 		TargetEntry *tle;
+
+		/*
+		 * XXX Punt if we find any PlaceHolderVars in the restriction clause.
+		 * It's not clear whether a PHV could safely be pushed down, and even
+		 * less clear whether such a situation could arise in any cases of
+		 * practical interest anyway.  So for the moment, just refuse to push
+		 * down.
+		 */
+		if (!IsA(var, Var))
+		{
+			safe = false;
+			break;
+		}
 
 		Assert(var->varno == rti);
 
@@ -1001,8 +1199,8 @@ qual_is_pushdown_safe(Query *subquery, Index rti, Node *qual,
 		Assert(tle != NULL);
 		Assert(!tle->resjunk);
 
-		/* If subquery uses DISTINCT or DISTINCT ON, check point 4 */
-		if (subquery->distinctClause != NIL &&
+		/* If subquery uses DISTINCT ON, check point 4 */
+		if (subquery->hasDistinctOn &&
 			!targetIsInSortList(tle, InvalidOid, subquery->distinctClause))
 		{
 			/* non-DISTINCT column, so fail */
@@ -1056,7 +1254,8 @@ subquery_push_qual(Query *subquery, RangeTblEntry *rte, Index rti, Node *qual)
 		 */
 		qual = ResolveNew(qual, rti, 0, rte,
 						  subquery->targetList,
-						  CMD_SELECT, 0);
+						  CMD_SELECT, 0,
+						  &subquery->hasSubLinks);
 
 		/*
 		 * Now attach the qual to the proper place: normally WHERE, but if the

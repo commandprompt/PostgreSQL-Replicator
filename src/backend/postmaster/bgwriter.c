@@ -19,7 +19,8 @@
  * condition.)
  *
  * The bgwriter is started by the postmaster as soon as the startup subprocess
- * finishes.  It remains alive until the postmaster commands it to terminate.
+ * finishes, or as soon as recovery begins if we are doing archive recovery.
+ * It remains alive until the postmaster commands it to terminate.
  * Normal termination is by SIGUSR2, which instructs the bgwriter to execute
  * a shutdown checkpoint and then exit(0).	(All backends must be stopped
  * before SIGUSR2 is issued!)  Emergency termination is by SIGQUIT; like any
@@ -33,7 +34,7 @@
  * restart needs to be forced.)
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -49,14 +50,13 @@
 #include <unistd.h>
 
 #include "access/xlog_internal.h"
+#include "catalog/pg_control.h"
 #include "libpq/pqsignal.h"
-#include "mammoth_r/txlog.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/bgwriter.h"
-#include "postmaster/bgwriter.h"
+#include "storage/bufmgr.h"
 #include "storage/fd.h"
-#include "storage/freespace.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/pmsignal.h"
@@ -114,6 +114,7 @@
 typedef struct
 {
 	RelFileNode rnode;
+	ForkNumber	forknum;
 	BlockNumber segno;			/* see md.c for special values */
 	/* might add a real request-type field later; not needed yet */
 } BgWriterRequest;
@@ -165,12 +166,12 @@ static bool am_bg_writer = false;
 static bool ckpt_active = false;
 
 /* these values are valid when ckpt_active is true: */
-static time_t ckpt_start_time;
+static pg_time_t ckpt_start_time;
 static XLogRecPtr ckpt_start_recptr;
 static double ckpt_cached_elapsed;
 
-static time_t last_checkpoint_time;
-static time_t last_xlog_switch_time;
+static pg_time_t last_checkpoint_time;
+static pg_time_t last_xlog_switch_time;
 
 /* Prototypes for private functions */
 
@@ -252,7 +253,7 @@ BackgroundWriterMain(void)
 	/*
 	 * Initialize so that first time-driven event happens at the correct time.
 	 */
-	last_checkpoint_time = last_xlog_switch_time = time(NULL);
+	last_checkpoint_time = last_xlog_switch_time = (pg_time_t) time(NULL);
 
 	/*
 	 * Create a resource owner to keep track of our resources (currently only
@@ -363,7 +364,7 @@ BackgroundWriterMain(void)
 	{
 		bool		do_checkpoint = false;
 		int			flags = 0;
-		time_t		now;
+		pg_time_t	now;
 		int			elapsed_secs;
 
 		/*
@@ -398,7 +399,6 @@ BackgroundWriterMain(void)
 			ExitOnAnyError = true;
 			/* Close down the database */
 			ShutdownXLOG(0, 0);
-			DumpFreeSpaceMap(0, 0);
 			/* Normal exit from the bgwriter is here */
 			proc_exit(0);		/* done */
 		}
@@ -409,7 +409,7 @@ BackgroundWriterMain(void)
 		 * occurs without an external request, but we set the CAUSE_TIME flag
 		 * bit even if there is also an external request.
 		 */
-		now = time(NULL);
+		now = (pg_time_t) time(NULL);
 		elapsed_secs = now - last_checkpoint_time;
 		if (elapsed_secs >= CheckPointTimeout)
 		{
@@ -425,8 +425,18 @@ BackgroundWriterMain(void)
 		 */
 		if (do_checkpoint)
 		{
+			bool		ckpt_performed = false;
+			bool		do_restartpoint;
+
 			/* use volatile pointer to prevent code rearrangement */
 			volatile BgWriterShmemStruct *bgs = BgWriterShmem;
+
+			/*
+			 * Check if we should perform a checkpoint or a restartpoint. As a
+			 * side-effect, RecoveryInProgress() initializes TimeLineID if
+			 * it's not set yet.
+			 */
+			do_restartpoint = RecoveryInProgress();
 
 			/*
 			 * Atomically fetch the request flags to figure out what kind of a
@@ -440,31 +450,48 @@ BackgroundWriterMain(void)
 			SpinLockRelease(&bgs->ckpt_lck);
 
 			/*
+			 * The end-of-recovery checkpoint is a real checkpoint that's
+			 * performed while we're still in recovery.
+			 */
+			if (flags & CHECKPOINT_END_OF_RECOVERY)
+				do_restartpoint = false;
+
+			/*
 			 * We will warn if (a) too soon since last checkpoint (whatever
 			 * caused it) and (b) somebody set the CHECKPOINT_CAUSE_XLOG flag
 			 * since the last checkpoint start.  Note in particular that this
 			 * implementation will not generate warnings caused by
 			 * CheckPointTimeout < CheckPointWarning.
 			 */
-			if ((flags & CHECKPOINT_CAUSE_XLOG) &&
+			if (!do_restartpoint &&
+				(flags & CHECKPOINT_CAUSE_XLOG) &&
 				elapsed_secs < CheckPointWarning)
 				ereport(LOG,
-						(errmsg("checkpoints are occurring too frequently (%d seconds apart)",
-								elapsed_secs),
+						(errmsg_plural("checkpoints are occurring too frequently (%d second apart)",
+				"checkpoints are occurring too frequently (%d seconds apart)",
+									   elapsed_secs,
+									   elapsed_secs),
 						 errhint("Consider increasing the configuration parameter \"checkpoint_segments\".")));
 
 			/*
 			 * Initialize bgwriter-private variables used during checkpoint.
 			 */
 			ckpt_active = true;
-			ckpt_start_recptr = GetInsertRecPtr();
+			if (!do_restartpoint)
+				ckpt_start_recptr = GetInsertRecPtr();
 			ckpt_start_time = now;
 			ckpt_cached_elapsed = 0;
 
 			/*
 			 * Do the checkpoint.
 			 */
-			CreateCheckPoint(flags);
+			if (!do_restartpoint)
+			{
+				CreateCheckPoint(flags);
+				ckpt_performed = true;
+			}
+			else
+				ckpt_performed = CreateRestartPoint(flags);
 
 			/*
 			 * After any checkpoint, close all smgr files.	This is so we
@@ -479,14 +506,27 @@ BackgroundWriterMain(void)
 			bgs->ckpt_done = bgs->ckpt_started;
 			SpinLockRelease(&bgs->ckpt_lck);
 
-			ckpt_active = false;
+			if (ckpt_performed)
+			{
+				/*
+				 * Note we record the checkpoint start time not end time as
+				 * last_checkpoint_time.  This is so that time-driven
+				 * checkpoints happen at a predictable spacing.
+				 */
+				last_checkpoint_time = now;
+			}
+			else
+			{
+				/*
+				 * We were not able to perform the restartpoint (checkpoints
+				 * throw an ERROR in case of error).  Most likely because we
+				 * have not received any new checkpoint WAL records since the
+				 * last restartpoint. Try again in 15 s.
+				 */
+				last_checkpoint_time = now - CheckPointTimeout + 15;
+			}
 
-			/*
-			 * Note we record the checkpoint start time not end time as
-			 * last_checkpoint_time.  This is so that time-driven checkpoints
-			 * happen at a predictable spacing.
-			 */
-			last_checkpoint_time = now;
+			ckpt_active = false;
 		}
 		else
 			BgBufferSync();
@@ -506,13 +546,13 @@ BackgroundWriterMain(void)
 static void
 CheckArchiveTimeout(void)
 {
-	time_t		now;
-	time_t		last_time;
+	pg_time_t	now;
+	pg_time_t	last_time;
 
-	if (XLogArchiveTimeout <= 0)
+	if (XLogArchiveTimeout <= 0 || RecoveryInProgress())
 		return;
 
-	now = time(NULL);
+	now = (pg_time_t) time(NULL);
 
 	/* First we do a quick check using possibly-stale local state. */
 	if ((int) (now - last_xlog_switch_time) < XLogArchiveTimeout)
@@ -716,23 +756,26 @@ IsCheckpointOnSchedule(double progress)
 	 * However, it's good enough for our purposes, we're only calculating an
 	 * estimate anyway.
 	 */
-	recptr = GetInsertRecPtr();
-	elapsed_xlogs =
-		(((double) (int32) (recptr.xlogid - ckpt_start_recptr.xlogid)) * XLogSegsPerFile +
-		 ((double) recptr.xrecoff - (double) ckpt_start_recptr.xrecoff) / XLogSegSize) /
-		CheckPointSegments;
-
-	if (progress < elapsed_xlogs)
+	if (!RecoveryInProgress())
 	{
-		ckpt_cached_elapsed = elapsed_xlogs;
-		return false;
+		recptr = GetInsertRecPtr();
+		elapsed_xlogs =
+			(((double) (int32) (recptr.xlogid - ckpt_start_recptr.xlogid)) * XLogSegsPerFile +
+			 ((double) recptr.xrecoff - (double) ckpt_start_recptr.xrecoff) / XLogSegSize) /
+			CheckPointSegments;
+
+		if (progress < elapsed_xlogs)
+		{
+			ckpt_cached_elapsed = elapsed_xlogs;
+			return false;
+		}
 	}
 
 	/*
 	 * Check progress against time elapsed and checkpoint_timeout.
 	 */
 	gettimeofday(&now, NULL);
-	elapsed_time = ((double) (now.tv_sec - ckpt_start_time) +
+	elapsed_time = ((double) ((pg_time_t) now.tv_sec - ckpt_start_time) +
 					now.tv_usec / 1000000.0) / CheckPointTimeout;
 
 	if (progress < elapsed_time)
@@ -763,14 +806,22 @@ bg_quickdie(SIGNAL_ARGS)
 	PG_SETMASK(&BlockSig);
 
 	/*
-	 * DO NOT proc_exit() -- we're here because shared memory may be
-	 * corrupted, so we don't want to try to clean up our transaction. Just
-	 * nail the windows shut and get out of town.
-	 *
+	 * We DO NOT want to run proc_exit() callbacks -- we're here because
+	 * shared memory may be corrupted, so we don't want to try to clean up our
+	 * transaction.  Just nail the windows shut and get out of town.  Now that
+	 * there's an atexit callback to prevent third-party code from breaking
+	 * things by calling exit() directly, we have to reset the callbacks
+	 * explicitly to make this work as intended.
+	 */
+	on_exit_reset();
+
+	/*
 	 * Note we do exit(2) not exit(0).	This is to force the postmaster into a
 	 * system reset cycle if some idiot DBA sends a manual SIGQUIT to a random
 	 * backend.  This is necessary precisely because we don't clean up our
-	 * shared memory state.
+	 * shared memory state.  (The "dead man switch" mechanism in pmsignal.c
+	 * should ensure the postmaster sees this as a crash, too, but no harm in
+	 * being doubly sure.)
 	 */
 	exit(2);
 }
@@ -852,10 +903,12 @@ BgWriterShmemInit(void)
  *
  * flags is a bitwise OR of the following:
  *	CHECKPOINT_IS_SHUTDOWN: checkpoint is for database shutdown.
+ *	CHECKPOINT_END_OF_RECOVERY: checkpoint is for end of WAL recovery.
  *	CHECKPOINT_IMMEDIATE: finish the checkpoint ASAP,
  *		ignoring checkpoint_completion_target parameter.
  *	CHECKPOINT_FORCE: force a checkpoint even if no XLOG activity has occured
- *		since the last one (implied by CHECKPOINT_IS_SHUTDOWN).
+ *		since the last one (implied by CHECKPOINT_IS_SHUTDOWN or
+ *		CHECKPOINT_END_OF_RECOVERY).
  *	CHECKPOINT_WAIT: wait for completion before returning (otherwise,
  *		just signal bgwriter to do it, and return).
  *	CHECKPOINT_CAUSE_XLOG: checkpoint is requested due to xlog filling.
@@ -866,6 +919,7 @@ RequestCheckpoint(int flags)
 {
 	/* use volatile pointer to prevent code rearrangement */
 	volatile BgWriterShmemStruct *bgs = BgWriterShmem;
+	int			ntries;
 	int			old_failed,
 				old_started;
 
@@ -907,15 +961,38 @@ RequestCheckpoint(int flags)
 	SpinLockRelease(&bgs->ckpt_lck);
 
 	/*
-	 * Send signal to request checkpoint.  When not waiting, we consider
-	 * failure to send the signal to be nonfatal.
+	 * Send signal to request checkpoint.  It's possible that the bgwriter
+	 * hasn't started yet, or is in process of restarting, so we will retry a
+	 * few times if needed.  Also, if not told to wait for the checkpoint to
+	 * occur, we consider failure to send the signal to be nonfatal and merely
+	 * LOG it.
 	 */
-	if (BgWriterShmem->bgwriter_pid == 0)
-		elog((flags & CHECKPOINT_WAIT) ? ERROR : LOG,
-			 "could not request checkpoint because bgwriter not running");
-	if (kill(BgWriterShmem->bgwriter_pid, SIGINT) != 0)
-		elog((flags & CHECKPOINT_WAIT) ? ERROR : LOG,
-			 "could not signal for checkpoint: %m");
+	for (ntries = 0;; ntries++)
+	{
+		if (BgWriterShmem->bgwriter_pid == 0)
+		{
+			if (ntries >= 20)	/* max wait 2.0 sec */
+			{
+				elog((flags & CHECKPOINT_WAIT) ? ERROR : LOG,
+				"could not request checkpoint because bgwriter not running");
+				break;
+			}
+		}
+		else if (kill(BgWriterShmem->bgwriter_pid, SIGINT) != 0)
+		{
+			if (ntries >= 20)	/* max wait 2.0 sec */
+			{
+				elog((flags & CHECKPOINT_WAIT) ? ERROR : LOG,
+					 "could not signal for checkpoint: %m");
+				break;
+			}
+		}
+		else
+			break;				/* signal sent successfully */
+
+		CHECK_FOR_INTERRUPTS();
+		pg_usleep(100000L);		/* wait 0.1 sec, then retry */
+	}
 
 	/*
 	 * If requested, wait for completion.  We detect completion according to
@@ -991,7 +1068,7 @@ RequestCheckpoint(int flags)
  * than we have to here.
  */
 bool
-ForwardFsyncRequest(RelFileNode rnode, BlockNumber segno)
+ForwardFsyncRequest(RelFileNode rnode, ForkNumber forknum, BlockNumber segno)
 {
 	BgWriterRequest *request;
 
@@ -1014,6 +1091,7 @@ ForwardFsyncRequest(RelFileNode rnode, BlockNumber segno)
 	}
 	request = &BgWriterShmem->requests[BgWriterShmem->num_requests++];
 	request->rnode = rnode;
+	request->forknum = forknum;
 	request->segno = segno;
 	LWLockRelease(BgWriterCommLock);
 	return true;
@@ -1068,7 +1146,7 @@ AbsorbFsyncRequests(void)
 	LWLockRelease(BgWriterCommLock);
 
 	for (request = requests; n > 0; request++, n--)
-		RememberFsyncRequest(request->rnode, request->segno);
+		RememberFsyncRequest(request->rnode, request->forknum, request->segno);
 
 	if (requests)
 		pfree(requests);

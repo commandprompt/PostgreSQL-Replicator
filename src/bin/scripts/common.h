@@ -2,7 +2,7 @@
  *	common.h
  *		Common support routines for bin/scripts/
  *
- *	Copyright (c) 2003-2008, PostgreSQL Global Development Group
+ *	Copyright (c) 2003-2009, PostgreSQL Global Development Group
  *
  *	$PostgreSQL$
  */
@@ -13,9 +13,12 @@
 #include "getopt_long.h"
 #include "pqexpbuffer.h"
 
-#ifndef HAVE_INT_OPTRESET
-extern int	optreset;
-#endif
+enum trivalue
+{
+	TRI_DEFAULT,
+	TRI_NO,
+	TRI_YES
+};
 
 typedef void (*help_handler) (const char *progname);
 
@@ -27,7 +30,7 @@ extern void handle_help_version_opts(int argc, char *argv[],
 
 extern PGconn *connectDatabase(const char *dbname, const char *pghost,
 				const char *pgport, const char *pguser,
-				bool require_password, const char *progname);
+				enum trivalue prompt_password, const char *progname);
 
 extern PGresult *executeQuery(PGconn *conn, const char *query,
 			 const char *progname, bool echo);
@@ -41,5 +44,7 @@ extern bool executeMaintenanceCommand(PGconn *conn, const char *query,
 extern bool yesno_prompt(const char *question);
 
 extern void setup_cancel_handler(void);
+
+extern char *pg_strdup(const char *string);
 
 #endif   /* COMMON_H */

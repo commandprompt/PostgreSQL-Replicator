@@ -3,7 +3,7 @@
  * postinit.c
  *	  postgres initialization utilities
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -26,6 +26,7 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_tablespace.h"
 #include "libpq/hba.h"
+#include "libpq/libpq-be.h"
 #include "mammoth_r/txlog.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -34,20 +35,24 @@
 #include "postmaster/postmaster.h"
 #include "postmaster/replication.h"
 #include "storage/backendid.h"
+#include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
-#include "storage/sinval.h"
+#include "storage/sinvaladt.h"
 #include "storage/smgr.h"
 #include "utils/acl.h"
 #include "utils/flatfiles.h"
 #include "utils/guc.h"
+#include "utils/pg_locale.h"
 #include "utils/plancache.h"
 #include "utils/portal.h"
 #include "utils/relcache.h"
-#include "utils/tqual.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
 static bool FindMyDatabaseByOid(Oid dbid, char *dbname, Oid *db_tablespace);
@@ -156,6 +161,8 @@ CheckMyDatabase(const char *name, bool am_superuser)
 {
 	HeapTuple	tup;
 	Form_pg_database dbform;
+	char	   *collate;
+	char	   *ctype;
 
 	/* Fetch our real pg_database row */
 	tup = SearchSysCache(DATABASEOID,
@@ -238,6 +245,33 @@ CheckMyDatabase(const char *name, bool am_superuser)
 	SetConfigOption("client_encoding", GetDatabaseEncodingName(),
 					PGC_BACKEND, PGC_S_DEFAULT);
 
+	/* assign locale variables */
+	collate = NameStr(dbform->datcollate);
+	ctype = NameStr(dbform->datctype);
+
+	if (pg_perm_setlocale(LC_COLLATE, collate) == NULL)
+		ereport(FATAL,
+			(errmsg("database locale is incompatible with operating system"),
+			 errdetail("The database was initialized with LC_COLLATE \"%s\", "
+					   " which is not recognized by setlocale().", collate),
+			 errhint("Recreate the database with another locale or install the missing locale.")));
+
+	if (pg_perm_setlocale(LC_CTYPE, ctype) == NULL)
+		ereport(FATAL,
+			(errmsg("database locale is incompatible with operating system"),
+			 errdetail("The database was initialized with LC_CTYPE \"%s\", "
+					   " which is not recognized by setlocale().", ctype),
+			 errhint("Recreate the database with another locale or install the missing locale.")));
+
+	/* Make the locale settings visible as GUC variables, too */
+	SetConfigOption("lc_collate", collate, PGC_INTERNAL, PGC_S_OVERRIDE);
+	SetConfigOption("lc_ctype", ctype, PGC_INTERNAL, PGC_S_OVERRIDE);
+
+	/* Use the right encoding in translated messages */
+#ifdef ENABLE_NLS
+	pg_bind_textdomain_codeset(textdomain(NULL));
+#endif
+
 	/*
 	 * check whether replication_use_utf8_encoding is used with SQL_ASCII DB.
 	 * Note that the ideal place to do this is during the assignment in GUC,
@@ -314,7 +348,7 @@ InitCommunication(void)
  * If you're wondering why this is separate from InitPostgres at all:
  * the critical distinction is that this stuff has to happen before we can
  * run XLOG-related initialization, which is done before InitPostgres --- in
- * fact, for cases such as checkpoint creation processes, InitPostgres may
+ * fact, for cases such as the background writer process, InitPostgres may
  * never be done at all.
  */
 void
@@ -432,7 +466,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 */
 	MyBackendId = InvalidBackendId;
 
-	InitBackendSharedInvalidationState();
+	SharedInvalBackendInit();
 
 	if (MyBackendId > MaxBackends || MyBackendId <= 0)
 		elog(FATAL, "bad backend id: %d", MyBackendId);
@@ -611,6 +645,16 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 */
 	if (!bootstrap)
 		CheckMyDatabase(dbname, am_superuser);
+
+	/*
+	 * If we're trying to shut down, only superusers can connect.
+	 */
+	if (!am_superuser &&
+		MyProcPort != NULL &&
+		MyProcPort->canAcceptConnections == CAC_WAITBACKUP)
+		ereport(FATAL,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+		   errmsg("must be superuser to connect during database shutdown")));
 
 	/*
 	 * Check a normal user hasn't connected to a superuser reserved slot.

@@ -7,7 +7,7 @@
  * the nature and use of path keys.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -20,13 +20,13 @@
 #include "access/skey.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
 #include "optimizer/clauses.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/tlist.h"
 #include "parser/parsetree.h"
-#include "parser/parse_expr.h"
 #include "utils/lsyscache.h"
 
 
@@ -227,8 +227,8 @@ canonicalize_pathkeys(PlannerInfo *root, List *pathkeys)
  *	  a PathKey.  If canonicalize = true, the result is a "canonical"
  *	  PathKey, otherwise not.  (But note it might be redundant anyway.)
  *
- * If the PathKey is being generated from a SortClause, sortref should be
- * the SortClause's SortGroupRef; otherwise zero.
+ * If the PathKey is being generated from a SortGroupClause, sortref should be
+ * the SortGroupClause's SortGroupRef; otherwise zero.
  *
  * canonicalize should always be TRUE after EquivalenceClass merging has
  * been performed, but FALSE if we haven't done EquivalenceClass merging yet.
@@ -332,6 +332,14 @@ compare_pathkeys(List *keys1, List *keys2)
 	ListCell   *key1,
 			   *key2;
 
+	/*
+	 * Fall out quickly if we are passed two identical lists.  This mostly
+	 * catches the case where both are NIL, but that's common enough to
+	 * warrant the test.
+	 */
+	if (keys1 == keys2)
+		return PATHKEYS_EQUAL;
+
 	forboth(key1, keys1, key2, keys2)
 	{
 		PathKey    *pathkey1 = (PathKey *) lfirst(key1);
@@ -354,11 +362,11 @@ compare_pathkeys(List *keys1, List *keys2)
 	 * If we reached the end of only one list, the other is longer and
 	 * therefore not a subset.
 	 */
-	if (key1 == NULL && key2 == NULL)
-		return PATHKEYS_EQUAL;
 	if (key1 != NULL)
 		return PATHKEYS_BETTER1;	/* key1 is longer */
-	return PATHKEYS_BETTER2;	/* key2 is longer */
+	if (key2 != NULL)
+		return PATHKEYS_BETTER2;	/* key2 is longer */
+	return PATHKEYS_EQUAL;
 }
 
 /*
@@ -627,6 +635,15 @@ convert_subquery_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 							exprType((Node *) tle->expr),
 							exprTypmod((Node *) tle->expr),
 							0);
+
+				/*
+				 * Note: it might look funny to be setting sortref = 0 for
+				 * a reference to a volatile sub_eclass.  However, the
+				 * expression is *not* volatile in the outer query: it's
+				 * just a Var referencing whatever the subquery emitted.
+				 * (IOW, the outer query isn't going to re-execute the
+				 * volatile expression itself.)  So this is okay.
+				 */
 				outer_ec =
 					get_eclass_for_sort_expr(root,
 											 outer_expr,
@@ -823,7 +840,7 @@ build_join_pathkeys(PlannerInfo *root,
 /*
  * make_pathkeys_for_sortclauses
  *		Generate a pathkeys list that represents the sort order specified
- *		by a list of SortClauses (GroupClauses will work too!)
+ *		by a list of SortGroupClauses
  *
  * If canonicalize is TRUE, the resulting PathKeys are all in canonical form;
  * otherwise not.  canonicalize should always be TRUE after EquivalenceClass
@@ -832,7 +849,7 @@ build_join_pathkeys(PlannerInfo *root,
  * be able to represent requested pathkeys before the equivalence classes have
  * been created for the query.)
  *
- * 'sortclauses' is a list of SortClause or GroupClause nodes
+ * 'sortclauses' is a list of SortGroupClause nodes
  * 'tlist' is the targetlist to find the referenced tlist entries in
  */
 List *
@@ -846,11 +863,12 @@ make_pathkeys_for_sortclauses(PlannerInfo *root,
 
 	foreach(l, sortclauses)
 	{
-		SortClause *sortcl = (SortClause *) lfirst(l);
+		SortGroupClause *sortcl = (SortGroupClause *) lfirst(l);
 		Expr	   *sortkey;
 		PathKey    *pathkey;
 
 		sortkey = (Expr *) get_sortgroupclause_expr(sortcl, tlist);
+		Assert(OidIsValid(sortcl->sortop));
 		pathkey = make_pathkey_from_sortinfo(root,
 											 sortkey,
 											 sortcl->sortop,

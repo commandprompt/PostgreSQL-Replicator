@@ -15,14 +15,14 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
  *-------------------------------------------------------------------------
  */
 
-#include "postgres.h"
+#include "postgres_fe.h"
 
 #include "port.h"
 
@@ -93,6 +93,18 @@ show_docdir(bool all)
 	if (all)
 		printf("DOCDIR = ");
 	get_doc_path(mypath, path);
+	cleanup_path(path);
+	printf("%s\n", path);
+}
+
+static void
+show_htmldir(bool all)
+{
+	char		path[MAXPGPATH];
+
+	if (all)
+		printf("HTMLDIR = ");
+	get_html_path(mypath, path);
 	cleanup_path(path);
 	printf("%s\n", path);
 }
@@ -369,6 +381,7 @@ typedef struct
 static const InfoItem info_items[] = {
 	{"--bindir", show_bindir},
 	{"--docdir", show_docdir},
+	{"--htmldir", show_htmldir},
 	{"--includedir", show_includedir},
 	{"--pkgincludedir", show_pkgincludedir},
 	{"--includedir-server", show_includedir_server},
@@ -397,10 +410,11 @@ help(void)
 {
 	printf(_("\n%s provides information about the installed version of PostgreSQL.\n\n"), progname);
 	printf(_("Usage:\n"));
-	printf(_("  %s [ OPTION ... ]\n\n"), progname);
+	printf(_("  %s [OPTION]...\n\n"), progname);
 	printf(_("Options:\n"));
 	printf(_("  --bindir              show location of user executables\n"));
 	printf(_("  --docdir              show location of documentation files\n"));
+	printf(_("  --htmldir             show location of HTML documentation files\n"));
 	printf(_("  --includedir          show location of C header files of the client\n"
 			 "                        interfaces\n"));
 	printf(_("  --pkgincludedir       show location of other C header files\n"));
@@ -451,7 +465,7 @@ main(int argc, char **argv)
 	int			j;
 	int			ret;
 
-	set_pglocale_pgservice(argv[0], "pg_config");
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_config"));
 
 	progname = get_progname(argv[0]);
 

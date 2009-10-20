@@ -32,21 +32,26 @@ ifneq (,$(with_system_tzdata))
 override CPPFLAGS += '-DSYSTEMTZDIR="$(with_system_tzdata)"'
 endif
 
-all: SUBSYS.o
+include $(top_srcdir)/src/backend/common.mk
 
 ifeq (,$(with_system_tzdata))
 all: submake-libpgport zic
 endif
 
-SUBSYS.o: $(OBJS)
-	$(LD) $(LDREL) $(LDOUT) SUBSYS.o $(OBJS)
+# We could do this test in the action section:
+#	$(if $(ZIC),$(ZIC),./zic)
+# but gmake versions <= 3.78.1 or perhaps later have a bug
+# that causes a segfault;  gmake 3.81 or later fixes this.
+ifeq (,$(ZIC))
+ZIC= ./zic
+endif
 
 zic: $(ZICOBJS)
 	$(CC) $(CFLAGS) $(ZICOBJS) $(LDFLAGS) $(LIBS) -o $@$(X)
 
 install: all installdirs
 ifeq (,$(with_system_tzdata))
-	./zic -d '$(DESTDIR)$(datadir)/timezone' -p '$(POSIXRULES)' $(TZDATAFILES)
+	$(ZIC) -d '$(DESTDIR)$(datadir)/timezone' -p '$(POSIXRULES)' $(TZDATAFILES)
 endif
 	$(MAKE) -C tznames $@
 
@@ -60,4 +65,4 @@ endif
 	$(MAKE) -C tznames $@
 
 clean distclean maintainer-clean:
-	rm -f SUBSYS.o zic$(X) $(OBJS) $(ZICOBJS)
+	rm -f zic$(X) $(ZICOBJS)

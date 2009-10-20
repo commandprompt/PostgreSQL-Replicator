@@ -34,11 +34,12 @@
   <title>Description of functions</title>
 
   <para>
+   <xref linkend="xml2-functions-table"> shows the functions provided by this module.
    These functions provide straightforward XML parsing and XPath queries.
    All arguments are of type <type>text</>, so for brevity that is not shown.
   </para>
 
-  <table>
+  <table id="xml2-functions-table">
    <title>Functions</title>
    <tgroup cols="2">
     <tbody>
@@ -173,7 +174,7 @@
       <entry>
        <para>
         the name of the <quote>key</> field &mdash; this is just a field to be used as
-        the first column of the output table, i.e. it identifies the record from
+        the first column of the output table, i.e., it identifies the record from
         which each output row came (see note below about multiple values)
        </para>
       </entry>

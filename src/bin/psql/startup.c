@@ -1,16 +1,13 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  */
 #include "postgres_fe.h"
 
 #include <sys/types.h>
-#ifdef USE_SSL
-#include <openssl/ssl.h>
-#endif
 
 #ifndef WIN32
 #include <unistd.h>
@@ -21,12 +18,7 @@
 
 #include "getopt_long.h"
 
-#ifndef HAVE_INT_OPTRESET
-int			optreset;
-#endif
-
 #include <locale.h>
-
 
 #include "command.h"
 #include "common.h"
@@ -78,21 +70,12 @@ struct adhoc_opts
 	bool		single_txn;
 };
 
-static int	parse_version(const char *versionString);
 static void parse_psql_options(int argc, char *argv[],
 				   struct adhoc_opts * options);
 static void process_psqlrc(char *argv0);
 static void process_psqlrc_file(char *filename);
 static void showVersion(void);
 static void EstablishVariableSpace(void);
-
-#ifdef USE_SSL
-static void printSSLInfo(void);
-#endif
-
-#ifdef WIN32
-static void checkWin32Codepage(void);
-#endif
 
 /*
  *
@@ -108,7 +91,7 @@ main(int argc, char *argv[])
 	char	   *password_prompt = NULL;
 	bool		new_pass;
 
-	set_pglocale_pgservice(argv[0], "psql");
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("psql"));
 
 	if (argc > 1)
 	{
@@ -147,15 +130,12 @@ main(int argc, char *argv[])
 	pset.popt.topt.start_table = true;
 	pset.popt.topt.stop_table = true;
 	pset.popt.default_footer = true;
+	/* We must get COLUMNS here before readline() sets it */
+	pset.popt.topt.env_columns = getenv("COLUMNS") ? atoi(getenv("COLUMNS")) : 0;
 
 	pset.notty = (!isatty(fileno(stdin)) || !isatty(fileno(stdout)));
 
-	/* This is obsolete and should be removed sometime. */
-#ifdef PSQL_ALWAYS_GET_PASSWORDS
-	pset.getPassword = true;
-#else
-	pset.getPassword = false;
-#endif
+	pset.getPassword = TRI_DEFAULT;
 
 	EstablishVariableSpace();
 
@@ -185,7 +165,7 @@ main(int argc, char *argv[])
 				options.username);
 	}
 
-	if (pset.getPassword)
+	if (pset.getPassword == TRI_YES)
 		password = simple_prompt(password_prompt, 100, false);
 
 	/* loop until we have a password if requested by backend */
@@ -200,7 +180,7 @@ main(int argc, char *argv[])
 		if (PQstatus(pset.db) == CONNECTION_BAD &&
 			PQconnectionNeedsPassword(pset.db) &&
 			password == NULL &&
-			!feof(stdin))
+			pset.getPassword != TRI_NO)
 		{
 			PQfinish(pset.db);
 			password = simple_prompt(password_prompt, 100, false);
@@ -294,56 +274,9 @@ main(int argc, char *argv[])
 		if (!options.no_psqlrc)
 			process_psqlrc(argv[0]);
 
+		connection_warnings();
 		if (!pset.quiet && !pset.notty)
-		{
-			int			client_ver = parse_version(PG_VERSION);
-
-			if (pset.sversion != client_ver)
-			{
-				const char *server_version;
-				char		server_ver_str[16];
-
-				/* Try to get full text form, might include "devel" etc */
-				server_version = PQparameterStatus(pset.db, "server_version");
-				if (!server_version)
-				{
-					snprintf(server_ver_str, sizeof(server_ver_str),
-							 "%d.%d.%d",
-							 pset.sversion / 10000,
-							 (pset.sversion / 100) % 100,
-							 pset.sversion % 100);
-					server_version = server_ver_str;
-				}
-
-				printf(_("Welcome to %s %s (server %s), the PostgreSQL interactive terminal.\n\n"),
-					   pset.progname, PG_VERSION, server_version);
-			}
-			else
-				printf(_("Welcome to %s %s, the PostgreSQL interactive terminal.\n\n"),
-					   pset.progname, PG_VERSION);
-
-			printf(_("Type:  \\copyright for distribution terms\n"
-					 "       \\h for help with SQL commands\n"
-					 "       \\? for help with psql commands\n"
-				  "       \\g or terminate with semicolon to execute query\n"
-					 "       \\q to quit\n\n"));
-
-			if (pset.sversion / 100 != client_ver / 100)
-				printf(_("WARNING:  You are connected to a server with major version %d.%d,\n"
-						 "but your %s client is major version %d.%d.  Some backslash commands,\n"
-						 "such as \\d, might not work properly.\n\n"),
-					   pset.sversion / 10000, (pset.sversion / 100) % 100,
-					   pset.progname,
-					   client_ver / 10000, (client_ver / 100) % 100);
-
-#ifdef USE_SSL
-			printSSLInfo();
-#endif
-#ifdef WIN32
-			checkWin32Codepage();
-#endif
-		}
-
+			printf(_("Type \"help\" for help.\n\n"));
 		if (!pset.notty)
 			initializeInput(options.no_readline ? 0 : 1);
 		if (options.action_string)		/* -f - was used */
@@ -359,29 +292,6 @@ main(int argc, char *argv[])
 	setQFout(NULL);
 
 	return successResult;
-}
-
-
-/*
- * Convert a version string into a number.
- */
-static int
-parse_version(const char *versionString)
-{
-	int			cnt;
-	int			vmaj,
-				vmin,
-				vrev;
-
-	cnt = sscanf(versionString, "%d.%d.%d", &vmaj, &vmin, &vrev);
-
-	if (cnt < 2)
-		return -1;
-
-	if (cnt == 2)
-		vrev = 0;
-
-	return (100 * vmaj + vmin) * 100 + vrev;
 }
 
 
@@ -421,6 +331,7 @@ parse_psql_options(int argc, char *argv[], struct adhoc_opts * options)
 		{"set", required_argument, NULL, 'v'},
 		{"variable", required_argument, NULL, 'v'},
 		{"version", no_argument, NULL, 'V'},
+		{"no-password", no_argument, NULL, 'w'},
 		{"password", no_argument, NULL, 'W'},
 		{"expanded", no_argument, NULL, 'x'},
 		{"no-psqlrc", no_argument, NULL, 'X'},
@@ -435,7 +346,7 @@ parse_psql_options(int argc, char *argv[], struct adhoc_opts * options)
 
 	memset(options, 0, sizeof *options);
 
-	while ((c = getopt_long(argc, argv, "aAc:d:eEf:F:h:HlL:no:p:P:qR:sStT:U:v:VWxX?1",
+	while ((c = getopt_long(argc, argv, "aAc:d:eEf:F:h:HlL:no:p:P:qR:sStT:U:v:VwWxX?1",
 							long_options, &optindex)) != -1)
 	{
 		switch (c)
@@ -572,8 +483,11 @@ parse_psql_options(int argc, char *argv[], struct adhoc_opts * options)
 			case 'V':
 				showVersion();
 				exit(EXIT_SUCCESS);
+			case 'w':
+				pset.getPassword = TRI_NO;
+				break;
 			case 'W':
-				pset.getPassword = true;
+				pset.getPassword = TRI_YES;
 				break;
 			case 'x':
 				pset.popt.topt.expanded = true;
@@ -686,54 +600,6 @@ showVersion(void)
 #endif
 }
 
-
-
-/*
- * printSSLInfo
- *
- * Prints information about the current SSL connection, if SSL is in use
- */
-#ifdef USE_SSL
-static void
-printSSLInfo(void)
-{
-	int			sslbits = -1;
-	SSL		   *ssl;
-
-	ssl = PQgetssl(pset.db);
-	if (!ssl)
-		return;					/* no SSL */
-
-	SSL_get_cipher_bits(ssl, &sslbits);
-	printf(_("SSL connection (cipher: %s, bits: %i)\n\n"),
-		   SSL_get_cipher(ssl), sslbits);
-}
-#endif
-
-
-/*
- * checkWin32Codepage
- *
- * Prints a warning when win32 console codepage differs from Windows codepage
- */
-#ifdef WIN32
-static void
-checkWin32Codepage(void)
-{
-	unsigned int wincp,
-				concp;
-
-	wincp = GetACP();
-	concp = GetConsoleCP();
-	if (wincp != concp)
-	{
-		printf(_("Warning: Console code page (%u) differs from Windows code page (%u)\n"
-				 "         8-bit characters might not work correctly. See psql reference\n"
-			   "         page \"Notes for Windows users\" for details.\n\n"),
-			   concp, wincp);
-	}
-}
-#endif
 
 
 /*

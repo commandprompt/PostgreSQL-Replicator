@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -19,18 +19,17 @@
 #ifndef PG_STATISTIC_H
 #define PG_STATISTIC_H
 
-/* ----------------
- *		postgres.h contains the system type definitions and the
- *		CATALOG(), BKI_BOOTSTRAP and DATA() sugar words so this file
- *		can be read by both genbki.sh and the C compiler.
- * ----------------
- */
+#include "catalog/genbki.h"
 
 /*
- * Keep C compiler happy with anyarray, below.	This will need to go elsewhere
- * if we ever use anyarray for more than pg_statistic.
+ * The CATALOG definition has to refer to the type of stavaluesN as
+ * "anyarray" so that bootstrap mode recognizes it.  There is no real
+ * typedef for that, however.  Since the fields are potentially-null and
+ * therefore can't be accessed directly from C code, there is no particular
+ * need for the C struct definition to show a valid field type --- instead
+ * we just make it int.
  */
-typedef struct varlena anyarray;
+#define anyarray int
 
 /* ----------------
  *		pg_statistic definition.  cpp turns this into
@@ -128,6 +127,9 @@ CATALOG(pg_statistic,2619) BKI_WITHOUT_OIDS
 } FormData_pg_statistic;
 
 #define STATISTIC_NUM_SLOTS  4
+
+#undef anyarray
+
 
 /* ----------------
  *		Form_pg_statistic corresponds to a pointer to a tuple with
@@ -234,5 +236,24 @@ typedef FormData_pg_statistic *Form_pg_statistic;
  * their actual tuple positions.  The coefficient ranges from +1 to -1.
  */
 #define STATISTIC_KIND_CORRELATION	3
+
+/*
+ * A "most common elements" slot is similar to a "most common values" slot,
+ * except that it stores the most common non-null *elements* of the column
+ * values.	This is useful when the column datatype is an array or some other
+ * type with identifiable elements (for instance, tsvector).  staop contains
+ * the equality operator appropriate to the element type.  stavalues contains
+ * the most common element values, and stanumbers their frequencies.  Unlike
+ * MCV slots, the values are sorted into order (to support binary search
+ * for a particular value).  Since this puts the minimum and maximum
+ * frequencies at unpredictable spots in stanumbers, there are two extra
+ * members of stanumbers, holding copies of the minimum and maximum
+ * frequencies.
+ *
+ * Note: in current usage for tsvector columns, the stavalues elements are of
+ * type text, even though their representation within tsvector is not
+ * exactly text.
+ */
+#define STATISTIC_KIND_MCELEM  4
 
 #endif   /* PG_STATISTIC_H */

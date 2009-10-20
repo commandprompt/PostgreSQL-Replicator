@@ -212,6 +212,7 @@ protocol to make nodes agree on a serializable transactional order.
      server works independently, and periodically communicates with
      the other servers to identify conflicting transactions.  The
      conflicts can be resolved by users or conflict resolution rules.
+     Bucardo is an example of this type of replication.
     </para>
    </listitem>
   </varlistentry>
@@ -285,6 +286,28 @@ protocol to make nodes agree on a serializable transactional order.
    </thead>
 
    <tbody>
+
+    <row>
+     <entry>Most Common Implementation</entry>
+     <entry align="center">NAS</entry>
+     <entry align="center">DRBD</entry>
+     <entry align="center">PITR</entry>
+     <entry align="center">Slony</entry>
+     <entry align="center">pgpool-II</entry>
+     <entry align="center">Bucardo</entry>
+     <entry align="center"></entry>
+    </row>
+
+    <row>
+     <entry>Communication Method</entry>
+     <entry align="center">shared disk</entry>
+     <entry align="center">disk blocks</entry>
+     <entry align="center">WAL</entry>
+     <entry align="center">table rows</entry>
+     <entry align="center">SQL</entry>
+     <entry align="center">table rows</entry>
+     <entry align="center">table rows and row locks</entry>
+    </row>
 
     <row>
      <entry>No special hardware required</entry>
@@ -374,17 +397,6 @@ protocol to make nodes agree on a serializable transactional order.
      <entry align="center">&bull;</entry>
     </row>
 
-    <row>
-     <entry>Communication Method</entry>
-     <entry align="center">shared disk</entry>
-     <entry align="center">disk blocks</entry>
-     <entry align="center">WAL</entry>
-     <entry align="center">table rows</entry>
-     <entry align="center">SQL</entry>
-     <entry align="center">table rows</entry>
-     <entry align="center">table rows and row locks</entry>
-    </row>
-
    </tbody>
   </tgroup>
  </table>
@@ -402,7 +414,7 @@ protocol to make nodes agree on a serializable transactional order.
     <para>
      Data partitioning splits tables into data sets.  Each set can
      be modified by only one server.  For example, data can be
-     partitioned by offices, e.g. London and Paris, with a server
+     partitioned by offices, e.g., London and Paris, with a server
      in each office.  If queries combining London and Paris data
      are necessary, an application can query both servers, or
      master/slave replication can be used to keep a read-only copy

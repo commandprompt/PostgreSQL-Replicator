@@ -3,7 +3,7 @@
  * version.c
  *	 Returns the PostgreSQL version string
  *
- * Copyright (c) 1998-2008, PostgreSQL Global Development Group
+ * Copyright (c) 1998-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *
@@ -20,11 +20,5 @@
 Datum
 pgsql_version(PG_FUNCTION_ARGS)
 {
-	int			n = strlen(PG_VERSION_STR);
-	text	   *ret = (text *) palloc(n + VARHDRSZ);
-
-	SET_VARSIZE(ret, n + VARHDRSZ);
-	memcpy(VARDATA(ret), PG_VERSION_STR, n);
-
-	PG_RETURN_TEXT_P(ret);
+	PG_RETURN_TEXT_P(cstring_to_text(PG_VERSION_STR));
 }

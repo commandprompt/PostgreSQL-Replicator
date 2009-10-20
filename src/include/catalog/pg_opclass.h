@@ -25,7 +25,7 @@
  * AMs support this.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -39,12 +39,7 @@
 #ifndef PG_OPCLASS_H
 #define PG_OPCLASS_H
 
-/* ----------------
- *		postgres.h contains the system type definitions and the
- *		CATALOG(), BKI_BOOTSTRAP and DATA() sugar words so this file
- *		can be read by both genbki.sh and the C compiler.
- * ----------------
- */
+#include "catalog/genbki.h"
 
 /* ----------------
  *		pg_opclass definition.	cpp turns this into
@@ -126,7 +121,14 @@ DATA(insert (	403		interval_ops		PGNSP PGUID 1982 1186 t 0 ));
 DATA(insert (	405		interval_ops		PGNSP PGUID 1983 1186 t 0 ));
 DATA(insert (	403		macaddr_ops			PGNSP PGUID 1984  829 t 0 ));
 DATA(insert (	405		macaddr_ops			PGNSP PGUID 1985  829 t 0 ));
-DATA(insert (	403		name_ops			PGNSP PGUID 1986   19 t 0 ));
+/*
+ * Here's an ugly little hack to save space in the system catalog indexes.
+ * btree doesn't ordinarily allow a storage type different from input type;
+ * but cstring and name are the same thing except for trailing padding,
+ * and we can safely omit that within an index entry.  So we declare the
+ * btree opclass for name as using cstring storage type.
+ */
+DATA(insert (	403		name_ops			PGNSP PGUID 1986   19 t 2275 ));
 DATA(insert (	405		name_ops			PGNSP PGUID 1987   19 t 0 ));
 DATA(insert (	403		numeric_ops			PGNSP PGUID 1988 1700 t 0 ));
 DATA(insert (	405		numeric_ops			PGNSP PGUID 1998 1700 t 0 ));
@@ -135,6 +137,7 @@ DATA(insert OID = 1981 ( 403	oid_ops		PGNSP PGUID 1989   26 t 0 ));
 DATA(insert (	405		oid_ops				PGNSP PGUID 1990   26 t 0 ));
 DATA(insert (	403		oidvector_ops		PGNSP PGUID 1991   30 t 0 ));
 DATA(insert (	405		oidvector_ops		PGNSP PGUID 1992   30 t 0 ));
+DATA(insert (	403		record_ops			PGNSP PGUID 2994 2249 t 0 ));
 DATA(insert (	403		text_ops			PGNSP PGUID 1994   25 t 0 ));
 DATA(insert (	405		text_ops			PGNSP PGUID 1995   25 t 0 ));
 DATA(insert (	403		time_ops			PGNSP PGUID 1996 1083 t 0 ));
@@ -151,7 +154,6 @@ DATA(insert (	405		timestamp_ops		PGNSP PGUID 2040 1114 t 0 ));
 DATA(insert (	403		text_pattern_ops	PGNSP PGUID 2095   25 f 0 ));
 DATA(insert (	403		varchar_pattern_ops PGNSP PGUID 2095   25 f 0 ));
 DATA(insert (	403		bpchar_pattern_ops	PGNSP PGUID 2097 1042 f 0 ));
-DATA(insert (	403		name_pattern_ops	PGNSP PGUID 2098   19 f 0 ));
 DATA(insert (	403		money_ops			PGNSP PGUID 2099  790 t 0 ));
 DATA(insert (	405		bool_ops			PGNSP PGUID 2222   16 t 0 ));
 DATA(insert (	405		bytea_ops			PGNSP PGUID 2223   17 t 0 ));
@@ -164,7 +166,6 @@ DATA(insert (	405		reltime_ops			PGNSP PGUID 2228  703 t 0 ));
 DATA(insert (	405		text_pattern_ops	PGNSP PGUID 2229   25 f 0 ));
 DATA(insert (	405		varchar_pattern_ops PGNSP PGUID 2229   25 f 0 ));
 DATA(insert (	405		bpchar_pattern_ops	PGNSP PGUID 2231 1042 f 0 ));
-DATA(insert (	405		name_pattern_ops	PGNSP PGUID 2232   19 f 0 ));
 DATA(insert (	403		reltime_ops			PGNSP PGUID 2233  703 t 0 ));
 DATA(insert (	403		tinterval_ops		PGNSP PGUID 2234  704 t 0 ));
 DATA(insert (	405		aclitem_ops			PGNSP PGUID 2235 1033 t 0 ));

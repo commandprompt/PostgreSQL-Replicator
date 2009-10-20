@@ -1,7 +1,7 @@
 <!-- $PostgreSQL$ -->
 
 <chapter Id="runtime">
- <title>Operating System Environment</title>
+ <title>Server Setup and Operation</title>
 
  <para>
   This chapter discusses how to set up and run the database server
@@ -76,7 +76,7 @@
    linkend="app-initdb">,<indexterm><primary>initdb</></> which is
    installed with <productname>PostgreSQL</productname>. The desired
    file system location of your database cluster is indicated by the
-   <option>-D</option> option, for example
+   <option>-D</option> option, for example:
 <screen>
 <prompt>$</> <userinput>initdb -D /usr/local/pgsql/data</userinput>
 </screen>
@@ -145,11 +145,12 @@ postgres$ <userinput>initdb -D /usr/local/pgsql/data</userinput>
    Normally, it will just take the locale settings in the environment
    and apply them to the initialized database.  It is possible to
    specify a different locale for the database; more information about
-   that can be found in <xref linkend="locale">.  The sort order used
-   within a particular database cluster is set by
-   <command>initdb</command> and cannot be changed later, short of
-   dumping all data, rerunning <command>initdb</command>, and reloading
-   the data. There is also a performance impact for using locales
+   that can be found in <xref linkend="locale">.  The default sort order used
+   within the particular database cluster is set by
+   <command>initdb</command>, and while you can create new databases using
+   different sort order, the order used in the template databases that initdb
+   creates cannot be changed without dropping and recreating them.
+   There is also a performance impact for using locales
    other than <literal>C</> or <literal>POSIX</>. Therefore, it is
    important to make this choice correctly the first time.
   </para>
@@ -183,7 +184,8 @@ postgres$ <userinput>initdb -D /usr/local/pgsql/data</userinput>
     Specifically, delayed (asynchronous) writes to the <acronym>NFS</>
     server can cause reliability problems;   if possible, mount
     <acronym>NFS</> file systems synchronously (without caching) to avoid
-    this.  (Storage Area Networks (<acronym>SAN</>) use a low-level
+    this.  Also, soft-mounting <acronym>NFS</> is not recommended.
+    (Storage Area Networks (<acronym>SAN</>) use a low-level
     communication protocol rather than <acronym>NFS</>.)
    </para>
 
@@ -380,7 +382,7 @@ FATAL:  could not create TCP/IP listen socket
     </para>
 
     <para>
-     A message like
+     A message like:
 <screen>
 FATAL:  could not create shared memory segment: Invalid argument
 DETAIL:  Failed system call was shmget(key=5440001, size=4011376640, 03600).
@@ -399,7 +401,7 @@ DETAIL:  Failed system call was shmget(key=5440001, size=4011376640, 03600).
     </para>
 
     <para>
-     An error like
+     An error like:
 <screen>
 FATAL:  could not create semaphores: No space left on device
 DETAIL:  Failed system call was semget(5440126, 17, 03600).
@@ -1078,51 +1080,45 @@ set semsys:seminfo_semmsl=32
 
 
    <table id="shared-memory-parameters">
-    <title>Configuration parameters affecting
-    <productname>PostgreSQL</productname>'s shared memory usage</>
+    <title><productname>PostgreSQL</productname> shared memory usage</>
 
     <tgroup cols="2">
      <thead>
       <row>
-       <entry>Name</>
-       <entry>Approximate multiplier (bytes per increment) as of 8.3</>
+       <entry>Usage</>
+       <entry>Approximate shared memory bytes required (as of 8.3)</>
       </row>
      </thead>
 
      <tbody>
       <row>
-       <entry><xref linkend="guc-max-connections"></>
-       <entry>1800 + 270 * <xref linkend="guc-max-locks-per-transaction"></entry>
+       <entry>Connections</>
+       <entry>(1800 + 270 * <xref
+       linkend="guc-max-locks-per-transaction">) * <xref
+       linkend="guc-max-connections"></entry>
       </row>
 
       <row>
-       <entry><xref linkend="guc-autovacuum-max-workers"></>
-       <entry>1800 + 270 * <xref linkend="guc-max-locks-per-transaction"></entry>
+       <entry>Autovacuum workers</>
+       <entry>(1800 + 270 * <xref
+       linkend="guc-max-locks-per-transaction">) * <xref
+       linkend="guc-autovacuum-max-workers"></entry>
       </row>
 
       <row>
-       <entry><xref linkend="guc-max-prepared-transactions"></>
-       <entry>770 + 270 * <xref linkend="guc-max-locks-per-transaction"></entry>
+       <entry>Prepared transactions</>
+       <entry>(770 + 270 * <xref
+       linkend="guc-max-locks-per-transaction">) * <xref linkend="guc-max-prepared-transactions"></entry>
       </row>
 
       <row>
-       <entry><xref linkend="guc-shared-buffers"></>
-       <entry>8400 (assuming 8 kB <symbol>BLCKSZ</>)</entry>
+       <entry>Shared disk buffers</>
+       <entry>(<xref linkend="guc-block-size"> + 208) * <xref linkend="guc-shared-buffers"></entry>
       </row>
 
       <row>
-       <entry><xref linkend="guc-wal-buffers"></>
-       <entry>8200 (assuming 8 kB <symbol>XLOG_BLCKSZ</>)</entry>
-      </row>
-
-      <row>
-       <entry><xref linkend="guc-max-fsm-relations"></>
-       <entry>70</>
-      </row>
-
-      <row>
-       <entry><xref linkend="guc-max-fsm-pages"></>
-       <entry>6</>
+       <entry>WAL buffers</>
+       <entry>(<xref linkend="guc-wal-block-size"> + 8) * <xref linkend="guc-wal-buffers"></entry>
       </row>
 
       <row>
@@ -1132,8 +1128,8 @@ set semsys:seminfo_semmsl=32
      </tbody>
     </tgroup>
    </table>
-  </sect2>
 
+  </sect2>
 
   <sect2>
    <title>Resource Limits</title>
@@ -1305,11 +1301,15 @@ sysctl -w vm.overcommit_memory=2
      <term><systemitem>SIGTERM</systemitem><indexterm><primary>SIGTERM</></></term>
      <listitem>
       <para>
+       This is the <firstterm>Smart Shutdown</firstterm> mode.
        After receiving <systemitem>SIGTERM</systemitem>, the server
        disallows new connections, but lets existing sessions end their
-       work normally. It shuts down only after all of the sessions
-       terminate normally. This is the <firstterm>Smart
-       Shutdown</firstterm>.
+       work normally. It shuts down only after all of the sessions terminate.
+       If the server is in online backup mode, it additionally waits
+       until online backup mode is no longer active.  While backup mode is
+       active, new connections will still be allowed, but only to superusers
+       (this exception allows a superuser to connect to terminate
+       online backup mode).
       </para>
      </listitem>
     </varlistentry>
@@ -1318,11 +1318,13 @@ sysctl -w vm.overcommit_memory=2
      <term><systemitem>SIGINT</systemitem><indexterm><primary>SIGINT</></></term>
      <listitem>
       <para>
+       This is the <firstterm>Fast Shutdown</firstterm> mode.
        The server disallows new connections and sends all existing
        server processes <systemitem>SIGTERM</systemitem>, which will cause them
        to abort their current transactions and exit promptly. It then
-       waits for the server processes to exit and finally shuts down. This is the
-       <firstterm>Fast Shutdown</firstterm>.
+       waits for the server processes to exit and finally shuts down.
+       If the server is in online backup mode, backup mode will be
+       terminated, rendering the backup useless.
       </para>
      </listitem>
     </varlistentry>
@@ -1331,8 +1333,8 @@ sysctl -w vm.overcommit_memory=2
      <term><systemitem>SIGQUIT</systemitem><indexterm><primary>SIGQUIT</></></term>
      <listitem>
       <para>
-      This is the <firstterm>Immediate Shutdown</firstterm>, which
-      will cause the master <command>postgres</command> process to send a
+      This is the <firstterm>Immediate Shutdown</firstterm> mode.
+      The master <command>postgres</command> process will send a
       <systemitem>SIGQUIT</systemitem> to all child processes and exit
       immediately, without properly shutting itself down. The child processes
       likewise exit immediately upon receiving
@@ -1371,6 +1373,14 @@ $ <userinput>kill -INT `head -1 /usr/local/pgsql/data/postmaster.pid`</userinput
     well.
    </para>
   </important>
+
+  <para>
+   To terminate an individual session while allowing other sessions to
+   continue, use <function>pg_terminate_backend()</> (see <xref
+   linkend="functions-admin-signal-table">) or send a
+   <systemitem>SIGTERM</> signal to the child process associated with
+   the session.
+  </para>
  </sect1>
 
  <sect1 id="preventing-server-spoofing">
@@ -1382,7 +1392,7 @@ $ <userinput>kill -INT `head -1 /usr/local/pgsql/data/postmaster.pid`</userinput
 
   <para>
    While the server is running, it is not possible for a malicious user
-   to interfere with client/server communications.  However, when the
+   to take the place of the normal database server.  However, when the
    server is down it is possible for a local user to spoof the normal
    server by starting their own server.  The spoof server could read
    passwords and queries sent by clients, but could not return any data
@@ -1412,9 +1422,9 @@ $ <userinput>kill -INT `head -1 /usr/local/pgsql/data/postmaster.pid`</userinput
    <filename>server.key</filename> (key) and
    <filename>server.crt</filename> (certificate) files (<xref
    linkend="ssl-tcp">). The TCP client must connect using
-   <literal>sslmode='require'</> (<xref linkend="libpq-connect">) and have
-   a <filename>~/.postgresql/root.crt</> SSL certificate (<xref
-   linkend="libpq-ssl">).
+   <literal>sslmode='verify-ca'</> or
+   <literal>'verify-full'</> and have the required certificate
+   files present (<xref linkend="libpq-connect">).
   </para>
  </sect1>
   
@@ -1538,8 +1548,8 @@ $ <userinput>kill -INT `head -1 /usr/local/pgsql/data/postmaster.pid`</userinput
 
    <listitem>
     <para> 
-     It is possible for both the client and server to provide SSL keys
-     or certificates to each other. It takes some extra configuration
+     It is possible for both the client and server to provide SSL
+     certificates to each other. It takes some extra configuration
      on each side, but this provides stronger verification of identity
      than the mere use of passwords. It prevents a computer from
      pretending to be the server just long enough to read the password
@@ -1631,18 +1641,26 @@ $ <userinput>kill -INT `head -1 /usr/local/pgsql/data/postmaster.pid`</userinput
    To start in <acronym>SSL</> mode, the files <filename>server.crt</>
    and <filename>server.key</> must exist in the server's data directory.
    These files should contain the server certificate and private key,
-   respectively. If the private key is protected with a passphrase, the
+   respectively.
+   On Unix systems, the permissions on <filename>server.key</filename> must
+   disallow any access to world or group; achieve this by the command
+   <command>chmod 0600 server.key</command>.  
+   If the private key is protected with a passphrase, the
    server will prompt for the passphrase and will not start until it has
    been entered.
   </para>
 
-  <para>
+  <sect2 id="ssl-client-certificates">
+   <title>Using client certificates</title>
+   <para>
    To require the client to supply a trusted certificate, place
    certificates of the certificate authorities (<acronym>CA</acronym>)
    you trust in the file <filename>root.crt</filename> in the data
-   directory.  A certificate will then be requested from the client during
+   directory, and set the <literal>clientcert</literal> parameter
+   to <literal>1</literal> on the appropriate line(s) in pg_hba.conf.
+   A certificate will then be requested from the client during
    SSL connection startup.  (See <xref linkend="libpq-ssl"> for a
-   description of how to set up client certificates.)  The server will
+   description of how to set up certificates on the client.)  The server will
    verify that the client's certificate is signed by one of the trusted
    certificate authorities.  Certificate Revocation List (CRL) entries
    are also checked if the file <filename>root.crl</filename> exists.
@@ -1653,11 +1671,21 @@ $ <userinput>kill -INT `head -1 /usr/local/pgsql/data/postmaster.pid`</userinput
   </para>
 
   <para>
-   If the <filename>root.crt</filename> file is not present, client
-   certificates will not be requested or checked.  In this mode, SSL
-   provides encrypted communication but not authentication.
+   The <literal>clientcert</literal> option in <filename>pg_hba.conf</>
+   is available for all authentication methods, but only for rows
+   specified as <literal>hostssl</>. Unless specified, the default is
+   not to verify the client certificate.
   </para>
 
+  <para>
+   You can use the authentication method <literal>cert</> to use the
+   client certificate for authenticating users. See
+   <xref linkend="auth-cert"> for details.
+  </para>
+  </sect2>
+
+  <sect2 id="ssl-server-files">
+   <title>SSL Server File Usage</title>
   <para>
    The files <filename>server.key</>, <filename>server.crt</>,
    <filename>root.crt</filename>, and <filename>root.crl</filename>
@@ -1694,7 +1722,7 @@ $ <userinput>kill -INT `head -1 /usr/local/pgsql/data/postmaster.pid`</userinput
      <row>
       <entry><filename>root.crt</></entry>
       <entry>trusted certificate authorities</entry>
-      <entry>requests client certificate; checks certificate is
+      <entry>checks that client certificate is
       signed by a trusted certificate authority</entry>
      </row>
 
@@ -1707,6 +1735,7 @@ $ <userinput>kill -INT `head -1 /usr/local/pgsql/data/postmaster.pid`</userinput
     </tbody>
    </tgroup>
   </table>
+  </sect2>
 
   <sect2 id="ssl-certificate-creation">
    <title>Creating a Self-Signed Certificate</title>
@@ -1730,10 +1759,15 @@ rm privkey.pem
     Enter the old passphrase to unlock the existing key. Now do:
 <programlisting>
 openssl req -x509 -in server.req -text -key server.key -out server.crt
-chmod og-rwx server.key
 </programlisting>
     to turn the certificate into a self-signed certificate and to copy
     the key and certificate to where the server will look for them.
+    Finally do:
+<programlisting>
+chmod og-rwx server.key
+</programlisting>
+    because the server will reject the file if its permissions are more
+    liberal than this.
     For more details on how to create your server private key and
     certificate, refer to the <productname>OpenSSL</> documentation.
    </para>
@@ -1742,7 +1776,9 @@ chmod og-rwx server.key
     A self-signed certificate can be used for testing, but a certificate
     signed by a certificate authority (<acronym>CA</>) (either one of the
     global <acronym>CAs</> or a local one) should be used in production
-    so the client can verify the server's identity.
+    so the client can verify the server's identity. If all the clients
+    are local to the organization, using a local <acronym>CA</> is
+    recommended.
    </para>
 
   </sect2>
@@ -1771,33 +1807,65 @@ chmod og-rwx server.key
    <command>ssh</command> as some user. Then you can establish a secure
    tunnel with a command like this from the client machine:
 <programlisting>
-ssh -L 3333:foo.com:5432 joe@foo.com
+ssh -L 63333:localhost:5432 joe@foo.com
 </programlisting>
-   The first number in the <option>-L</option> argument, 3333, is the
-   port number of your end of the tunnel; it can be chosen freely. The
+   The first number in the <option>-L</option> argument, 63333, is the
+   port number of your end of the tunnel; it can be chosen freely.
+   (IANA reserves ports 49152 through 65535 for private use.)  The
    second number, 5432, is the remote end of the tunnel: the port
-   number your server is using. The name or IP address between
-   the port numbers is the host with the database server you are going
-   to connect to. In order to connect to the database server using
-   this tunnel, you connect to port 3333 on the local machine:
+   number your server is using. The name or IP address between the
+   port numbers is the host with the database server you are going to
+   connect to, as seen from the host you are logging in to, which
+   is <literal>foo.com</literal> in this example. In order to connect
+   to the database server using this tunnel, you connect to port 63333
+   on the local machine:
 <programlisting>
-psql -h localhost -p 3333 postgres
+psql -h localhost -p 63333 postgres
 </programlisting>
    To the database server it will then look as though you are really
-   user <literal>joe@foo.com</literal> and it will use whatever
-   authentication procedure was configured for connections from this
-   user and host.  Note that the server will not think the connection is
-   SSL-encrypted, since in fact it is not encrypted between the
+   user <literal>joe</literal> on host <literal>foo.com</literal>
+   connecting to <literal>localhost</literal> in that context, and it
+   will use whatever authentication procedure was configured for
+   connections from this user and host.  Note that the server will not
+   think the connection is SSL-encrypted, since in fact it is not
+   encrypted between the
    <application>SSH</application> server and the
    <productname>PostgreSQL</productname> server.  This should not pose any
    extra security risk as long as they are on the same machine.
   </para>
+
   <para>
    In order for the
    tunnel setup to succeed you must be allowed to connect via
    <command>ssh</command> as <literal>joe@foo.com</literal>, just
    as if you had attempted to use <command>ssh</command> to set up a
    terminal session.
+  </para>
+
+  <para>
+   You could also have set up the port forwarding as
+<programlisting>
+ssh -L 63333:foo.com:5432 joe@foo.com
+</programlisting>
+   but then the database server will see the connection as coming in
+   on its <literal>foo.com</literal> interface, which is not opened by
+   the default setting <literal>listen_addresses =
+   'localhost'</literal>.  This is usually not what you want.
+  </para>
+
+  <para>
+   If you have to <quote>hop</quote> to the database server via some
+   login host, one possible setup could look like this:
+<programlisting>
+ssh -L 63333:db.foo.com:5432 joe@shell.foo.com
+</programlisting>
+   Note that this way the connection
+   from <literal>shell.foo.com</literal>
+   to <literal>db.foo.com</literal> will not be encrypted by the SSH
+   tunnel.
+   SSH offers quite a few configuration possibilities when the network
+   is restricted in various ways.  Please refer to the SSH
+   documentation for details.
   </para>
 
   <tip>

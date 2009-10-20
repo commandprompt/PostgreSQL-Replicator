@@ -3,7 +3,7 @@
  * lockfuncs.c
  *		Functions for SQL access to various lock-manager capabilities.
  *
- * Copyright (c) 2002-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		$PostgreSQL$
@@ -12,7 +12,6 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -57,7 +56,7 @@ VXIDGetDatum(BackendId bid, LocalTransactionId lxid)
 
 	snprintf(vxidstr, sizeof(vxidstr), "%d/%u", bid, lxid);
 
-	return DirectFunctionCall1(textin, CStringGetDatum(vxidstr));
+	return CStringGetTextDatum(vxidstr);
 }
 
 
@@ -145,7 +144,7 @@ pg_lock_status(PG_FUNCTION_ARGS)
 		const char *locktypename;
 		char		tnbuf[32];
 		Datum		values[14];
-		char		nulls[14];
+		bool		nulls[14];
 		HeapTuple	tuple;
 		Datum		result;
 
@@ -204,7 +203,7 @@ pg_lock_status(PG_FUNCTION_ARGS)
 		 * Form tuple with appropriate data.
 		 */
 		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, ' ', sizeof(nulls));
+		MemSet(nulls, false, sizeof(nulls));
 
 		if (lock->tag.locktag_type <= LOCKTAG_LAST_TYPE)
 			locktypename = LockTagTypeNames[lock->tag.locktag_type];
@@ -214,8 +213,7 @@ pg_lock_status(PG_FUNCTION_ARGS)
 					 (int) lock->tag.locktag_type);
 			locktypename = tnbuf;
 		}
-		values[0] = DirectFunctionCall1(textin,
-										CStringGetDatum(locktypename));
+		values[0] = CStringGetTextDatum(locktypename);
 
 		switch ((LockTagType) lock->tag.locktag_type)
 		{
@@ -223,58 +221,58 @@ pg_lock_status(PG_FUNCTION_ARGS)
 			case LOCKTAG_RELATION_EXTEND:
 				values[1] = ObjectIdGetDatum(lock->tag.locktag_field1);
 				values[2] = ObjectIdGetDatum(lock->tag.locktag_field2);
-				nulls[3] = 'n';
-				nulls[4] = 'n';
-				nulls[5] = 'n';
-				nulls[6] = 'n';
-				nulls[7] = 'n';
-				nulls[8] = 'n';
-				nulls[9] = 'n';
+				nulls[3] = true;
+				nulls[4] = true;
+				nulls[5] = true;
+				nulls[6] = true;
+				nulls[7] = true;
+				nulls[8] = true;
+				nulls[9] = true;
 				break;
 			case LOCKTAG_PAGE:
 				values[1] = ObjectIdGetDatum(lock->tag.locktag_field1);
 				values[2] = ObjectIdGetDatum(lock->tag.locktag_field2);
 				values[3] = UInt32GetDatum(lock->tag.locktag_field3);
-				nulls[4] = 'n';
-				nulls[5] = 'n';
-				nulls[6] = 'n';
-				nulls[7] = 'n';
-				nulls[8] = 'n';
-				nulls[9] = 'n';
+				nulls[4] = true;
+				nulls[5] = true;
+				nulls[6] = true;
+				nulls[7] = true;
+				nulls[8] = true;
+				nulls[9] = true;
 				break;
 			case LOCKTAG_TUPLE:
 				values[1] = ObjectIdGetDatum(lock->tag.locktag_field1);
 				values[2] = ObjectIdGetDatum(lock->tag.locktag_field2);
 				values[3] = UInt32GetDatum(lock->tag.locktag_field3);
 				values[4] = UInt16GetDatum(lock->tag.locktag_field4);
-				nulls[5] = 'n';
-				nulls[6] = 'n';
-				nulls[7] = 'n';
-				nulls[8] = 'n';
-				nulls[9] = 'n';
+				nulls[5] = true;
+				nulls[6] = true;
+				nulls[7] = true;
+				nulls[8] = true;
+				nulls[9] = true;
 				break;
 			case LOCKTAG_TRANSACTION:
 				values[6] = TransactionIdGetDatum(lock->tag.locktag_field1);
-				nulls[1] = 'n';
-				nulls[2] = 'n';
-				nulls[3] = 'n';
-				nulls[4] = 'n';
-				nulls[5] = 'n';
-				nulls[7] = 'n';
-				nulls[8] = 'n';
-				nulls[9] = 'n';
+				nulls[1] = true;
+				nulls[2] = true;
+				nulls[3] = true;
+				nulls[4] = true;
+				nulls[5] = true;
+				nulls[7] = true;
+				nulls[8] = true;
+				nulls[9] = true;
 				break;
 			case LOCKTAG_VIRTUALTRANSACTION:
 				values[5] = VXIDGetDatum(lock->tag.locktag_field1,
 										 lock->tag.locktag_field2);
-				nulls[1] = 'n';
-				nulls[2] = 'n';
-				nulls[3] = 'n';
-				nulls[4] = 'n';
-				nulls[6] = 'n';
-				nulls[7] = 'n';
-				nulls[8] = 'n';
-				nulls[9] = 'n';
+				nulls[1] = true;
+				nulls[2] = true;
+				nulls[3] = true;
+				nulls[4] = true;
+				nulls[6] = true;
+				nulls[7] = true;
+				nulls[8] = true;
+				nulls[9] = true;
 				break;
 			case LOCKTAG_OBJECT:
 			case LOCKTAG_USERLOCK:
@@ -284,11 +282,11 @@ pg_lock_status(PG_FUNCTION_ARGS)
 				values[7] = ObjectIdGetDatum(lock->tag.locktag_field2);
 				values[8] = ObjectIdGetDatum(lock->tag.locktag_field3);
 				values[9] = Int16GetDatum(lock->tag.locktag_field4);
-				nulls[2] = 'n';
-				nulls[3] = 'n';
-				nulls[4] = 'n';
-				nulls[5] = 'n';
-				nulls[6] = 'n';
+				nulls[2] = true;
+				nulls[3] = true;
+				nulls[4] = true;
+				nulls[5] = true;
+				nulls[6] = true;
 				break;
 		}
 
@@ -296,13 +294,11 @@ pg_lock_status(PG_FUNCTION_ARGS)
 		if (proc->pid != 0)
 			values[11] = Int32GetDatum(proc->pid);
 		else
-			nulls[11] = 'n';
-		values[12] = DirectFunctionCall1(textin,
-					  CStringGetDatum(GetLockmodeName(LOCK_LOCKMETHOD(*lock),
-													  mode)));
+			nulls[11] = true;
+		values[12] = CStringGetTextDatum(GetLockmodeName(LOCK_LOCKMETHOD(*lock), mode));
 		values[13] = BoolGetDatum(granted);
 
-		tuple = heap_formtuple(funcctx->tuple_desc, values, nulls);
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 		result = HeapTupleGetDatum(tuple);
 		SRF_RETURN_NEXT(funcctx, result);
 	}

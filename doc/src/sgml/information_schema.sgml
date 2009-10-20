@@ -395,9 +395,12 @@
       <entry><literal>datetime_precision</literal></entry>
       <entry><type>cardinal_number</type></entry>
       <entry>
-       If <literal>data_type</literal> identifies a date, time, or
-       interval type, the declared precision; null for all other data
-       types or if no precision was declared.
+       If <literal>data_type</literal> identifies a date, time,
+       timestamp, or interval type, this column contains the (declared
+       or implicit) fractional seconds precision of the type for this
+       attribute, that is, the number of decimal digits maintained
+       following the decimal point in the seconds value.  For all
+       other data types, this column is null.
       </entry>
      </row>
 
@@ -686,18 +689,11 @@
   </para>
 
   <para>
-   In <productname>PostgreSQL</productname>, you can only grant
-   privileges on entire tables, not individual columns.  Therefore,
-   this view contains the same information as
-   <literal>table_privileges</literal>, just represented through one
-   row for each column in each appropriate table, but it only covers
+   If a privilege has been granted on an entire table, it will show up in
+   this view as a grant for each column, but only for the
    privilege types where column granularity is possible:
    <literal>SELECT</literal>, <literal>INSERT</literal>,
-   <literal>UPDATE</literal>, <literal>REFERENCES</literal>.  If you
-   want to make your applications fit for possible future
-   developments, it is generally the right choice to use this view
-   instead of <literal>table_privileges</literal> if one of those
-   privilege types is concerned.
+   <literal>UPDATE</literal>, <literal>REFERENCES</literal>.
   </para>
 
   <table>
@@ -1002,9 +998,12 @@
       <entry><literal>datetime_precision</literal></entry>
       <entry><type>cardinal_number</type></entry>
       <entry>
-       If <literal>data_type</literal> identifies a date, time, or
-       interval type, the declared precision; null for all other data
-       types or if no precision was declared.
+       If <literal>data_type</literal> identifies a date, time,
+       timestamp, or interval type, this column contains the (declared
+       or implicit) fractional seconds precision of the type for this
+       column, that is, the number of decimal digits maintained
+       following the decimal point in the seconds value.  For all
+       other data types, this column is null.
       </entry>
      </row>
 
@@ -1736,7 +1735,7 @@
       <entry><type>cardinal_number</type></entry>
       <entry>
        If the domain has a numeric type, this column contains the
-       (declared or implicit) precision of the type for this column.
+       (declared or implicit) precision of the type for this domain.
        The precision indicates the number of significant digits.  It
        can be expressed in decimal (base 10) or binary (base 2) terms,
        as specified in the column
@@ -1762,7 +1761,7 @@
       <entry><type>cardinal_number</type></entry>
       <entry>
        If the domain has an exact numeric type, this column contains
-       the (declared or implicit) scale of the type for this column.
+       the (declared or implicit) scale of the type for this domain.
        The scale indicates the number of significant digits to the
        right of the decimal point.  It can be expressed in decimal
        (base 10) or binary (base 2) terms, as specified in the column
@@ -1775,9 +1774,12 @@
       <entry><literal>datetime_precision</literal></entry>
       <entry><type>cardinal_number</type></entry>
       <entry>
-       If the domain has a date, time, or interval type, the declared
-       precision; null for all other data types or if no precision was
-       declared.
+       If <literal>data_type</literal> identifies a date, time,
+       timestamp, or interval type, this column contains the (declared
+       or implicit) fractional seconds precision of the type for this
+       domain, that is, the number of decimal digits maintained
+       following the decimal point in the seconds value.  For all
+       other data types, this column is null.
       </entry>
      </row>
 
@@ -2145,6 +2147,237 @@ ORDER BY c.ordinal_position;
   </table>
  </sect1>
 
+ <sect1 id="infoschema-foreign-data-wrapper-options">
+  <title><literal>foreign_data_wrapper_options</literal></title>
+
+  <para>
+   The view <literal>foreign_data_wrapper_options</literal> contains
+   all the options defined for foreign-data wrappers in the current
+   database.  Only those foreign-data wrappers are shown that the
+   current user has access to (by way of being the owner or having
+   some privilege).
+  </para>
+
+  <table>
+   <title><literal>foreign_data_wrapper_options</literal> Columns</title>
+
+   <tgroup cols="3">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Data Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><literal>foreign_data_wrapper_catalog</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the database that the foreign-data wrapper is defined in (always the current database)</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_data_wrapper_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the foreign-data wrapper</entry>
+     </row>
+
+     <row>
+      <entry><literal>option_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of an option</entry>
+     </row>
+
+     <row>
+      <entry><literal>option_value</literal></entry>
+      <entry><type>character_data</type></entry>
+      <entry>Value of the option</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
+ <sect1 id="infoschema-foreign-data-wrappers">
+  <title><literal>foreign_data_wrappers</literal></title>
+
+  <para>
+   The view <literal>foreign_data_wrappers</literal> contains all
+   foreign-data wrappers defined in the current database.  Only those
+   foreign-data wrappers are shown that the current user has access to
+   (by way of being the owner or having some privilege).
+  </para>
+
+  <table>
+   <title><literal>foreign_data_wrappers</literal> Columns</title>
+
+   <tgroup cols="3">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Data Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><literal>foreign_data_wrapper_catalog</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the database that contains the foreign-data
+      wrapper (always the current database)</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_data_wrapper_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the foreign-data wrapper</entry>
+     </row>
+
+     <row>
+      <entry><literal>authorization_identifier</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the owner of the foreign server</entry>
+     </row>
+
+     <row>
+      <entry><literal>library_name</literal></entry>
+      <entry><type>character_data</type></entry>
+      <entry>File name of the library that implementing this foreign-data wrapper</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_data_wrapper_language</literal></entry>
+      <entry><type>character_data</type></entry>
+      <entry>Language used to implement this foreign-data wrapper</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
+ <sect1 id="infoschema-foreign-server-options">
+  <title><literal>foreign_server_options</literal></title>
+
+  <para>
+   The view <literal>foreign_server_options</literal> contains all the
+   options defined for foreign servers in the current database.  Only
+   those foreign servers are shown that the current user has access to
+   (by way of being the owner or having some privilege).
+  </para>
+
+  <table>
+   <title><literal>foreign_server_options</literal> Columns</title>
+
+   <tgroup cols="3">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Data Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><literal>foreign_server_catalog</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the database that the foreign server is defined in (always the current database)</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_server_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the foreign server</entry>
+     </row>
+
+     <row>
+      <entry><literal>option_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of an option</entry>
+     </row>
+
+     <row>
+      <entry><literal>option_value</literal></entry>
+      <entry><type>character_data</type></entry>
+      <entry>Value of the option</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
+ <sect1 id="infoschema-foreign-servers">
+  <title><literal>foreign_servers</literal></title>
+
+  <para>
+   The view <literal>foreign_servers</literal> contains all foreign
+   servers defined in the current database.  Only those foreign
+   servers are shown that the current user has access to (by way of
+   being the owner or having some privilege).
+  </para>
+
+  <table>
+   <title><literal>foreign_servers</literal> Columns</title>
+
+   <tgroup cols="3">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Data Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><literal>foreign_server_catalog</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the database that the foreign server is defined in (always the current database)</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_server_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the foreign server</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_data_wrapper_catalog</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the database that contains the foreign-data
+      wrapper used by the foreign server (always the current database)</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_data_wrapper_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the foreign-data wrapper used by the foreign server</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_server_type</literal></entry>
+      <entry><type>character_data</type></entry>
+      <entry>Foreign server type information, if specified upon creation</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_server_version</literal></entry>
+      <entry><type>character_data</type></entry>
+      <entry>Foreign server version information, if specified upon creation</entry>
+     </row>
+
+     <row>
+      <entry><literal>authorization_identifier</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the owner of the foreign server</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
  <sect1 id="infoschema-key-column-usage">
   <title><literal>key_column_usage</literal></title>
 
@@ -2496,8 +2729,10 @@ ORDER BY c.ordinal_position;
 
   <para>
    The view <literal>referential_constraints</literal> contains all
-   referential (foreign key) constraints in the current database that
-   belong to a table owned by a currently enabled role.
+   referential (foreign key) constraints in the current database.
+   Only those constraints are shown for which the current user has
+   write access to the referencing table (by way of being the
+   owner or having some privilege other than SELECT).
   </para>
 
   <table>
@@ -2822,9 +3057,9 @@ ORDER BY c.ordinal_position;
       <entry><type>character_data</type></entry>
       <entry>
        Type of the privilege: <literal>SELECT</literal>,
-       <literal>DELETE</literal>, <literal>INSERT</literal>,
-       <literal>UPDATE</literal>, <literal>REFERENCES</literal>,
-       or <literal>TRIGGER</literal>
+       <literal>INSERT</literal>, <literal>UPDATE</literal>,
+       <literal>DELETE</literal>, <literal>TRUNCATE</literal>,
+       <literal>REFERENCES</literal>, or <literal>TRIGGER</literal>
       </entry>
      </row>
 
@@ -2848,15 +3083,11 @@ ORDER BY c.ordinal_position;
   <title><literal>role_usage_grants</literal></title>
 
   <para>
-   The view <literal>role_usage_grants</literal> is meant to identify
+   The view <literal>role_usage_grants</literal> identifies
    <literal>USAGE</literal> privileges granted on various kinds of
-   objects to a currently enabled role or by a currently enabled role.
-   In <productname>PostgreSQL</productname>, this currently only
-   applies to domains, and since domains do not have real privileges
-   in <productname>PostgreSQL</productname>, this view is empty.
+   objects where the grantor or grantee is a currently enabled role.
    Further information can be found under
-   <literal>usage_privileges</literal>.  In the future, this view might
-   contain more useful information.
+   <literal>usage_privileges</literal>.
   </para>
 
   <table>
@@ -2875,13 +3106,13 @@ ORDER BY c.ordinal_position;
      <row>
       <entry><literal>grantor</literal></entry>
       <entry><type>sql_identifier</type></entry>
-      <entry>In the future, the name of the role that granted the privilege</entry>
+      <entry>The name of the role that granted the privilege</entry>
      </row>
 
      <row>
       <entry><literal>grantee</literal></entry>
       <entry><type>sql_identifier</type></entry>
-      <entry>In the future, the name of the role that the privilege was granted to</entry>
+      <entry>The name of the role that the privilege was granted to</entry>
      </row>
 
      <row>
@@ -2893,7 +3124,8 @@ ORDER BY c.ordinal_position;
      <row>
       <entry><literal>object_schema</literal></entry>
       <entry><type>sql_identifier</type></entry>
-      <entry>Name of the schema containing the object</entry>
+      <entry>Name of the schema containing the object, if applicable,
+      else an empty string</entry>
      </row>
 
      <row>
@@ -2905,7 +3137,7 @@ ORDER BY c.ordinal_position;
      <row>
       <entry><literal>object_type</literal></entry>
       <entry><type>character_data</type></entry>
-      <entry>In the future, the type of the object</entry>
+      <entry><literal>DOMAIN</literal> or <literal>FOREIGN DATA WRAPPER</literal> or <literal>FOREIGN SERVER</literal></entry>
      </row>
 
      <row>
@@ -2929,8 +3161,8 @@ ORDER BY c.ordinal_position;
 
   <para>
    The view <literal>routine_privileges</literal> identifies all
-   privileges granted to a currently enabled role or by a currently
-   enabled role.  There is one row for each combination of function,
+   privileges granted on functions to a currently enabled role or by a
+   currently enabled role.  There is one row for each combination of function,
    grantor, and grantee.
   </para>
 
@@ -4272,7 +4504,7 @@ ORDER BY c.ordinal_position;
   <para>
    The view <literal>table_constraints</literal> contains all
    constraints belonging to tables that the current user owns or has
-   some privilege on.
+   some non-SELECT privilege on.
   </para>
 
   <table>
@@ -4408,9 +4640,9 @@ ORDER BY c.ordinal_position;
       <entry><type>character_data</type></entry>
       <entry>
        Type of the privilege: <literal>SELECT</literal>,
-       <literal>DELETE</literal>, <literal>INSERT</literal>,
-       <literal>UPDATE</literal>, <literal>REFERENCES</literal>,
-       or <literal>TRIGGER</literal>
+       <literal>INSERT</literal>, <literal>UPDATE</literal>,
+       <literal>DELETE</literal>, <literal>TRUNCATE</literal>,
+       <literal>REFERENCES</literal>, or <literal>TRIGGER</literal>
       </entry>
      </row>
 
@@ -4549,7 +4781,7 @@ ORDER BY c.ordinal_position;
   <para>
    The view <literal>triggers</literal> contains all triggers defined
    in the current database on tables that the current user owns or has
-   some privilege on.
+   some non-SELECT privilege on.
   </para>
 
   <table>
@@ -4718,15 +4950,20 @@ ORDER BY c.ordinal_position;
   <title><literal>usage_privileges</literal></title>
 
   <para>
-   The view <literal>usage_privileges</literal> is meant to identify
+   The view <literal>usage_privileges</literal> identifies
    <literal>USAGE</literal> privileges granted on various kinds of
    objects to a currently enabled role or by a currently enabled role.
-   In <productname>PostgreSQL</productname>, this currently only
-   applies to domains, and since domains do not have real privileges
+   In <productname>PostgreSQL</productname>, this currently applies to
+   domains, foreign-data wrappers, and foreign servers.  There is one
+   row for each combination of object, grantor, and grantee.
+  </para>
+
+  <para>
+   Since domains do not have real privileges
    in <productname>PostgreSQL</productname>, this view shows implicit
-   <literal>USAGE</literal> privileges granted to
-   <literal>PUBLIC</literal> for all domains.  In the future, this
-   view might contain more useful information.
+   non-grantable <literal>USAGE</literal> privileges granted by the
+   owner to <literal>PUBLIC</literal> for all domains.  The other
+   object types, however, show real privileges.
   </para>
 
   <table>
@@ -4745,13 +4982,13 @@ ORDER BY c.ordinal_position;
      <row>
       <entry><literal>grantor</literal></entry>
       <entry><type>sql_identifier</type></entry>
-      <entry>Currently set to the name of the owner of the object</entry>
+      <entry>Name of the role that granted the privilege</entry>
      </row>
 
      <row>
       <entry><literal>grantee</literal></entry>
       <entry><type>sql_identifier</type></entry>
-      <entry>Currently always <literal>PUBLIC</literal></entry>
+      <entry>Name of the role that the privilege was granted to</entry>
      </row>
 
      <row>
@@ -4763,7 +5000,8 @@ ORDER BY c.ordinal_position;
      <row>
       <entry><literal>object_schema</literal></entry>
       <entry><type>sql_identifier</type></entry>
-      <entry>Name of the schema containing the object</entry>
+      <entry>Name of the schema containing the object, if applicable,
+      else an empty string</entry>
      </row>
 
      <row>
@@ -4775,7 +5013,7 @@ ORDER BY c.ordinal_position;
      <row>
       <entry><literal>object_type</literal></entry>
       <entry><type>character_data</type></entry>
-      <entry>Currently always <literal>DOMAIN</literal></entry>
+      <entry><literal>DOMAIN</literal> or <literal>FOREIGN DATA WRAPPER</literal> or <literal>FOREIGN SERVER</literal></entry>
      </row>
 
      <row>
@@ -4787,7 +5025,120 @@ ORDER BY c.ordinal_position;
      <row>
       <entry><literal>is_grantable</literal></entry>
       <entry><type>character_data</type></entry>
-      <entry>Currently always <literal>NO</literal></entry>
+      <entry><literal>YES</literal> if the privilege is grantable, <literal>NO</literal> if not</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
+ <sect1 id="infoschema-user-mapping-options">
+  <title><literal>user_mapping_options</literal></title>
+
+  <para>
+   The view <literal>user_mapping_options</literal> contains all the
+   options defined for user mappings in the current database.  Only
+   those user mappings are shown where the current user has access to
+   the corresponding foreign server (by way of being the owner or
+   having some privilege).
+  </para>
+
+  <table>
+   <title><literal>user_mapping_options</literal> Columns</title>
+
+   <tgroup cols="3">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Data Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><literal>authorization_identifier</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the user being mapped,
+      or <literal>PUBLIC</literal> if the mapping is public</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_server_catalog</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the database that the foreign server used by this
+      mapping is defined in (always the current database)</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_server_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the foreign server used by this mapping</entry>
+     </row>
+
+     <row>
+      <entry><literal>option_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of an option</entry>
+     </row>
+
+     <row>
+      <entry><literal>option_value</literal></entry>
+      <entry><type>character_data</type></entry>
+      <entry>Value of the option.  This column will show as null
+      unless the current user is the user being mapped, or the mapping
+      is for <literal>PUBLIC</literal> and the current user is the
+      server owner, or the current user is a superuser.  The intent is
+      to protect password information stored as user mapping
+      option.</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
+ <sect1 id="infoschema-user-mappings">
+  <title><literal>user_mappings</literal></title>
+
+  <para>
+   The view <literal>user_mappings</literal> contains all user
+   mappings defined in the current database.  Only those user mappings
+   are shown where the current user has access to the corresponding
+   foreign server (by way of being the owner or having some
+   privilege).
+  </para>
+
+  <table>
+   <title><literal>user_mappings</literal> Columns</title>
+
+   <tgroup cols="3">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Data Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><literal>authorization_identifier</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the user being mapped,
+      or <literal>PUBLIC</literal> if the mapping is public</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_server_catalog</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the database that the foreign server used by this
+      mapping is defined in (always the current database)</entry>
+     </row>
+
+     <row>
+      <entry><literal>foreign_server_name</literal></entry>
+      <entry><type>sql_identifier</type></entry>
+      <entry>Name of the foreign server used by this mapping</entry>
      </row>
     </tbody>
    </tgroup>

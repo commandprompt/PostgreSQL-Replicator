@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -19,12 +19,7 @@
 #ifndef PG_DATABASE_H
 #define PG_DATABASE_H
 
-/* ----------------
- *		postgres.h contains the system type definitions and the
- *		CATALOG(), BKI_BOOTSTRAP and DATA() sugar words so this file
- *		can be read by both genbki.sh and the C compiler.
- * ----------------
- */
+#include "catalog/genbki.h"
 
 /* ----------------
  *		pg_database definition.  cpp turns this into
@@ -38,6 +33,8 @@ CATALOG(pg_database,1262) BKI_SHARED_RELATION
 	NameData	datname;		/* database name */
 	Oid			datdba;			/* owner of database */
 	int4		encoding;		/* character encoding */
+	NameData	datcollate;		/* LC_COLLATE setting */
+	NameData	datctype;		/* LC_CTYPE setting */
 	bool		datistemplate;	/* allowed as CREATE DATABASE template? */
 	bool		datallowconn;	/* new connections allowed? */
 	int4		datconnlimit;	/* max connections allowed (-1=no limit) */
@@ -59,20 +56,22 @@ typedef FormData_pg_database *Form_pg_database;
  *		compiler constants for pg_database
  * ----------------
  */
-#define Natts_pg_database				11
+#define Natts_pg_database				13
 #define Anum_pg_database_datname		1
 #define Anum_pg_database_datdba			2
 #define Anum_pg_database_encoding		3
-#define Anum_pg_database_datistemplate	4
-#define Anum_pg_database_datallowconn	5
-#define Anum_pg_database_datconnlimit	6
-#define Anum_pg_database_datlastsysoid	7
-#define Anum_pg_database_datfrozenxid	8
-#define Anum_pg_database_dattablespace	9
-#define Anum_pg_database_datconfig		10
-#define Anum_pg_database_datacl			11
+#define Anum_pg_database_datcollate		4
+#define Anum_pg_database_datctype		5
+#define Anum_pg_database_datistemplate	6
+#define Anum_pg_database_datallowconn	7
+#define Anum_pg_database_datconnlimit	8
+#define Anum_pg_database_datlastsysoid	9
+#define Anum_pg_database_datfrozenxid	10
+#define Anum_pg_database_dattablespace	11
+#define Anum_pg_database_datconfig		12
+#define Anum_pg_database_datacl			13
 
-DATA(insert OID = 1 (  template1 PGUID ENCODING t t -1 0 0 1663 _null_ _null_ ));
+DATA(insert OID = 1 (  template1 PGUID ENCODING "LC_COLLATE" "LC_CTYPE" t t -1 0 0 1663 _null_ _null_));
 SHDESCR("default template database");
 #define TemplateDbOid			1
 

@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  */
@@ -60,7 +60,5 @@ extern char *psql_scan_slash_option(PsqlScanState state,
 					   bool semicolon);
 
 extern void psql_scan_slash_command_end(PsqlScanState state);
-
-extern void psql_scan_slash_pushback(PsqlScanState state, const char *str);
 
 #endif   /* PSQLSCAN_H */

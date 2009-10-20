@@ -9,7 +9,7 @@
  * context's MemoryContextMethods struct.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -674,6 +674,21 @@ MemoryContextStrdup(MemoryContext context, const char *string)
 	memcpy(nstr, string, len);
 
 	return nstr;
+}
+
+/*
+ * pnstrdup
+ *		Like pstrdup(), but append null byte to a
+ *		not-necessarily-null-terminated input string.
+ */
+char *
+pnstrdup(const char *in, Size len)
+{
+	char	   *out = palloc(len + 1);
+
+	memcpy(out, in, len);
+	out[len] = '\0';
+	return out;
 }
 
 

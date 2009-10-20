@@ -3,7 +3,7 @@
  * pl_funcs.c		- Misc functions for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,7 +14,6 @@
  */
 
 #include "plpgsql.h"
-#include "pl.tab.h"
 
 #include <ctype.h>
 
@@ -229,7 +228,7 @@ plpgsql_ns_additem(int itemtype, int itemno, const char *name)
  *
  * Note that this only searches for variables, not labels.
  *
- * name1 must be non-NULL.  Pass NULL for name2 and/or name3 if parsing a name
+ * name1 must be non-NULL.	Pass NULL for name2 and/or name3 if parsing a name
  * with fewer than three components.
  *
  * If names_used isn't NULL, *names_used receives the number of names
@@ -357,7 +356,7 @@ plpgsql_ns_rename(char *oldname, char *newname)
 
 	ereport(ERROR,
 			(errcode(ERRCODE_UNDEFINED_OBJECT),
-			 errmsg("there is no variable \"%s\" in the current block",
+			 errmsg("variable \"%s\" does not exist in the current block",
 					oldname)));
 }
 
@@ -413,7 +412,7 @@ plpgsql_convert_ident(const char *s, char **output, int numidents)
 			if (*s != '"')		/* should not happen if lexer checked */
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("unterminated \" in name: %s", sstart)));
+					   errmsg("unterminated \" in identifier: %s", sstart)));
 			s++;
 			*cp = '\0';
 			/* Truncate to NAMEDATALEN */
@@ -466,7 +465,7 @@ plpgsql_convert_ident(const char *s, char **output, int numidents)
 const char *
 plpgsql_stmt_typename(PLpgSQL_stmt *stmt)
 {
-	switch (stmt->cmd_type)
+	switch ((enum PLpgSQL_stmt_types) stmt->cmd_type)
 	{
 		case PLPGSQL_STMT_BLOCK:
 			return _("statement block");
@@ -474,6 +473,8 @@ plpgsql_stmt_typename(PLpgSQL_stmt *stmt)
 			return _("assignment");
 		case PLPGSQL_STMT_IF:
 			return "IF";
+		case PLPGSQL_STMT_CASE:
+			return "CASE";
 		case PLPGSQL_STMT_LOOP:
 			return "LOOP";
 		case PLPGSQL_STMT_WHILE:
@@ -482,6 +483,8 @@ plpgsql_stmt_typename(PLpgSQL_stmt *stmt)
 			return _("FOR with integer loop variable");
 		case PLPGSQL_STMT_FORS:
 			return _("FOR over SELECT rows");
+		case PLPGSQL_STMT_FORC:
+			return _("FOR over cursor");
 		case PLPGSQL_STMT_EXIT:
 			return "EXIT";
 		case PLPGSQL_STMT_RETURN:
@@ -524,10 +527,12 @@ static void dump_stmt(PLpgSQL_stmt *stmt);
 static void dump_block(PLpgSQL_stmt_block *block);
 static void dump_assign(PLpgSQL_stmt_assign *stmt);
 static void dump_if(PLpgSQL_stmt_if *stmt);
+static void dump_case(PLpgSQL_stmt_case *stmt);
 static void dump_loop(PLpgSQL_stmt_loop *stmt);
 static void dump_while(PLpgSQL_stmt_while *stmt);
 static void dump_fori(PLpgSQL_stmt_fori *stmt);
 static void dump_fors(PLpgSQL_stmt_fors *stmt);
+static void dump_forc(PLpgSQL_stmt_forc *stmt);
 static void dump_exit(PLpgSQL_stmt_exit *stmt);
 static void dump_return(PLpgSQL_stmt_return *stmt);
 static void dump_return_next(PLpgSQL_stmt_return_next *stmt);
@@ -558,7 +563,7 @@ static void
 dump_stmt(PLpgSQL_stmt *stmt)
 {
 	printf("%3d:", stmt->lineno);
-	switch (stmt->cmd_type)
+	switch ((enum PLpgSQL_stmt_types) stmt->cmd_type)
 	{
 		case PLPGSQL_STMT_BLOCK:
 			dump_block((PLpgSQL_stmt_block *) stmt);
@@ -568,6 +573,9 @@ dump_stmt(PLpgSQL_stmt *stmt)
 			break;
 		case PLPGSQL_STMT_IF:
 			dump_if((PLpgSQL_stmt_if *) stmt);
+			break;
+		case PLPGSQL_STMT_CASE:
+			dump_case((PLpgSQL_stmt_case *) stmt);
 			break;
 		case PLPGSQL_STMT_LOOP:
 			dump_loop((PLpgSQL_stmt_loop *) stmt);
@@ -580,6 +588,9 @@ dump_stmt(PLpgSQL_stmt *stmt)
 			break;
 		case PLPGSQL_STMT_FORS:
 			dump_fors((PLpgSQL_stmt_fors *) stmt);
+			break;
+		case PLPGSQL_STMT_FORC:
+			dump_forc((PLpgSQL_stmt_forc *) stmt);
 			break;
 		case PLPGSQL_STMT_EXIT:
 			dump_exit((PLpgSQL_stmt_exit *) stmt);
@@ -709,6 +720,44 @@ dump_if(PLpgSQL_stmt_if *stmt)
 }
 
 static void
+dump_case(PLpgSQL_stmt_case *stmt)
+{
+	ListCell   *l;
+
+	dump_ind();
+	printf("CASE %d ", stmt->t_varno);
+	if (stmt->t_expr)
+		dump_expr(stmt->t_expr);
+	printf("\n");
+	dump_indent += 6;
+	foreach(l, stmt->case_when_list)
+	{
+		PLpgSQL_case_when *cwt = (PLpgSQL_case_when *) lfirst(l);
+
+		dump_ind();
+		printf("WHEN ");
+		dump_expr(cwt->expr);
+		printf("\n");
+		dump_ind();
+		printf("THEN\n");
+		dump_indent += 2;
+		dump_stmts(cwt->stmts);
+		dump_indent -= 2;
+	}
+	if (stmt->have_else)
+	{
+		dump_ind();
+		printf("ELSE\n");
+		dump_indent += 2;
+		dump_stmts(stmt->else_stmts);
+		dump_indent -= 2;
+	}
+	dump_indent -= 6;
+	dump_ind();
+	printf("    ENDCASE\n");
+}
+
+static void
 dump_loop(PLpgSQL_stmt_loop *stmt)
 {
 	dump_ind();
@@ -776,6 +825,29 @@ dump_fors(PLpgSQL_stmt_fors *stmt)
 }
 
 static void
+dump_forc(PLpgSQL_stmt_forc *stmt)
+{
+	dump_ind();
+	printf("FORC %s ", stmt->rec->refname);
+	printf("curvar=%d\n", stmt->curvar);
+
+	dump_indent += 2;
+	if (stmt->argquery != NULL)
+	{
+		dump_ind();
+		printf("  arguments = ");
+		dump_expr(stmt->argquery);
+		printf("\n");
+	}
+	dump_indent -= 2;
+
+	dump_stmts(stmt->body);
+
+	dump_ind();
+	printf("    ENDFORC\n");
+}
+
+static void
 dump_open(PLpgSQL_stmt_open *stmt)
 {
 	dump_ind();
@@ -821,12 +893,12 @@ dump_fetch(PLpgSQL_stmt_fetch *stmt)
 		if (stmt->rec != NULL)
 		{
 			dump_ind();
-			printf("    target = %d %s\n", stmt->rec->recno, stmt->rec->refname);
+			printf("    target = %d %s\n", stmt->rec->dno, stmt->rec->refname);
 		}
 		if (stmt->row != NULL)
 		{
 			dump_ind();
-			printf("    target = %d %s\n", stmt->row->rowno, stmt->row->refname);
+			printf("    target = %d %s\n", stmt->row->dno, stmt->row->refname);
 		}
 		dump_indent -= 2;
 	}
@@ -934,9 +1006,37 @@ static void
 dump_return_query(PLpgSQL_stmt_return_query *stmt)
 {
 	dump_ind();
-	printf("RETURN QUERY ");
-	dump_expr(stmt->query);
-	printf("\n");
+	if (stmt->query)
+	{
+		printf("RETURN QUERY ");
+		dump_expr(stmt->query);
+		printf("\n");
+	}
+	else
+	{
+		printf("RETURN QUERY EXECUTE ");
+		dump_expr(stmt->dynquery);
+		printf("\n");
+		if (stmt->params != NIL)
+		{
+			ListCell   *lc;
+			int			i;
+
+			dump_indent += 2;
+			dump_ind();
+			printf("    USING\n");
+			dump_indent += 2;
+			i = 1;
+			foreach(lc, stmt->params)
+			{
+				dump_ind();
+				printf("    parameter $%d: ", i++);
+				dump_expr((PLpgSQL_expr *) lfirst(lc));
+				printf("\n");
+			}
+			dump_indent -= 4;
+		}
+	}
 }
 
 static void
@@ -946,7 +1046,12 @@ dump_raise(PLpgSQL_stmt_raise *stmt)
 	int			i = 0;
 
 	dump_ind();
-	printf("RAISE '%s'\n", stmt->message);
+	printf("RAISE level=%d", stmt->elog_level);
+	if (stmt->condname)
+		printf(" condname='%s'", stmt->condname);
+	if (stmt->message)
+		printf(" message='%s'", stmt->message);
+	printf("\n");
 	dump_indent += 2;
 	foreach(lc, stmt->params)
 	{
@@ -954,6 +1059,36 @@ dump_raise(PLpgSQL_stmt_raise *stmt)
 		printf("    parameter %d: ", i++);
 		dump_expr((PLpgSQL_expr *) lfirst(lc));
 		printf("\n");
+	}
+	if (stmt->options)
+	{
+		dump_ind();
+		printf("    USING\n");
+		dump_indent += 2;
+		foreach(lc, stmt->options)
+		{
+			PLpgSQL_raise_option *opt = (PLpgSQL_raise_option *) lfirst(lc);
+
+			dump_ind();
+			switch (opt->opt_type)
+			{
+				case PLPGSQL_RAISEOPTION_ERRCODE:
+					printf("    ERRCODE = ");
+					break;
+				case PLPGSQL_RAISEOPTION_MESSAGE:
+					printf("    MESSAGE = ");
+					break;
+				case PLPGSQL_RAISEOPTION_DETAIL:
+					printf("    DETAIL = ");
+					break;
+				case PLPGSQL_RAISEOPTION_HINT:
+					printf("    HINT = ");
+					break;
+			}
+			dump_expr(opt->expr);
+			printf("\n");
+		}
+		dump_indent -= 2;
 	}
 	dump_indent -= 2;
 }
@@ -972,14 +1107,14 @@ dump_execsql(PLpgSQL_stmt_execsql *stmt)
 		dump_ind();
 		printf("    INTO%s target = %d %s\n",
 			   stmt->strict ? " STRICT" : "",
-			   stmt->rec->recno, stmt->rec->refname);
+			   stmt->rec->dno, stmt->rec->refname);
 	}
 	if (stmt->row != NULL)
 	{
 		dump_ind();
 		printf("    INTO%s target = %d %s\n",
 			   stmt->strict ? " STRICT" : "",
-			   stmt->row->rowno, stmt->row->refname);
+			   stmt->row->dno, stmt->row->refname);
 	}
 	dump_indent -= 2;
 }
@@ -998,14 +1133,32 @@ dump_dynexecute(PLpgSQL_stmt_dynexecute *stmt)
 		dump_ind();
 		printf("    INTO%s target = %d %s\n",
 			   stmt->strict ? " STRICT" : "",
-			   stmt->rec->recno, stmt->rec->refname);
+			   stmt->rec->dno, stmt->rec->refname);
 	}
 	if (stmt->row != NULL)
 	{
 		dump_ind();
 		printf("    INTO%s target = %d %s\n",
 			   stmt->strict ? " STRICT" : "",
-			   stmt->row->rowno, stmt->row->refname);
+			   stmt->row->dno, stmt->row->refname);
+	}
+	if (stmt->params != NIL)
+	{
+		ListCell   *lc;
+		int			i;
+
+		dump_ind();
+		printf("    USING\n");
+		dump_indent += 2;
+		i = 1;
+		foreach(lc, stmt->params)
+		{
+			dump_ind();
+			printf("    parameter %d: ", i++);
+			dump_expr((PLpgSQL_expr *) lfirst(lc));
+			printf("\n");
+		}
+		dump_indent -= 2;
 	}
 	dump_indent -= 2;
 }
@@ -1014,12 +1167,30 @@ static void
 dump_dynfors(PLpgSQL_stmt_dynfors *stmt)
 {
 	dump_ind();
-	printf("FORS %s EXECUTE ", (stmt->rec != NULL) ? stmt->rec->refname : stmt->row->refname);
+	printf("FORS %s EXECUTE ",
+		   (stmt->rec != NULL) ? stmt->rec->refname : stmt->row->refname);
 	dump_expr(stmt->query);
 	printf("\n");
+	if (stmt->params != NIL)
+	{
+		ListCell   *lc;
+		int			i;
 
+		dump_indent += 2;
+		dump_ind();
+		printf("    USING\n");
+		dump_indent += 2;
+		i = 1;
+		foreach(lc, stmt->params)
+		{
+			dump_ind();
+			printf("    parameter $%d: ", i++);
+			dump_expr((PLpgSQL_expr *) lfirst(lc));
+			printf("\n");
+		}
+		dump_indent -= 4;
+	}
 	dump_stmts(stmt->body);
-
 	dump_ind();
 	printf("    ENDFORS\n");
 }

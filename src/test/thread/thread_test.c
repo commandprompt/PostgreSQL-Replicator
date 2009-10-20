@@ -3,7 +3,7 @@
  * test_thread_funcs.c
  *		libc thread test program
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	$PostgreSQL$
@@ -47,6 +47,10 @@ typedef char bool;
 #include <fcntl.h>
 #include <errno.h>
 
+/* CYGWIN requires this for MAXHOSTNAMELEN */
+#ifdef __CYGWIN__
+#include <sys/param.h>
+#endif
 
 /******************************************************************
  * Windows Hacks

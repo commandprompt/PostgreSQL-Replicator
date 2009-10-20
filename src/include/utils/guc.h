@@ -4,7 +4,7 @@
  * External declarations pertaining to backend/utils/misc/guc.c and
  * backend/utils/misc/guc-file.l
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  * Written by Peter Eisentraut <peter_e@gmx.net>.
  *
  * $PostgreSQL$
@@ -93,10 +93,22 @@ typedef enum
 	PGC_S_SESSION				/* SET command */
 } GucSource;
 
+/*
+ * Enum values are made up of an array of name-value pairs
+ */
+struct config_enum_entry
+{
+	const char *name;
+	int			val;
+	bool		hidden;
+};
+
+
 typedef const char *(*GucStringAssignHook) (const char *newval, bool doit, GucSource source);
 typedef bool (*GucBoolAssignHook) (bool newval, bool doit, GucSource source);
 typedef bool (*GucIntAssignHook) (int newval, bool doit, GucSource source);
 typedef bool (*GucRealAssignHook) (double newval, bool doit, GucSource source);
+typedef bool (*GucEnumAssignHook) (int newval, bool doit, GucSource source);
 
 typedef const char *(*GucShowHook) (void);
 
@@ -111,13 +123,38 @@ typedef enum
 #define GUC_QUALIFIER_SEPARATOR '.'
 #define DEF_FORWARDER_PORT 7777
 
+/*
+ * bit values in "flags" of a GUC variable
+ */
+#define GUC_LIST_INPUT			0x0001	/* input can be list format */
+#define GUC_LIST_QUOTE			0x0002	/* double-quote list elements */
+#define GUC_NO_SHOW_ALL			0x0004	/* exclude from SHOW ALL */
+#define GUC_NO_RESET_ALL		0x0008	/* exclude from RESET ALL */
+#define GUC_REPORT				0x0010	/* auto-report changes to client */
+#define GUC_NOT_IN_SAMPLE		0x0020	/* not in postgresql.conf.sample */
+#define GUC_DISALLOW_IN_FILE	0x0040	/* can't set in postgresql.conf */
+#define GUC_CUSTOM_PLACEHOLDER	0x0080	/* placeholder for custom variable */
+#define GUC_SUPERUSER_ONLY		0x0100	/* show only to superusers */
+#define GUC_IS_NAME				0x0200	/* limit string to NAMEDATALEN-1 */
+
+#define GUC_UNIT_KB				0x0400	/* value is in kilobytes */
+#define GUC_UNIT_BLOCKS			0x0800	/* value is in blocks */
+#define GUC_UNIT_XBLOCKS		0x0C00	/* value is in xlog blocks */
+#define GUC_UNIT_MEMORY			0x0C00	/* mask for KB, BLOCKS, XBLOCKS */
+
+#define GUC_UNIT_MS				0x1000	/* value is in milliseconds */
+#define GUC_UNIT_S				0x2000	/* value is in seconds */
+#define GUC_UNIT_MIN			0x4000	/* value is in minutes */
+#define GUC_UNIT_TIME			0x7000	/* mask for MS, S, MIN */
+
+#define GUC_NOT_WHILE_SEC_DEF	0x8000	/* can't change inside sec-def func */
+
 /* GUC vars that are actually declared in guc.c, rather than elsewhere */
 extern bool log_duration;
 extern bool Debug_print_plan;
 extern bool Debug_print_parse;
 extern bool Debug_print_rewritten;
 extern bool Debug_pretty_print;
-extern bool Explain_pretty_print;
 
 extern bool log_parser_stats;
 extern bool log_planner_stats;
@@ -154,7 +191,9 @@ extern void DefineCustomBoolVariable(
 						 const char *short_desc,
 						 const char *long_desc,
 						 bool *valueAddr,
+						 bool bootValue,
 						 GucContext context,
+						 int flags,
 						 GucBoolAssignHook assign_hook,
 						 GucShowHook show_hook);
 
@@ -163,9 +202,11 @@ extern void DefineCustomIntVariable(
 						const char *short_desc,
 						const char *long_desc,
 						int *valueAddr,
+						int bootValue,
 						int minValue,
 						int maxValue,
 						GucContext context,
+						int flags,
 						GucIntAssignHook assign_hook,
 						GucShowHook show_hook);
 
@@ -174,9 +215,11 @@ extern void DefineCustomRealVariable(
 						 const char *short_desc,
 						 const char *long_desc,
 						 double *valueAddr,
+						 double bootValue,
 						 double minValue,
 						 double maxValue,
 						 GucContext context,
+						 int flags,
 						 GucRealAssignHook assign_hook,
 						 GucShowHook show_hook);
 
@@ -185,9 +228,23 @@ extern void DefineCustomStringVariable(
 						   const char *short_desc,
 						   const char *long_desc,
 						   char **valueAddr,
+						   const char *bootValue,
 						   GucContext context,
+						   int flags,
 						   GucStringAssignHook assign_hook,
 						   GucShowHook show_hook);
+
+extern void DefineCustomEnumVariable(
+						 const char *name,
+						 const char *short_desc,
+						 const char *long_desc,
+						 int *valueAddr,
+						 int bootValue,
+						 const struct config_enum_entry * options,
+						 GucContext context,
+						 int flags,
+						 GucEnumAssignHook assign_hook,
+						 GucShowHook show_hook);
 
 extern void EmitWarningsOnPlaceholders(const char *className);
 
@@ -203,6 +260,9 @@ extern int	NewGUCNestLevel(void);
 extern void AtEOXact_GUC(bool isCommit, int nestLevel);
 extern void BeginReportingGUCOptions(void);
 extern void ParseLongOption(const char *string, char **name, char **value);
+extern bool parse_int(const char *value, int *result, int flags,
+		  const char **hintmsg);
+extern bool parse_real(const char *value, double *result);
 extern bool set_config_option(const char *name, const char *value,
 				  GucContext context, GucSource source,
 				  GucAction action, bool changeVal);
@@ -243,16 +303,12 @@ extern const char *assign_default_tablespace(const char *newval,
 extern const char *assign_temp_tablespaces(const char *newval,
 						bool doit, GucSource source);
 
-/* in utils/adt/regexp.c */
-extern const char *assign_regex_flavor(const char *value,
-					bool doit, GucSource source);
-
 /* in catalog/namespace.c */
 extern const char *assign_search_path(const char *newval,
 				   bool doit, GucSource source);
 
 /* in access/transam/xlog.c */
-extern const char *assign_xlog_sync_method(const char *method,
+extern bool assign_xlog_sync_method(int newval,
 						bool doit, GucSource source);
 
 #endif   /* GUC_H */

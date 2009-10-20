@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -19,14 +19,8 @@
 #ifndef PG_AGGREGATE_H
 #define PG_AGGREGATE_H
 
+#include "catalog/genbki.h"
 #include "nodes/pg_list.h"
-
-/* ----------------
- *		postgres.h contains the system type definitions and the
- *		CATALOG(), BKI_BOOTSTRAP and DATA() sugar words so this file
- *		can be read by both genbki.sh and the C compiler.
- * ----------------
- */
 
 /* ----------------------------------------------------------------
  *		pg_aggregate definition.
@@ -225,6 +219,9 @@ DATA(insert ( 2243 bitor		  -					0	1560	_null_ ));
 
 /* xml */
 DATA(insert ( 2901 xmlconcat2	  -					0	142		_null_ ));
+
+/* array */
+DATA(insert ( 2335	array_agg_transfn	array_agg_finalfn		0	2281	_null_ ));
 
 /*
  * prototypes for functions in pg_aggregate.c

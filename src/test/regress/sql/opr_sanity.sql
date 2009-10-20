@@ -25,7 +25,7 @@ create function binary_coercible(oid, oid) returns bool as $$
 SELECT ($1 = $2) OR
  EXISTS(select 1 from pg_catalog.pg_cast where
         castsource = $1 and casttarget = $2 and
-        castfunc = 0 and castcontext = 'i') OR
+        castmethod = 'b' and castcontext = 'i') OR
  ($2 = 'pg_catalog.anyarray'::pg_catalog.regtype AND
   EXISTS(select 1 from pg_catalog.pg_type where
          oid = $1 and typelem != 0 and typlen = -1))
@@ -37,7 +37,7 @@ create function physically_coercible(oid, oid) returns bool as $$
 SELECT ($1 = $2) OR
  EXISTS(select 1 from pg_catalog.pg_cast where
         castsource = $1 and casttarget = $2 and
-        castfunc = 0) OR
+        castmethod = 'b') OR
  ($2 = 'pg_catalog.anyarray'::pg_catalog.regtype AND
   EXISTS(select 1 from pg_catalog.pg_type where
          oid = $1 and typelem != 0 and typlen = -1))
@@ -51,11 +51,37 @@ SELECT p1.oid, p1.proname
 FROM pg_proc as p1
 WHERE p1.prolang = 0 OR p1.prorettype = 0 OR
        p1.pronargs < 0 OR
+       p1.pronargdefaults < 0 OR
+       p1.pronargdefaults > p1.pronargs OR
        array_lower(p1.proargtypes, 1) != 0 OR
        array_upper(p1.proargtypes, 1) != p1.pronargs-1 OR
        0::oid = ANY (p1.proargtypes) OR
        procost <= 0 OR
        CASE WHEN proretset THEN prorows <= 0 ELSE prorows != 0 END;
+
+-- prosrc should never be null or empty
+SELECT p1.oid, p1.proname
+FROM pg_proc as p1
+WHERE prosrc IS NULL OR prosrc = '' OR prosrc = '-';
+
+-- proiswindow shouldn't be set together with proisagg or proretset
+SELECT p1.oid, p1.proname
+FROM pg_proc AS p1
+WHERE proiswindow AND (proisagg OR proretset);
+
+-- pronargdefaults should be 0 iff proargdefaults is null
+SELECT p1.oid, p1.proname
+FROM pg_proc AS p1
+WHERE (pronargdefaults <> 0) != (proargdefaults IS NOT NULL);
+
+-- probin should be non-empty for C functions, null everywhere else
+SELECT p1.oid, p1.proname
+FROM pg_proc as p1
+WHERE prolang = 13 AND (probin IS NULL OR probin = '' OR probin = '-');
+
+SELECT p1.oid, p1.proname
+FROM pg_proc as p1
+WHERE prolang != 13 AND probin IS NOT NULL;
 
 -- Look for conflicting proc definitions (same names and input datatypes).
 -- (This test should be dead code now that we have the unique index
@@ -107,7 +133,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.prorettype < p2.prorettype);
+    (p1.prorettype < p2.prorettype)
+ORDER BY 1, 2;
 
 SELECT DISTINCT p1.proargtypes[0], p2.proargtypes[0]
 FROM pg_proc AS p1, pg_proc AS p2
@@ -115,7 +142,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.proargtypes[0] < p2.proargtypes[0]);
+    (p1.proargtypes[0] < p2.proargtypes[0])
+ORDER BY 1, 2;
 
 SELECT DISTINCT p1.proargtypes[1], p2.proargtypes[1]
 FROM pg_proc AS p1, pg_proc AS p2
@@ -123,7 +151,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.proargtypes[1] < p2.proargtypes[1]);
+    (p1.proargtypes[1] < p2.proargtypes[1])
+ORDER BY 1, 2;
 
 SELECT DISTINCT p1.proargtypes[2], p2.proargtypes[2]
 FROM pg_proc AS p1, pg_proc AS p2
@@ -131,7 +160,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.proargtypes[2] < p2.proargtypes[2]);
+    (p1.proargtypes[2] < p2.proargtypes[2])
+ORDER BY 1, 2;
 
 SELECT DISTINCT p1.proargtypes[3], p2.proargtypes[3]
 FROM pg_proc AS p1, pg_proc AS p2
@@ -139,7 +169,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.proargtypes[3] < p2.proargtypes[3]);
+    (p1.proargtypes[3] < p2.proargtypes[3])
+ORDER BY 1, 2;
 
 SELECT DISTINCT p1.proargtypes[4], p2.proargtypes[4]
 FROM pg_proc AS p1, pg_proc AS p2
@@ -147,7 +178,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.proargtypes[4] < p2.proargtypes[4]);
+    (p1.proargtypes[4] < p2.proargtypes[4])
+ORDER BY 1, 2;
 
 SELECT DISTINCT p1.proargtypes[5], p2.proargtypes[5]
 FROM pg_proc AS p1, pg_proc AS p2
@@ -155,7 +187,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.proargtypes[5] < p2.proargtypes[5]);
+    (p1.proargtypes[5] < p2.proargtypes[5])
+ORDER BY 1, 2;
 
 SELECT DISTINCT p1.proargtypes[6], p2.proargtypes[6]
 FROM pg_proc AS p1, pg_proc AS p2
@@ -163,7 +196,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.proargtypes[6] < p2.proargtypes[6]);
+    (p1.proargtypes[6] < p2.proargtypes[6])
+ORDER BY 1, 2;
 
 SELECT DISTINCT p1.proargtypes[7], p2.proargtypes[7]
 FROM pg_proc AS p1, pg_proc AS p2
@@ -171,7 +205,8 @@ WHERE p1.oid != p2.oid AND
     p1.prosrc = p2.prosrc AND
     p1.prolang = 12 AND p2.prolang = 12 AND
     NOT p1.proisagg AND NOT p2.proisagg AND
-    (p1.proargtypes[7] < p2.proargtypes[7]);
+    (p1.proargtypes[7] < p2.proargtypes[7])
+ORDER BY 1, 2;
 
 -- Look for functions that return type "internal" and do not have any
 -- "internal" argument.  Such a function would be a security hole since
@@ -191,7 +226,16 @@ WHERE p1.prorettype = 'internal'::regtype AND NOT
 
 SELECT *
 FROM pg_cast c
-WHERE castsource = 0 OR casttarget = 0 OR castcontext NOT IN ('e', 'a', 'i');
+WHERE castsource = 0 OR casttarget = 0 OR castcontext NOT IN ('e', 'a', 'i')
+    OR castmethod NOT IN ('f', 'b' ,'i');
+
+-- Check that castfunc is nonzero only for cast methods that need a function,
+-- and zero otherwise
+
+SELECT *
+FROM pg_cast c
+WHERE (castmethod = 'f' AND castfunc = 0)
+   OR (castmethod IN ('b', 'i') AND castfunc <> 0);
 
 -- Look for casts to/from the same type that aren't length coercion functions.
 -- (We assume they are length coercions if they take multiple arguments.)
@@ -244,9 +288,9 @@ WHERE c.castfunc = p.oid AND
 
 SELECT *
 FROM pg_cast c
-WHERE c.castfunc = 0 AND
+WHERE c.castmethod = 'b' AND
     NOT EXISTS (SELECT 1 FROM pg_cast k
-                WHERE k.castfunc = 0 AND
+                WHERE k.castmethod = 'b' AND
                     k.castsource = c.casttarget AND
                     k.casttarget = c.castsource);
 
@@ -421,18 +465,21 @@ WHERE p1.oprrest = p2.oid AND
 -- If oprjoin is set, the operator must be a binary boolean op,
 -- and it must link to a proc with the right signature
 -- to be a join selectivity estimator.
--- The proc signature we want is: float8 proc(internal, oid, internal, int2)
+-- The proc signature we want is: float8 proc(internal, oid, internal, int2, internal)
+-- (Note: the old signature with only 4 args is still allowed, but no core
+-- estimator should be using it.)
 
 SELECT p1.oid, p1.oprname, p2.oid, p2.proname
 FROM pg_operator AS p1, pg_proc AS p2
 WHERE p1.oprjoin = p2.oid AND
     (p1.oprkind != 'b' OR p1.oprresult != 'bool'::regtype OR
      p2.prorettype != 'float8'::regtype OR p2.proretset OR
-     p2.pronargs != 4 OR
+     p2.pronargs != 5 OR
      p2.proargtypes[0] != 'internal'::regtype OR
      p2.proargtypes[1] != 'oid'::regtype OR
      p2.proargtypes[2] != 'internal'::regtype OR
-     p2.proargtypes[3] != 'int2'::regtype);
+     p2.proargtypes[3] != 'int2'::regtype OR
+     p2.proargtypes[4] != 'internal'::regtype);
 
 -- **************** pg_aggregate ****************
 
@@ -746,24 +793,46 @@ WHERE p1.amprocfamily = p3.oid AND p3.opfmethod = p2.oid AND
 
 -- Detect missing pg_amproc entries: should have as many support functions
 -- as AM expects for each datatype combination supported by the opfamily.
+-- GIN is a special case because it has an optional support function.
 
 SELECT p1.amname, p2.opfname, p3.amproclefttype, p3.amprocrighttype
 FROM pg_am AS p1, pg_opfamily AS p2, pg_amproc AS p3
 WHERE p2.opfmethod = p1.oid AND p3.amprocfamily = p2.oid AND
+    p1.amname <> 'gin' AND
     p1.amsupport != (SELECT count(*) FROM pg_amproc AS p4
                      WHERE p4.amprocfamily = p2.oid AND
                            p4.amproclefttype = p3.amproclefttype AND
                            p4.amprocrighttype = p3.amprocrighttype);
 
+-- Similar check for GIN, allowing one optional proc
+
+SELECT p1.amname, p2.opfname, p3.amproclefttype, p3.amprocrighttype
+FROM pg_am AS p1, pg_opfamily AS p2, pg_amproc AS p3
+WHERE p2.opfmethod = p1.oid AND p3.amprocfamily = p2.oid AND
+    p1.amname = 'gin' AND
+    p1.amsupport - 1 >  (SELECT count(*) FROM pg_amproc AS p4
+                         WHERE p4.amprocfamily = p2.oid AND
+                           p4.amproclefttype = p3.amproclefttype AND
+                           p4.amprocrighttype = p3.amprocrighttype);
+
 -- Also, check if there are any pg_opclass entries that don't seem to have
--- pg_amproc support.
+-- pg_amproc support.  Again, GIN has to be checked separately.
 
 SELECT amname, opcname, count(*)
 FROM pg_am am JOIN pg_opclass op ON opcmethod = am.oid
      LEFT JOIN pg_amproc p ON amprocfamily = opcfamily AND
          amproclefttype = amprocrighttype AND amproclefttype = opcintype
+WHERE am.amname <> 'gin'
 GROUP BY amname, amsupport, opcname, amprocfamily
 HAVING count(*) != amsupport OR amprocfamily IS NULL;
+
+SELECT amname, opcname, count(*)
+FROM pg_am am JOIN pg_opclass op ON opcmethod = am.oid
+     LEFT JOIN pg_amproc p ON amprocfamily = opcfamily AND
+         amproclefttype = amprocrighttype AND amproclefttype = opcintype
+WHERE am.amname = 'gin'
+GROUP BY amname, amsupport, opcname, amprocfamily
+HAVING count(*) < amsupport - 1 OR amprocfamily IS NULL;
 
 -- Unfortunately, we can't check the amproc link very well because the
 -- signature of the function may be different for different support routines

@@ -51,12 +51,11 @@ INSERT INTO TIMESTAMPTZ_TBL VALUES ('infinity');
 INSERT INTO TIMESTAMPTZ_TBL VALUES ('epoch');
 -- Obsolete special values
 INSERT INTO TIMESTAMPTZ_TBL VALUES ('invalid');
+INSERT INTO TIMESTAMPTZ_TBL VALUES ('undefined');
 INSERT INTO TIMESTAMPTZ_TBL VALUES ('current');
 
 -- Postgres v6.0 standard output format
 INSERT INTO TIMESTAMPTZ_TBL VALUES ('Mon Feb 10 17:32:01 1997 PST');
-INSERT INTO TIMESTAMPTZ_TBL VALUES ('Invalid Abstime');
-INSERT INTO TIMESTAMPTZ_TBL VALUES ('Undefined Abstime');
 
 -- Variations on Postgres v6.1 standard output format
 INSERT INTO TIMESTAMPTZ_TBL VALUES ('Mon Feb 10 17:32:01.000001 1997 PST');
@@ -104,6 +103,13 @@ INSERT INTO TIMESTAMPTZ_TBL VALUES ('19970710 173201 America/New_York');
 SELECT '19970710 173201' AT TIME ZONE 'America/New_York';
 INSERT INTO TIMESTAMPTZ_TBL VALUES ('19970710 173201 America/Does_not_exist');
 SELECT '19970710 173201' AT TIME ZONE 'America/Does_not_exist';
+
+-- Daylight saving time for timestamps beyond 32-bit time_t range.
+SELECT '20500710 173201 Europe/Helsinki'::timestamptz; -- DST
+SELECT '20500110 173201 Europe/Helsinki'::timestamptz; -- non-DST
+
+SELECT '205000-07-10 17:32:01 Europe/Helsinki'::timestamptz; -- DST
+SELECT '205000-01-10 17:32:01 Europe/Helsinki'::timestamptz; -- non-DST
 
 -- Check date conversion and date arithmetic
 INSERT INTO TIMESTAMPTZ_TBL VALUES ('1997-06-10 18:32:01 PDT');
@@ -234,50 +240,3 @@ SELECT '' AS to_char_10, to_char(d1, 'IYYY IYY IY I IW IDDD ID')
 
 SELECT '' AS to_char_11, to_char(d1, 'FMIYYY FMIYY FMIY FMI FMIW FMIDDD FMID')
    FROM TIMESTAMPTZ_TBL;
-
--- TO_TIMESTAMP()
-SELECT '' AS to_timestamp_1, to_timestamp('0097/Feb/16 --> 08:14:30', 'YYYY/Mon/DD --> HH:MI:SS');
-	
-SELECT '' AS to_timestamp_2, to_timestamp('97/2/16 8:14:30', 'FMYYYY/FMMM/FMDD FMHH:FMMI:FMSS');
-
-SELECT '' AS to_timestamp_3, to_timestamp('1985 January 12', 'YYYY FMMonth DD');
-
-SELECT '' AS to_timestamp_4, to_timestamp('My birthday-> Year: 1976, Month: May, Day: 16',
-										  '"My birthday-> Year" YYYY, "Month:" FMMonth, "Day:" DD');
-
-SELECT '' AS to_timestamp_5, to_timestamp('1,582nd VIII 21', 'Y,YYYth FMRM DD');
-
-SELECT '' AS to_timestamp_6, to_timestamp('15 "text between quote marks" 98 54 45', 
-										  E'HH "\\text between quote marks\\"" YY MI SS');
-    
-SELECT '' AS to_timestamp_7, to_timestamp('05121445482000', 'MMDDHHMISSYYYY');    
-
-SELECT '' AS to_timestamp_8, to_timestamp('2000January09Sunday', 'YYYYFMMonthDDFMDay');
-
-SELECT '' AS to_timestamp_9, to_timestamp('97/Feb/16', 'YYMonDD');
-
-SELECT '' AS to_timestamp_10, to_timestamp('19971116', 'YYYYMMDD');
-
-SELECT '' AS to_timestamp_11, to_timestamp('20000-1116', 'YYYY-MMDD');
-
-SELECT '' AS to_timestamp_12, to_timestamp('9-1116', 'Y-MMDD');
-
-SELECT '' AS to_timestamp_13, to_timestamp('95-1116', 'YY-MMDD');
-
-SELECT '' AS to_timestamp_14, to_timestamp('995-1116', 'YYY-MMDD');
-
-SELECT '' AS to_timestamp_15, to_timestamp('2005426', 'YYYYWWD');
-
-SELECT '' AS to_timestamp_16, to_timestamp('2005300', 'YYYYDDD');
-
-SELECT '' AS to_timestamp_17, to_timestamp('2005527', 'IYYYIWID');
-
-SELECT '' AS to_timestamp_18, to_timestamp('005527', 'IYYIWID');
-
-SELECT '' AS to_timestamp_19, to_timestamp('05527', 'IYIWID');
-
-SELECT '' AS to_timestamp_20, to_timestamp('5527', 'IIWID');
-
-SELECT '' AS to_timestamp_21, to_timestamp('2005364', 'IYYYIDDD');
-
-SET DateStyle TO DEFAULT;

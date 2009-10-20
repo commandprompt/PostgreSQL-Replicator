@@ -1,6 +1,5 @@
 /* Processed by ecpg (regression mode) */
 /* These include files are added by the preprocessor */
-#include <ecpgtype.h>
 #include <ecpglib.h>
 #include <ecpgerrno.h>
 #include <sqlca.h>
@@ -41,12 +40,12 @@ typedef short  mmSmallInt ;
 #line 8 "type.pgc"
 
 
-/* exec sql type string is char [ 11 ]   */
+/* exec sql type string is char [ 11 ] */
 #line 10 "type.pgc"
 
 typedef char string[11];
 
-/* exec sql type c is char  reference */
+/* exec sql type c is char reference */
 #line 13 "type.pgc"
 
 typedef char* c;
@@ -60,13 +59,13 @@ typedef char* c;
 
 struct TBempl { 
 #line 19 "type.pgc"
- mmInteger  idnum    ;
+ mmInteger idnum ;
  
 #line 20 "type.pgc"
- mmChar  name [ 21 ]    ;
+ mmChar name [ 21 ] ;
  
 #line 21 "type.pgc"
- mmSmallInt  accs    ;
+ mmSmallInt accs ;
  } ;/* exec sql end declare section */
 #line 23 "type.pgc"
 
@@ -85,27 +84,27 @@ main (void)
    
   
 #line 29 "type.pgc"
- struct TBempl  empl    ;
+ struct TBempl empl ;
  
 #line 30 "type.pgc"
- string  str    ;
+ string str ;
  
 #line 31 "type.pgc"
- c  ptr   = NULL ;
+ c ptr = NULL ;
  
 #line 36 "type.pgc"
  struct varchar_vc { 
 #line 34 "type.pgc"
- int  len    ;
+ int len ;
  
 #line 35 "type.pgc"
- char  text [ 10 ]    ;
- }  vc    ;
+ char text [ 10 ] ;
+ } vc ;
 /* exec sql end declare section */
 #line 37 "type.pgc"
 
 
-  /* exec sql var vc is  [ 10 ]   */
+  /* exec sql var vc is [ 10 ] */
 #line 39 "type.pgc"
 
   ECPGdebug (1, stderr);
@@ -120,7 +119,7 @@ main (void)
       exit (sqlca.sqlcode);
     }
 
-  { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create  table empl ( idnum integer   , name char  ( 20 )    , accs smallint   , string1 char  ( 10 )    , string2 char  ( 10 )    , string3 char  ( 10 )    )    ", ECPGt_EOIT, ECPGt_EORT);}
+  { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create table empl ( idnum integer , name char ( 20 ) , accs smallint , string1 char ( 10 ) , string2 char ( 10 ) , string3 char ( 10 ) )", ECPGt_EOIT, ECPGt_EORT);}
 #line 51 "type.pgc"
 
   if (sqlca.sqlcode)
@@ -129,7 +128,7 @@ main (void)
       exit (sqlca.sqlcode);
     }
 
-  { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "insert into empl values ( 1 , 'user name' , 320 , 'first str' , 'second str' , 'third str' ) ", ECPGt_EOIT, ECPGt_EORT);}
+  { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "insert into empl values ( 1 , 'user name' , 320 , 'first str' , 'second str' , 'third str' )", ECPGt_EOIT, ECPGt_EORT);}
 #line 58 "type.pgc"
 
   if (sqlca.sqlcode)
@@ -138,7 +137,7 @@ main (void)
       exit (sqlca.sqlcode);
     }
 
-  { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select  idnum , name , accs , string1 , string2 , string3  from empl where idnum =  $1   ", 
+  { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select idnum , name , accs , string1 , string2 , string3 from empl where idnum = $1 ", 
 	ECPGt_long,&(empl.idnum),(long)1,(long)1,sizeof(long), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, 
 	ECPGt_long,&(empl.idnum),(long)1,(long)1,sizeof(long), 

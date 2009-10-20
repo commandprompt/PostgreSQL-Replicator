@@ -4,7 +4,7 @@
  *	  prototypes for functions in backend/catalog/heap.c
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -15,6 +15,7 @@
 #define HEAP_H
 
 #include "parser/parse_node.h"
+#include "catalog/indexing.h"
 
 
 typedef struct RawColumnDefault
@@ -29,6 +30,8 @@ typedef struct CookedConstraint
 	char	   *name;			/* name, or NULL if none */
 	AttrNumber	attnum;			/* which attr (only for DEFAULT) */
 	Node	   *expr;			/* transformed default or check expr */
+	bool		is_local;		/* constraint has local (non-inherited) def */
+	int			inhcount;		/* number of times constraint is inherited */
 } CookedConstraint;
 
 extern Relation heap_create(const char *relname,
@@ -46,6 +49,7 @@ extern Oid heap_create_with_catalog(const char *relname,
 						 Oid relid,
 						 Oid ownerid,
 						 TupleDesc tupdesc,
+						 List *cooked_constraints,
 						 char relkind,
 						 bool shared_relation,
 						 bool oidislocal,
@@ -62,25 +66,28 @@ extern void heap_truncate_check_FKs(List *relations, bool tempTables);
 
 extern List *heap_truncate_find_FKs(List *relationIds);
 
+extern void InsertPgAttributeTuple(Relation pg_attribute_rel,
+					   Form_pg_attribute new_attribute,
+					   CatalogIndexState indstate);
+
 extern void InsertPgClassTuple(Relation pg_class_desc,
 				   Relation new_rel_desc,
 				   Oid new_rel_oid,
 				   Datum reloptions);
 
-extern List *AddRelationRawConstraints(Relation rel,
-						  List *rawColDefaults,
-						  List *rawConstraints);
+extern List *AddRelationNewConstraints(Relation rel,
+						  List *newColDefaults,
+						  List *newConstraints,
+						  bool allow_merge,
+						  bool is_local);
 
-extern void StoreAttrDefault(Relation rel, AttrNumber attnum, char *adbin);
+extern void StoreAttrDefault(Relation rel, AttrNumber attnum, Node *expr);
 
 extern Node *cookDefault(ParseState *pstate,
 			Node *raw_default,
 			Oid atttypid,
 			int32 atttypmod,
 			char *attname);
-
-extern int RemoveRelConstraints(Relation rel, const char *constrName,
-					 DropBehavior behavior);
 
 extern void DeleteRelationTuple(Oid relid);
 extern void DeleteAttributeTuples(Oid relid);

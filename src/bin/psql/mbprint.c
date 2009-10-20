@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
@@ -277,7 +277,7 @@ pg_wcssize(unsigned char *pwcs, size_t len, int encoding,
 	}
 	if (linewidth > width)
 		width = linewidth;
-	format_size += 1;		/* For NUL char */
+	format_size += 1;			/* For NUL char */
 
 	/* Set results */
 	if (result_width)
@@ -289,8 +289,8 @@ pg_wcssize(unsigned char *pwcs, size_t len, int encoding,
 }
 
 /*
- *  Format a string into one or more "struct lineptr" lines.
- *  lines[i].ptr == NULL indicates the end of the array.
+ *	Format a string into one or more "struct lineptr" lines.
+ *	lines[i].ptr == NULL indicates the end of the array.
  *
  * This MUST be kept in sync with pg_wcssize!
  */
@@ -322,6 +322,7 @@ pg_wcsformat(unsigned char *pwcs, size_t len, int encoding,
 				if (count <= 0)
 					exit(1);	/* Screwup */
 
+				/* make next line point to remaining memory */
 				lines->ptr = ptr;
 			}
 			else if (*pwcs == '\r')		/* Linefeed */
@@ -376,12 +377,13 @@ pg_wcsformat(unsigned char *pwcs, size_t len, int encoding,
 		}
 		len -= chlen;
 	}
-	*ptr++ = '\0';
 	lines->width = linewidth;
-	lines++;
-	count--;
-	if (count > 0)
-		lines->ptr = NULL;
+	*ptr++ = '\0';				/* Terminate formatted string */
+
+	if (count <= 0)
+		exit(1);				/* Screwup */
+
+	(lines + 1)->ptr = NULL;	/* terminate line array */
 }
 
 unsigned char *

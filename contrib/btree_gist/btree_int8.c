@@ -1,3 +1,6 @@
+/*
+ * $PostgreSQL$
+ */
 #include "btree_gist.h"
 #include "btree_utils_num.h"
 
@@ -5,7 +8,7 @@ typedef struct int64key
 {
 	int64		lower;
 	int64		upper;
-}	int64KEY;
+} int64KEY;
 
 /*
 ** int64 ops
@@ -97,12 +100,18 @@ gbt_int8_consistent(PG_FUNCTION_ARGS)
 {
 	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
 	int64		query = PG_GETARG_INT64(1);
-	int64KEY   *kkk = (int64KEY *) DatumGetPointer(entry->key);
-	GBT_NUMKEY_R key;
 	StrategyNumber strategy = (StrategyNumber) PG_GETARG_UINT16(2);
 
-	key.lower = (GBT_NUMKEY *) & kkk->lower;
-	key.upper = (GBT_NUMKEY *) & kkk->upper;
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	bool	   *recheck = (bool *) PG_GETARG_POINTER(4);
+	int64KEY   *kkk = (int64KEY *) DatumGetPointer(entry->key);
+	GBT_NUMKEY_R key;
+
+	/* All cases served by this function are exact */
+	*recheck = false;
+
+	key.lower = (GBT_NUMKEY *) &kkk->lower;
+	key.upper = (GBT_NUMKEY *) &kkk->upper;
 
 	PG_RETURN_BOOL(
 				   gbt_num_consistent(&key, (void *) &query, &strategy, GIST_LEAF(entry), &tinfo)

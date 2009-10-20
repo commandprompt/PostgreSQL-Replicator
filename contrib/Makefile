@@ -6,8 +6,11 @@ include $(top_builddir)/src/Makefile.global
 
 WANTED_DIRS = \
 		adminpack	\
+		auto_explain	\
+		btree_gin	\
 		btree_gist	\
 		chkpass		\
+		citext		\
 		cube		\
 		dblink		\
 		dict_int	\
@@ -25,6 +28,7 @@ WANTED_DIRS = \
 		pg_buffercache	\
 		pg_freespacemap \
 		pg_standby	\
+		pg_stat_statements \
 		pg_trgm		\
 		pgbench		\
 		pgcrypto	\

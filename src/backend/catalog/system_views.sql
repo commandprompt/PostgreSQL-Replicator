@@ -1,7 +1,7 @@
 /*
  * PostgreSQL System Views
  *
- * Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  */
@@ -84,7 +84,7 @@ CREATE VIEW pg_tables AS
         T.spcname AS tablespace,
         C.relhasindex AS hasindexes, 
         C.relhasrules AS hasrules, 
-        (C.reltriggers > 0) AS hastriggers 
+        C.relhastriggers AS hastriggers 
     FROM pg_class C LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace) 
          LEFT JOIN pg_tablespace T ON (T.oid = C.reltablespace)
     WHERE C.relkind = 'r';
@@ -110,70 +110,55 @@ CREATE VIEW pg_stats AS
         stanullfrac AS null_frac, 
         stawidth AS avg_width, 
         stadistinct AS n_distinct, 
-        CASE 1 
-            WHEN stakind1 THEN stavalues1 
-            WHEN stakind2 THEN stavalues2 
-            WHEN stakind3 THEN stavalues3 
-            WHEN stakind4 THEN stavalues4 
-        END AS most_common_vals, 
-        CASE 1 
-            WHEN stakind1 THEN stanumbers1 
-            WHEN stakind2 THEN stanumbers2 
-            WHEN stakind3 THEN stanumbers3 
-            WHEN stakind4 THEN stanumbers4 
-        END AS most_common_freqs, 
-        CASE 2 
-            WHEN stakind1 THEN stavalues1 
-            WHEN stakind2 THEN stavalues2 
-            WHEN stakind3 THEN stavalues3 
-            WHEN stakind4 THEN stavalues4 
-        END AS histogram_bounds, 
-        CASE 3 
-            WHEN stakind1 THEN stanumbers1[1] 
-            WHEN stakind2 THEN stanumbers2[1] 
-            WHEN stakind3 THEN stanumbers3[1] 
-            WHEN stakind4 THEN stanumbers4[1] 
-        END AS correlation 
+        CASE
+            WHEN stakind1 IN (1, 4) THEN stavalues1
+            WHEN stakind2 IN (1, 4) THEN stavalues2
+            WHEN stakind3 IN (1, 4) THEN stavalues3
+            WHEN stakind4 IN (1, 4) THEN stavalues4
+        END AS most_common_vals,
+        CASE
+            WHEN stakind1 IN (1, 4) THEN stanumbers1
+            WHEN stakind2 IN (1, 4) THEN stanumbers2
+            WHEN stakind3 IN (1, 4) THEN stanumbers3
+            WHEN stakind4 IN (1, 4) THEN stanumbers4
+        END AS most_common_freqs,
+        CASE
+            WHEN stakind1 = 2 THEN stavalues1
+            WHEN stakind2 = 2 THEN stavalues2
+            WHEN stakind3 = 2 THEN stavalues3
+            WHEN stakind4 = 2 THEN stavalues4
+        END AS histogram_bounds,
+        CASE
+            WHEN stakind1 = 3 THEN stanumbers1[1]
+            WHEN stakind2 = 3 THEN stanumbers2[1]
+            WHEN stakind3 = 3 THEN stanumbers3[1]
+            WHEN stakind4 = 3 THEN stanumbers4[1]
+        END AS correlation
     FROM pg_statistic s JOIN pg_class c ON (c.oid = s.starelid) 
          JOIN pg_attribute a ON (c.oid = attrelid AND attnum = s.staattnum) 
          LEFT JOIN pg_namespace n ON (n.oid = c.relnamespace) 
-    WHERE has_table_privilege(c.oid, 'select');
+    WHERE NOT attisdropped AND has_column_privilege(c.oid, a.attnum, 'select');
 
 REVOKE ALL on pg_statistic FROM public;
 
 CREATE VIEW pg_locks AS 
-    SELECT * 
-    FROM pg_lock_status() AS L
-    (locktype text, database oid, relation oid, page int4, tuple int2,
-     virtualxid text, transactionid xid, classid oid, objid oid, objsubid int2,
-     virtualtransaction text, pid int4, mode text, granted boolean);
+    SELECT * FROM pg_lock_status() AS L;
 
 CREATE VIEW pg_cursors AS
-    SELECT C.name, C.statement, C.is_holdable, C.is_binary,
-           C.is_scrollable, C.creation_time
-    FROM pg_cursor() AS C
-         (name text, statement text, is_holdable boolean, is_binary boolean,
-          is_scrollable boolean, creation_time timestamptz);
+    SELECT * FROM pg_cursor() AS C;
 
 CREATE VIEW pg_prepared_xacts AS
     SELECT P.transaction, P.gid, P.prepared,
            U.rolname AS owner, D.datname AS database
     FROM pg_prepared_xact() AS P
-    (transaction xid, gid text, prepared timestamptz, ownerid oid, dbid oid)
          LEFT JOIN pg_authid U ON P.ownerid = U.oid
          LEFT JOIN pg_database D ON P.dbid = D.oid;
 
 CREATE VIEW pg_prepared_statements AS
-    SELECT P.name, P.statement, P.prepare_time, P.parameter_types, P.from_sql
-    FROM pg_prepared_statement() AS P
-    (name text, statement text, prepare_time timestamptz,
-     parameter_types regtype[], from_sql boolean);
+    SELECT * FROM pg_prepared_statement() AS P;
 
 CREATE VIEW pg_settings AS 
-    SELECT * 
-    FROM pg_show_all_settings() AS A 
-    (name text, setting text, unit text, category text, short_desc text, extra_desc text,
-     context text, vartype text, source text, min_val text, max_val text);
+    SELECT * FROM pg_show_all_settings() AS A; 
 
 CREATE RULE pg_settings_u AS 
     ON UPDATE TO pg_settings 
@@ -341,23 +326,21 @@ CREATE VIEW pg_statio_user_sequences AS
 
 CREATE VIEW pg_stat_activity AS 
     SELECT 
-            D.oid AS datid, 
-            D.datname AS datname, 
-            pg_stat_get_backend_pid(S.backendid) AS procpid, 
-            pg_stat_get_backend_userid(S.backendid) AS usesysid, 
-            U.rolname AS usename, 
-            pg_stat_get_backend_activity(S.backendid) AS current_query,
-            pg_stat_get_backend_waiting(S.backendid) AS waiting,
-            pg_stat_get_backend_xact_start(S.backendid) AS xact_start,
-            pg_stat_get_backend_activity_start(S.backendid) AS query_start,
-            pg_stat_get_backend_start(S.backendid) AS backend_start,
-            pg_stat_get_backend_client_addr(S.backendid) AS client_addr,
-            pg_stat_get_backend_client_port(S.backendid) AS client_port
-    FROM pg_database D, 
-            (SELECT pg_stat_get_backend_idset() AS backendid) AS S, 
-            pg_authid U 
-    WHERE pg_stat_get_backend_dbid(S.backendid) = D.oid AND 
-            pg_stat_get_backend_userid(S.backendid) = U.oid;
+            S.datid AS datid,
+            D.datname AS datname,
+            S.procpid,
+            S.usesysid,
+            U.rolname AS usename,
+            S.current_query,
+            S.waiting,
+            S.xact_start,
+            S.query_start,
+            S.backend_start,
+            S.client_addr,
+            S.client_port
+    FROM pg_database D, pg_stat_get_activity(NULL) AS S, pg_authid U
+    WHERE S.datid = D.oid AND 
+            S.usesysid = U.oid;
 
 CREATE VIEW pg_stat_database AS 
     SELECT 
@@ -376,6 +359,18 @@ CREATE VIEW pg_stat_database AS
             pg_stat_get_db_tuples_deleted(D.oid) AS tup_deleted
     FROM pg_database D;
 
+CREATE VIEW pg_stat_user_functions AS 
+    SELECT
+            P.oid AS funcid, 
+            N.nspname AS schemaname,
+            P.proname AS funcname,
+            pg_stat_get_function_calls(P.oid) AS calls,
+            pg_stat_get_function_time(P.oid) / 1000 AS total_time,
+            pg_stat_get_function_self_time(P.oid) / 1000 AS self_time
+    FROM pg_proc P LEFT JOIN pg_namespace N ON (N.oid = P.pronamespace)
+    WHERE P.prolang != 12  -- fast check to eliminate built-in functions   
+          AND pg_stat_get_function_calls(P.oid) IS NOT NULL;
+
 CREATE VIEW pg_stat_bgwriter AS
     SELECT
         pg_stat_get_bgwriter_timed_checkpoints() AS checkpoints_timed,
@@ -385,6 +380,34 @@ CREATE VIEW pg_stat_bgwriter AS
         pg_stat_get_bgwriter_maxwritten_clean() AS maxwritten_clean,
         pg_stat_get_buf_written_backend() AS buffers_backend,
         pg_stat_get_buf_alloc() AS buffers_alloc;
+
+CREATE VIEW pg_user_mappings AS
+    SELECT
+        U.oid       AS umid,
+        S.oid       AS srvid,
+        S.srvname   AS srvname,
+        U.umuser    AS umuser,
+        CASE WHEN U.umuser = 0 THEN
+            'public'
+        ELSE
+            A.rolname
+        END AS usename,
+        CASE WHEN pg_has_role(S.srvowner, 'USAGE') OR has_server_privilege(S.oid, 'USAGE') THEN
+            U.umoptions
+        ELSE
+            NULL
+        END AS umoptions
+    FROM pg_user_mapping U
+         LEFT JOIN pg_authid A ON (A.oid = U.umuser) JOIN
+        pg_foreign_server S ON (U.umserver = S.oid);
+
+REVOKE ALL on pg_user_mapping FROM public;
+
+--
+-- We have a few function definitions in here, too.
+-- At some point there might be enough to justify breaking them out into
+-- a separate "system_functions.sql" file.
+--
 
 -- Tsearch debug function.  Defined here because it'd be pretty unwieldy
 -- to put it into pg_proc.h
@@ -447,3 +470,16 @@ LANGUAGE SQL STRICT STABLE;
 
 COMMENT ON FUNCTION ts_debug(text) IS
     'debug function for current text search configuration';
+
+--
+-- Redeclare built-in functions that need default values attached to their
+-- arguments.  It's impractical to set those up directly in pg_proc.h because
+-- of the complexity and platform-dependency of the expression tree
+-- representation.  (Note that internal functions still have to have entries
+-- in pg_proc.h; we are merely causing their proargnames and proargdefaults
+-- to get filled in.)
+--
+
+CREATE OR REPLACE FUNCTION
+  pg_start_backup(label text, fast boolean DEFAULT false)
+  RETURNS text STRICT VOLATILE LANGUAGE internal AS 'pg_start_backup';

@@ -26,9 +26,7 @@ include $(top_builddir)/src/Makefile.global
 .NOTPARALLEL:
 
 ifneq ($(wildcard $(srcdir)/postgres.tar.gz),)
-ifneq (,$(docdir))
 found_html = yes
-endif
 endif
 
 ifneq ($(wildcard $(srcdir)/man.tar.gz),)
@@ -45,34 +43,40 @@ sqlmansect = 7
 endif
 sqlmansectnum = $(shell expr X'$(sqlmansect)' : X'\([0-9]\)')
 
+fix_sqlmansectnum = sed -e '/^\.TH/s/"7"/"$(sqlmansect)"/' \
+			-e 's/\\fR(7)/\\fR($(sqlmansectnum))/g' \
+			-e '1s/^\.so man7/.so man$(sqlmansectnum)/g;1s/^\(\.so.*\)\.7$$/\1.$(sqlmansect)/g'
+
 all: man1/.timestamp man$(sqlmansectnum)/.timestamp
 
-man1/.timestamp: man$(sqlmansect_dummy)/.timestamp
+man1/.timestamp: man7/.timestamp
 	@echo timestamp >$@
 
-man$(sqlmansect_dummy)/.timestamp: man.tar.gz
+man7/.timestamp: man.tar.gz
 	gzip -d -c $< | $(TAR) xf -
+ifneq ($(sqlmansectnum),7)
 	for file in man1/*.1; do \
 	  mv $$file $$file.bak && \
-	  sed -e 's/\\fR($(sqlmansect_dummy))/\\fR($(sqlmansectnum))/' $$file.bak >$$file && \
+	  $(fix_sqlmansectnum) $$file.bak >$$file && \
 	  rm -f $$file.bak || exit; \
 	done
+endif
 	@echo timestamp >$@
 
-man$(sqlmansectnum)/.timestamp: man$(sqlmansect_dummy)/.timestamp
+ifneq ($(sqlmansectnum),7)
+man$(sqlmansectnum)/.timestamp: man7/.timestamp
 	$(mkinstalldirs) man$(sqlmansectnum)
-	for file in man$(sqlmansect_dummy)/*.$(sqlmansect_dummy); do \
-	  sed -e '/^\.TH/s/"$(sqlmansect_dummy)"/"$(sqlmansect)"/'   \
-              -e 's/\\fR($(sqlmansect_dummy))/\\fR($(sqlmansectnum))/' \
-	      $$file >man$(sqlmansectnum)/`basename $$file | sed 's/.$(sqlmansect_dummy)$$/.$(sqlmansect)/'` || exit; \
+	for file in man7/*.7; do \
+	  $(fix_sqlmansectnum) $$file >man$(sqlmansectnum)/`basename $$file | sed 's/.7$$/.$(sqlmansect)/'` || exit; \
 	done
 	@echo timestamp >$@
+endif
 endif # found_man
 
 
 install: all installdirs
 ifdef found_html
-	gzip -d -c $(srcdir)/postgres.tar.gz | ( cd $(DESTDIR)$(docdir)/html && $(TAR) xf - )
+	gzip -d -c $(srcdir)/postgres.tar.gz | ( cd $(DESTDIR)$(htmldir)/html && $(TAR) xf - )
 endif
 ifdef found_man
 	for file in man1/*.1 man$(sqlmansectnum)/*.$(sqlmansect) ; do \
@@ -83,7 +87,7 @@ endif
 
 installdirs:
 ifdef found_html
-	$(mkinstalldirs) '$(DESTDIR)$(docdir)'/html
+	$(mkinstalldirs) '$(DESTDIR)$(htmldir)'/html
 endif
 ifdef found_man
 	$(mkinstalldirs) $(addprefix '$(DESTDIR)$(mandir)'/man, 1 $(sqlmansectnum))
@@ -92,13 +96,13 @@ endif
 
 uninstall:
 ifdef found_html
-	-rm -f $(addprefix $(DESTDIR)$(docdir)/html/, $(shell gunzip -c $(srcdir)/postgres.tar.gz | tar tf -))
+	rm -f $(addprefix $(DESTDIR)$(htmldir)/html/, $(shell gunzip -c $(srcdir)/postgres.tar.gz | $(TAR) tf -))
 endif
 ifdef found_man
-	-rm -f $(addprefix $(DESTDIR)$(mandir)/, $(shell gunzip -c $(srcdir)/man.tar.gz | tar tf - | sed -e 's,man$(sqlmansect_dummy)/,man$(sqlmansectnum)/,' -e 's/.$(sqlmansect_dummy)$$/.$(sqlmansect)/'))
+	rm -f $(filter-out %/, $(addprefix $(DESTDIR)$(mandir)/, $(shell gunzip -c $(srcdir)/man.tar.gz | $(TAR) tf - | sed -e 's,man7/,man$(sqlmansectnum)/,' -e 's/.7$$/.$(sqlmansect)/')))
 endif
 
 
 clean distclean maintainer-clean:
-	rm -rf man1/ man$(sqlmansectnum)/ man$(sqlmansect_dummy)/
+	rm -rf man1/ man7/ man$(sqlmansectnum)/
 	$(MAKE) -C src $@

@@ -37,8 +37,10 @@
    extant versions of the same logical row; to an index, each tuple is
    an independent object that needs its own index entry.  Thus, an
    update of a row always creates all-new index entries for the row, even if
-   the key values did not change.  Index entries for dead tuples are
-   reclaimed (by vacuuming) when the dead tuples themselves are reclaimed.
+   the key values did not change.  (HOT tuples are an exception to this
+   statement; but indexes do not deal with those, either.)  Index entries for
+   dead tuples are reclaimed (by vacuuming) when the dead tuples themselves
+   are reclaimed.
   </para>
 
  <sect1 id="index-catalog">
@@ -77,7 +79,7 @@
   </para>
 
   <para>
-   An individual index is defined by a 
+   An individual index is defined by a
    <link linkend="catalog-pg-class"><structname>pg_class</structname></link>
    entry that describes it as a physical relation, plus a
    <link linkend="catalog-pg-index"><structname>pg_index</structname></link>
@@ -183,7 +185,7 @@ aminsert (Relation indexRelation,
    parameter.  See <xref linkend="index-unique-checks"> for details.
    The result is TRUE if an index entry was inserted, FALSE if not. (A FALSE
    result does not denote an error condition, but is used for cases such
-   as an index AM refusing to index a NULL.)
+   as an index method refusing to index a NULL.)
   </para>
 
   <para>
@@ -238,6 +240,16 @@ amvacuumcleanup (IndexVacuumInfo *info,
   </para>
 
   <para>
+   As of <productname>PostgreSQL</productname> 8.4,
+   <function>amvacuumcleanup</> will also be called at completion of an
+   <command>ANALYZE</> operation.  In this case <literal>stats</> is always
+   NULL and any return value will be ignored.  This case can be distinguished
+   by checking <literal>info-&gt;analyze_only</literal>.  It is recommended
+   that the access method do nothing except post-insert cleanup in such a
+   call, and that only in an autovacuum worker process.
+  </para>
+
+  <para>
 <programlisting>
 void
 amcostestimate (PlannerInfo *root,
@@ -266,7 +278,7 @@ amoptions (ArrayType *reloptions,
    The function should construct a <type>bytea</> value, which will be copied
    into the <structfield>rd_options</> field of the index's relcache entry.
    The data contents of the <type>bytea</> value are open for the access
-   method to define, but the standard access methods currently all use struct
+   method to define; most of the standard access methods use struct
    <structname>StdRdOptions</>.
    When <parameter>validate</> is true, the function should report a suitable
    error message if any of the options are unrecognized or have invalid
@@ -283,8 +295,9 @@ amoptions (ArrayType *reloptions,
    an indexable <literal>WHERE</> condition, often called a
    <firstterm>qualifier</> or <firstterm>scan key</>.  The semantics of
    index scanning are described more fully in <xref linkend="index-scanning">,
-   below.  The scan-related functions that an index access method must provide
-   are:
+   below.  An index access method can support <quote>plain</> index scans,
+   <quote>bitmap</> index scans, or both.  The scan-related functions that an
+   index access method must or may provide are:
   </para>
 
   <para>
@@ -315,29 +328,53 @@ amgettuple (IndexScanDesc scan,
    TID is stored into the <literal>scan</> structure.  Note that
    <quote>success</> means only that the index contains an entry that matches
    the scan keys, not that the tuple necessarily still exists in the heap or
-   will pass the caller's snapshot test.
+   will pass the caller's snapshot test.  On success, <function>amgettuple</>
+   must also set <literal>scan-&gt;xs_recheck</> to TRUE or FALSE.
+   FALSE means it is certain that the index entry matches the scan keys.
+   TRUE means this is not certain, and the conditions represented by the
+   scan keys must be rechecked against the heap tuple after fetching it.
+   This provision supports <quote>lossy</> index operators.
+   Note that rechecking will extend only to the scan conditions; a partial
+   index predicate (if any) is never rechecked by <function>amgettuple</>
+   callers.
+  </para>
+
+  <para>
+   The <function>amgettuple</> function need only be provided if the access
+   method supports <quote>plain</> index scans.  If it doesn't, the
+   <structfield>amgettuple</> field in its <structname>pg_am</> row must
+   be set to zero.
   </para>
 
   <para>
 <programlisting>
-boolean
-amgetmulti (IndexScanDesc scan,
-            ItemPointer tids,
-            int32 max_tids,
-            int32 *returned_tids);
+int64
+amgetbitmap (IndexScanDesc scan,
+             TIDBitmap *tbm);
 </programlisting>
-   Fetch multiple tuples in the given scan.  Returns TRUE if the scan should
-   continue, FALSE if no matching tuples remain.  <literal>tids</> points to
-   a caller-supplied array of <literal>max_tids</>
-   <structname>ItemPointerData</> records, which the call fills with TIDs of
-   matching tuples.  <literal>*returned_tids</> is set to the number of TIDs
-   actually returned.  This can be less than <literal>max_tids</>, or even
-   zero, even when the return value is TRUE.  (This provision allows the
-   access method to choose the most efficient stopping points in its scan,
-   for example index page boundaries.)  <function>amgetmulti</> and
+   Fetch all tuples in the given scan and add them to the caller-supplied
+   TIDBitmap (that is, OR the set of tuple IDs into whatever set is already
+   in the bitmap).  The number of tuples fetched is returned (this might be
+   just an approximate count, for instance some AMs do not detect duplicates).
+   While inserting tuple IDs into the bitmap, <function>amgetbitmap</> can
+   indicate that rechecking of the scan conditions is required for specific
+   tuple IDs.  This is analogous to the <literal>xs_recheck</> output parameter
+   of <function>amgettuple</>.  Note: in the current implementation, support
+   for this feature is conflated with support for lossy storage of the bitmap
+   itself, and therefore callers recheck both the scan conditions and the
+   partial index predicate (if any) for recheckable tuples.  That might not
+   always be true, however.
+   <function>amgetbitmap</> and
    <function>amgettuple</> cannot be used in the same index scan; there
-   are other restrictions too when using <function>amgetmulti</>, as explained
+   are other restrictions too when using <function>amgetbitmap</>, as explained
    in <xref linkend="index-scanning">.
+  </para>
+
+  <para>
+   The <function>amgetbitmap</> function need only be provided if the access
+   method supports <quote>bitmap</> index scans.  If it doesn't, the
+   <structfield>amgetbitmap</> field in its <structname>pg_am</> row must
+   be set to zero.
   </para>
 
   <para>
@@ -421,13 +458,13 @@ amrestrpos (IndexScanDesc scan);
   </para>
 
   <para>
-   The operator family can indicate that the index is <firstterm>lossy</> for a
-   particular operator; this implies that the index scan will return all the
-   entries that pass the scan key, plus possibly additional entries that do
-   not.  The core system's index-scan machinery will then apply that operator
-   again to the heap tuple to verify whether or not it really should be
-   selected.  For non-lossy operators, the index scan must return exactly the
-   set of matching entries, as there is no recheck.
+   The access method can report that the index is <firstterm>lossy</>, or
+   requires rechecks, for a particular query.  This implies that the index
+   scan will return all the entries that pass the scan key, plus possibly
+   additional entries that do not.  The core system's index-scan machinery
+   will then apply the index conditions again to the heap tuple to verify
+   whether or not it really should be selected.  If the recheck option is not
+   specified, the index scan must return exactly the set of matching entries.
   </para>
 
   <para>
@@ -465,15 +502,20 @@ amrestrpos (IndexScanDesc scan);
    normally would.  (This will only occur for access
    methods that advertise they support ordered scans.)  After the
    first call, <function>amgettuple</> must be prepared to advance the scan in
-   either direction from the most recently returned entry.
+   either direction from the most recently returned entry.  (But if
+   <structname>pg_am</>.<structfield>amcanbackward</> is false, all subsequent
+   calls will have the same direction as the first one.)
   </para>
 
   <para>
-   The access method must support <quote>marking</> a position in a scan
-   and later returning to the marked position.  The same position might be
-   restored multiple times.  However, only one position need be remembered
-   per scan; a new <function>ammarkpos</> call overrides the previously
-   marked position.
+   Access methods that support ordered scans must support <quote>marking</> a
+   position in a scan and later returning to the marked position.  The same
+   position might be restored multiple times.  However, only one position need
+   be remembered per scan; a new <function>ammarkpos</> call overrides the
+   previously marked position.  An access method that does not support
+   ordered scans should still provide mark and restore functions in
+   <structname>pg_am</>, but it is sufficient to have them throw errors if
+   called.
   </para>
 
   <para>
@@ -490,22 +532,25 @@ amrestrpos (IndexScanDesc scan);
   </para>
 
   <para>
-   Instead of using <function>amgettuple</>, an index scan can be done with 
-   <function>amgetmulti</> to fetch multiple tuples per call.  This can be
+   Instead of using <function>amgettuple</>, an index scan can be done with
+   <function>amgetbitmap</> to fetch all tuples in one call.  This can be
    noticeably more efficient than <function>amgettuple</> because it allows
    avoiding lock/unlock cycles within the access method.  In principle
-   <function>amgetmulti</> should have the same effects as repeated
+   <function>amgetbitmap</> should have the same effects as repeated
    <function>amgettuple</> calls, but we impose several restrictions to
-   simplify matters.  In the first place, <function>amgetmulti</> does not
-   take a <literal>direction</> argument, and therefore it does not support
-   backwards scan nor intrascan reversal of direction.  The access method
-   need not support marking or restoring scan positions during an
-   <function>amgetmulti</> scan, either.  (These restrictions cost little
-   since it would be difficult to use these features in an
-   <function>amgetmulti</> scan anyway: adjusting the caller's buffered
-   list of TIDs would be complex.)  Finally, <function>amgetmulti</> does
-   not guarantee any locking of the returned tuples, with implications
+   simplify matters.  First of all, <function>amgetbitmap</> returns all
+   tuples at once and marking or restoring scan positions isn't
+   supported. Secondly, the tuples are returned in a bitmap which doesn't
+   have any specific ordering, which is why <function>amgetbitmap</> doesn't
+   take a <literal>direction</> argument.  Finally, <function>amgetbitmap</>
+   does not guarantee any locking of the returned tuples, with implications
    spelled out in <xref linkend="index-locking">.
+  </para>
+
+  <para>
+   Note that it is permitted for an access method to implement only
+   <function>amgetbitmap</> and not <function>amgettuple</>, or vice versa,
+   if its internal implementation is unsuited to one API or the other.
   </para>
 
  </sect1>
@@ -538,7 +583,7 @@ amrestrpos (IndexScanDesc scan);
    Aside from the index's own internal consistency requirements, concurrent
    updates create issues about consistency between the parent table (the
    <firstterm>heap</>) and the index.  Because
-   <productname>PostgreSQL</productname> separates accesses 
+   <productname>PostgreSQL</productname> separates accesses
    and updates of the heap from those of the index, there are windows in
    which the index might be inconsistent with the heap.  We handle this problem
    with the following rules:
@@ -605,9 +650,8 @@ amrestrpos (IndexScanDesc scan);
   </para>
 
   <para>
-   In an <function>amgetmulti</> index scan, the access method need not
-   guarantee to keep an index pin on any of the returned tuples.  (It would be
-   impractical to pin more than the last one anyway.)  Therefore
+   In an <function>amgetbitmap</> index scan, the access method does not
+   keep an index pin on any of the returned tuples.  Therefore
    it is only safe to use such scans with MVCC-compliant snapshots.
   </para>
 
@@ -668,7 +712,7 @@ amrestrpos (IndexScanDesc scan);
    no error should be raised.  (This case cannot occur during the
    ordinary scenario of inserting a row that's just been created by
    the current transaction.  It can happen during
-   <command>CREATE UNIQUE INDEX CONCURRENTLY</>, however.) 
+   <command>CREATE UNIQUE INDEX CONCURRENTLY</>, however.)
   </para>
 
   <para>
@@ -844,7 +888,7 @@ amcostestimate (PlannerInfo *root,
   <para>
    The indexSelectivity should be set to the estimated fraction of the parent
    table rows that will be retrieved during the index scan.  In the case
-   of a lossy index, this will typically be higher than the fraction of
+   of a lossy query, this will typically be higher than the fraction of
    rows that actually pass the given qual conditions.
   </para>
 
@@ -874,7 +918,8 @@ amcostestimate (PlannerInfo *root,
 
 <programlisting>
 *indexSelectivity = clauselist_selectivity(root, indexQuals,
-                                           index-&gt;rel-&gt;relid, JOIN_INNER);
+                                           index-&gt;rel-&gt;relid,
+                                           JOIN_INNER, NULL);
 </programlisting>
     </para>
    </step>

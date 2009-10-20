@@ -32,7 +32,7 @@
  * and munge the system catalogs of the new database.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -49,6 +49,7 @@
 #include <sys/stat.h>
 
 #include "access/heapam.h"
+#include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
@@ -65,6 +66,8 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/tqual.h"
 
 
 /* GUC variables */
@@ -194,7 +197,7 @@ CreateTableSpace(CreateTableSpaceStmt *stmt)
 #ifdef HAVE_SYMLINK
 	Relation	rel;
 	Datum		values[Natts_pg_tablespace];
-	char		nulls[Natts_pg_tablespace];
+	bool		nulls[Natts_pg_tablespace];
 	HeapTuple	tuple;
 	Oid			tablespaceoid;
 	char	   *location;
@@ -275,17 +278,17 @@ CreateTableSpace(CreateTableSpaceStmt *stmt)
 	 */
 	rel = heap_open(TableSpaceRelationId, RowExclusiveLock);
 
-	MemSet(nulls, ' ', Natts_pg_tablespace);
+	MemSet(nulls, false, sizeof(nulls));
 
 	values[Anum_pg_tablespace_spcname - 1] =
 		DirectFunctionCall1(namein, CStringGetDatum(stmt->tablespacename));
 	values[Anum_pg_tablespace_spcowner - 1] =
 		ObjectIdGetDatum(ownerId);
 	values[Anum_pg_tablespace_spclocation - 1] =
-		DirectFunctionCall1(textin, CStringGetDatum(location));
-	nulls[Anum_pg_tablespace_spcacl - 1] = 'n';
+		CStringGetTextDatum(location);
+	nulls[Anum_pg_tablespace_spcacl - 1] = true;
 
-	tuple = heap_formtuple(rel->rd_att, values, nulls);
+	tuple = heap_form_tuple(rel->rd_att, values, nulls);
 
 	tablespaceoid = simple_heap_insert(rel, tuple);
 
@@ -452,7 +455,7 @@ DropTableSpace(DropTableSpaceStmt *stmt)
 	/*
 	 * Remove dependency on owner.
 	 */
-	deleteSharedDependencyRecordsFor(TableSpaceRelationId, tablespaceoid);
+	deleteSharedDependencyRecordsFor(TableSpaceRelationId, tablespaceoid, 0);
 
 	/*
 	 * Acquire TablespaceCreateLock to ensure that no TablespaceCreateDbspace
@@ -842,8 +845,8 @@ AlterTableSpaceOwner(const char *name, Oid newOwnerId)
 	if (spcForm->spcowner != newOwnerId)
 	{
 		Datum		repl_val[Natts_pg_tablespace];
-		char		repl_null[Natts_pg_tablespace];
-		char		repl_repl[Natts_pg_tablespace];
+		bool		repl_null[Natts_pg_tablespace];
+		bool		repl_repl[Natts_pg_tablespace];
 		Acl		   *newAcl;
 		Datum		aclDatum;
 		bool		isNull;
@@ -867,10 +870,10 @@ AlterTableSpaceOwner(const char *name, Oid newOwnerId)
 		 * anyway.
 		 */
 
-		memset(repl_null, ' ', sizeof(repl_null));
-		memset(repl_repl, ' ', sizeof(repl_repl));
+		memset(repl_null, false, sizeof(repl_null));
+		memset(repl_repl, false, sizeof(repl_repl));
 
-		repl_repl[Anum_pg_tablespace_spcowner - 1] = 'r';
+		repl_repl[Anum_pg_tablespace_spcowner - 1] = true;
 		repl_val[Anum_pg_tablespace_spcowner - 1] = ObjectIdGetDatum(newOwnerId);
 
 		/*
@@ -885,11 +888,11 @@ AlterTableSpaceOwner(const char *name, Oid newOwnerId)
 		{
 			newAcl = aclnewowner(DatumGetAclP(aclDatum),
 								 spcForm->spcowner, newOwnerId);
-			repl_repl[Anum_pg_tablespace_spcacl - 1] = 'r';
+			repl_repl[Anum_pg_tablespace_spcacl - 1] = true;
 			repl_val[Anum_pg_tablespace_spcacl - 1] = PointerGetDatum(newAcl);
 		}
 
-		newtuple = heap_modifytuple(tup, RelationGetDescr(rel), repl_val, repl_null, repl_repl);
+		newtuple = heap_modify_tuple(tup, RelationGetDescr(rel), repl_val, repl_null, repl_repl);
 
 		simple_heap_update(rel, &newtuple->t_self, newtuple);
 		CatalogUpdateIndexes(rel, newtuple);
@@ -1272,6 +1275,9 @@ void
 tblspc_redo(XLogRecPtr lsn, XLogRecord *record)
 {
 	uint8		info = record->xl_info & ~XLR_INFO_MASK;
+
+	/* Backup blocks are not used in tblspc records */
+	Assert(!(record->xl_info & XLR_BKP_BLOCK_MASK));
 
 	if (info == XLOG_TBLSPC_CREATE)
 	{

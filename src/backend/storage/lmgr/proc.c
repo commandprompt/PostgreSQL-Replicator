@@ -3,7 +3,7 @@
  * proc.c
  *	  routines to manage per-process shared memory data structure
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -41,6 +41,7 @@
 #include "postmaster/autovacuum.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
+#include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/spin.h"
@@ -170,8 +171,8 @@ InitProcGlobal(void)
 	/*
 	 * Initialize the data structures.
 	 */
-	ProcGlobal->freeProcs = INVALID_OFFSET;
-	ProcGlobal->autovacFreeProcs = INVALID_OFFSET;
+	ProcGlobal->freeProcs = NULL;
+	ProcGlobal->autovacFreeProcs = NULL;
 
 	ProcGlobal->spins_per_delay = DEFAULT_SPINS_PER_DELAY;
 
@@ -187,8 +188,8 @@ InitProcGlobal(void)
 	for (i = 0; i < MaxConnections; i++)
 	{
 		PGSemaphoreCreate(&(procs[i].sem));
-		procs[i].links.next = ProcGlobal->freeProcs;
-		ProcGlobal->freeProcs = MAKE_OFFSET(&procs[i]);
+		procs[i].links.next = (SHM_QUEUE *) ProcGlobal->freeProcs;
+		ProcGlobal->freeProcs = &procs[i];
 	}
 
 	procs = (PGPROC *) ShmemAlloc((autovacuum_max_workers) * sizeof(PGPROC));
@@ -200,8 +201,8 @@ InitProcGlobal(void)
 	for (i = 0; i < autovacuum_max_workers; i++)
 	{
 		PGSemaphoreCreate(&(procs[i].sem));
-		procs[i].links.next = ProcGlobal->autovacFreeProcs;
-		ProcGlobal->autovacFreeProcs = MAKE_OFFSET(&procs[i]);
+		procs[i].links.next = (SHM_QUEUE *) ProcGlobal->autovacFreeProcs;
+		ProcGlobal->autovacFreeProcs = &procs[i];
 	}
 
 	MemSet(AuxiliaryProcs, 0, NUM_AUXILIARY_PROCS * sizeof(PGPROC));
@@ -224,7 +225,6 @@ InitProcess(void)
 {
 	/* use volatile pointer to prevent code rearrangement */
 	volatile PROC_HDR *procglobal = ProcGlobal;
-	SHMEM_OFFSET myOffset;
 	int			i;
 
 	/*
@@ -249,17 +249,16 @@ InitProcess(void)
 	set_spins_per_delay(procglobal->spins_per_delay);
 
 	if (IsAutoVacuumWorkerProcess())
-		myOffset = procglobal->autovacFreeProcs;
+		MyProc = procglobal->autovacFreeProcs;
 	else
-		myOffset = procglobal->freeProcs;
+		MyProc = procglobal->freeProcs;
 
-	if (myOffset != INVALID_OFFSET)
+	if (MyProc != NULL)
 	{
-		MyProc = (PGPROC *) MAKE_PTR(myOffset);
 		if (IsAutoVacuumWorkerProcess())
-			procglobal->autovacFreeProcs = MyProc->links.next;
+			procglobal->autovacFreeProcs = (PGPROC *) MyProc->links.next;
 		else
-			procglobal->freeProcs = MyProc->links.next;
+			procglobal->freeProcs = (PGPROC *) MyProc->links.next;
 		SpinLockRelease(ProcStructLock);
 	}
 	else
@@ -275,6 +274,14 @@ InitProcess(void)
 				(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
 				 errmsg("sorry, too many clients already")));
 	}
+
+	/*
+	 * Now that we have a PGPROC, mark ourselves as an active postmaster
+	 * child; this is so that the postmaster can detect it if we exit without
+	 * cleaning up.
+	 */
+	if (IsUnderPostmaster)
+		MarkPostmasterChildActive();
 
 	/*
 	 * Initialize all fields of MyProc, except for the semaphore which was
@@ -461,7 +468,6 @@ InitAuxiliaryProcess(void)
 bool
 HaveNFreeProcs(int n)
 {
-	SHMEM_OFFSET offset;
 	PGPROC	   *proc;
 
 	/* use volatile pointer to prevent code rearrangement */
@@ -469,12 +475,11 @@ HaveNFreeProcs(int n)
 
 	SpinLockAcquire(ProcStructLock);
 
-	offset = procglobal->freeProcs;
+	proc = procglobal->freeProcs;
 
-	while (n > 0 && offset != INVALID_OFFSET)
+	while (n > 0 && proc != NULL)
 	{
-		proc = (PGPROC *) MAKE_PTR(offset);
-		offset = proc->links.next;
+		proc = (PGPROC *) proc->links.next;
 		n--;
 	}
 
@@ -506,7 +511,7 @@ LockWaitCancel(void)
 	partitionLock = LockHashPartitionLock(lockAwaited->hashcode);
 	LWLockAcquire(partitionLock, LW_EXCLUSIVE);
 
-	if (MyProc->links.next != INVALID_OFFSET)
+	if (MyProc->links.next != NULL)
 	{
 		/* We could not have been granted the lock yet */
 		RemoveFromWaitQueue(MyProc, lockAwaited->hashcode);
@@ -601,13 +606,13 @@ ProcKill(int code, Datum arg)
 	/* Return PGPROC structure (and semaphore) to freelist */
 	if (IsAutoVacuumWorkerProcess())
 	{
-		MyProc->links.next = procglobal->autovacFreeProcs;
-		procglobal->autovacFreeProcs = MAKE_OFFSET(MyProc);
+		MyProc->links.next = (SHM_QUEUE *) procglobal->autovacFreeProcs;
+		procglobal->autovacFreeProcs = MyProc;
 	}
 	else
 	{
-		MyProc->links.next = procglobal->freeProcs;
-		procglobal->freeProcs = MAKE_OFFSET(MyProc);
+		MyProc->links.next = (SHM_QUEUE *) procglobal->freeProcs;
+		procglobal->freeProcs = MyProc;
 	}
 
 	/* PGPROC struct isn't mine anymore */
@@ -617,6 +622,13 @@ ProcKill(int code, Datum arg)
 	procglobal->spins_per_delay = update_spins_per_delay(procglobal->spins_per_delay);
 
 	SpinLockRelease(ProcStructLock);
+
+	/*
+	 * This process is no longer present in shared memory in any meaningful
+	 * way, so tell the postmaster we've cleaned up acceptably well.
+	 */
+	if (IsUnderPostmaster)
+		MarkPostmasterChildInactive();
 
 	/* wake autovac launcher if needed -- see comments in FreeWorkerInfo */
 	if (AutovacuumLauncherPid != 0)
@@ -752,7 +764,7 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 	{
 		LOCKMASK	aheadRequests = 0;
 
-		proc = (PGPROC *) MAKE_PTR(waitQueue->links.next);
+		proc = (PGPROC *) waitQueue->links.next;
 		for (i = 0; i < waitQueue->size; i++)
 		{
 			/* Must he wait for me? */
@@ -790,7 +802,7 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 			}
 			/* Nope, so advance to next waiter */
 			aheadRequests |= LOCKBIT_ON(proc->waitLockMode);
-			proc = (PGPROC *) MAKE_PTR(proc->links.next);
+			proc = (PGPROC *) proc->links.next;
 		}
 
 		/*
@@ -1054,13 +1066,13 @@ ProcWakeup(PGPROC *proc, int waitStatus)
 	PGPROC	   *retProc;
 
 	/* Proc should be sleeping ... */
-	if (proc->links.prev == INVALID_OFFSET ||
-		proc->links.next == INVALID_OFFSET)
+	if (proc->links.prev == NULL ||
+		proc->links.next == NULL)
 		return NULL;
 	Assert(proc->waitStatus == STATUS_WAITING);
 
 	/* Save next process before we zap the list link */
-	retProc = (PGPROC *) MAKE_PTR(proc->links.next);
+	retProc = (PGPROC *) proc->links.next;
 
 	/* Remove process from wait queue */
 	SHMQueueDelete(&(proc->links));
@@ -1097,7 +1109,7 @@ ProcLockWakeup(LockMethod lockMethodTable, LOCK *lock)
 	if (queue_size == 0)
 		return;
 
-	proc = (PGPROC *) MAKE_PTR(waitQueue->links.next);
+	proc = (PGPROC *) waitQueue->links.next;
 
 	while (queue_size-- > 0)
 	{
@@ -1130,7 +1142,7 @@ ProcLockWakeup(LockMethod lockMethodTable, LOCK *lock)
 			 * Cannot wake this guy. Remember his request for later checks.
 			 */
 			aheadRequests |= LOCKBIT_ON(lockmode);
-			proc = (PGPROC *) MAKE_PTR(proc->links.next);
+			proc = (PGPROC *) proc->links.next;
 		}
 	}
 
@@ -1171,7 +1183,7 @@ CheckDeadLock(void)
 	/*
 	 * Check to see if we've been awoken by anyone in the interim.
 	 *
-	 * If we have we can return and resume our transaction -- happy day.
+	 * If we have, we can return and resume our transaction -- happy day.
 	 * Before we are awoken the process releasing the lock grants it to us so
 	 * we know that we don't have to wait anymore.
 	 *
@@ -1179,8 +1191,8 @@ CheckDeadLock(void)
 	 * This is quicker than checking our semaphore's state, since no kernel
 	 * call is needed, and it is safe because we hold the lock partition lock.
 	 */
-	if (MyProc->links.prev == INVALID_OFFSET ||
-		MyProc->links.next == INVALID_OFFSET)
+	if (MyProc->links.prev == NULL ||
+		MyProc->links.next == NULL)
 		goto check_done;
 
 #ifdef LOCK_DEBUG

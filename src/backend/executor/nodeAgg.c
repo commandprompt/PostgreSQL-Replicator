@@ -55,9 +55,11 @@
  *	  in either case its value need not be preserved.  See int8inc() for an
  *	  example.	Notice that advance_transition_function() is coded to avoid a
  *	  data copy step when the previous transition value pointer is returned.
+ *	  Also, some transition functions make use of the aggcontext to store
+ *	  working state.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -68,17 +70,16 @@
 
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "parser/parse_agg.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "parser/parse_oper.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -272,18 +273,6 @@ initialize_aggregates(AggState *aggstate,
 									  peraggstate->sortOperator, false,
 									  work_mem, false);
 		}
-
-		/*
-		 * If we are reinitializing after a group boundary, we have to free
-		 * any prior transValue to avoid memory leakage.  We must check not
-		 * only the isnull flag but whether the pointer is NULL; since
-		 * pergroupstate is initialized with palloc0, the initial condition
-		 * has isnull = 0 and null pointer.
-		 */
-		if (!peraggstate->transtypeByVal &&
-			!pergroupstate->transValueIsNull &&
-			DatumGetPointer(pergroupstate->transValue) != NULL)
-			pfree(DatumGetPointer(pergroupstate->transValue));
 
 		/*
 		 * (Re)set transValue to the initial value.
@@ -812,9 +801,32 @@ lookup_hash_entry(AggState *aggstate, TupleTableSlot *inputslot)
 TupleTableSlot *
 ExecAgg(AggState *node)
 {
+	/*
+	 * Check to see if we're still projecting out tuples from a previous agg
+	 * tuple (because there is a function-returning-set in the projection
+	 * expressions).  If so, try to project another one.
+	 */
+	if (node->ss.ps.ps_TupFromTlist)
+	{
+		TupleTableSlot *result;
+		ExprDoneCond isDone;
+
+		result = ExecProject(node->ss.ps.ps_ProjInfo, &isDone);
+		if (isDone == ExprMultipleResult)
+			return result;
+		/* Done with that source tuple... */
+		node->ss.ps.ps_TupFromTlist = false;
+	}
+
+	/*
+	 * Exit if nothing left to do.  (We must do the ps_TupFromTlist check
+	 * first, because in some cases agg_done gets set before we emit the
+	 * final aggregate tuple, and we have to finish running SRFs for it.)
+	 */
 	if (node->agg_done)
 		return NULL;
 
+	/* Dispatch based on strategy */
 	if (((Agg *) node->ss.ps.plan)->aggstrategy == AGG_HASHED)
 	{
 		if (!node->table_filled)
@@ -835,7 +847,6 @@ agg_retrieve_direct(AggState *aggstate)
 	PlanState  *outerPlan;
 	ExprContext *econtext;
 	ExprContext *tmpcontext;
-	ProjectionInfo *projInfo;
 	Datum	   *aggvalues;
 	bool	   *aggnulls;
 	AggStatePerAgg peragg;
@@ -854,7 +865,6 @@ agg_retrieve_direct(AggState *aggstate)
 	aggnulls = econtext->ecxt_aggnulls;
 	/* tmpcontext is the per-input-tuple expression context */
 	tmpcontext = aggstate->tmpcontext;
-	projInfo = aggstate->ss.ps.ps_ProjInfo;
 	peragg = aggstate->peragg;
 	pergroup = aggstate->pergroup;
 	firstSlot = aggstate->ss.ss_ScanTupleSlot;
@@ -891,9 +901,14 @@ agg_retrieve_direct(AggState *aggstate)
 		}
 
 		/*
-		 * Clear the per-output-tuple context for each group
+		 * Clear the per-output-tuple context for each group, as well as
+		 * aggcontext (which contains any pass-by-ref transvalues of the
+		 * old group).  We also clear any child contexts of the aggcontext;
+		 * some aggregate functions store working state in such contexts.
 		 */
 		ResetExprContext(econtext);
+
+		MemoryContextResetAndDeleteChildren(aggstate->aggcontext);
 
 		/*
 		 * Initialize working state for a new input tuple group
@@ -992,10 +1007,19 @@ agg_retrieve_direct(AggState *aggstate)
 		{
 			/*
 			 * Form and return a projection tuple using the aggregate results
-			 * and the representative input tuple.	Note we do not support
-			 * aggregates returning sets ...
+			 * and the representative input tuple.
 			 */
-			return ExecProject(projInfo, NULL);
+			TupleTableSlot *result;
+			ExprDoneCond isDone;
+
+			result = ExecProject(aggstate->ss.ps.ps_ProjInfo, &isDone);
+
+			if (isDone != ExprEndResult)
+			{
+				aggstate->ss.ps.ps_TupFromTlist =
+					(isDone == ExprMultipleResult);
+				return result;
+			}
 		}
 	}
 
@@ -1055,7 +1079,6 @@ static TupleTableSlot *
 agg_retrieve_hash_table(AggState *aggstate)
 {
 	ExprContext *econtext;
-	ProjectionInfo *projInfo;
 	Datum	   *aggvalues;
 	bool	   *aggnulls;
 	AggStatePerAgg peragg;
@@ -1071,7 +1094,6 @@ agg_retrieve_hash_table(AggState *aggstate)
 	econtext = aggstate->ss.ps.ps_ExprContext;
 	aggvalues = econtext->ecxt_aggvalues;
 	aggnulls = econtext->ecxt_aggnulls;
-	projInfo = aggstate->ss.ps.ps_ProjInfo;
 	peragg = aggstate->peragg;
 	firstSlot = aggstate->ss.ss_ScanTupleSlot;
 
@@ -1135,10 +1157,19 @@ agg_retrieve_hash_table(AggState *aggstate)
 		{
 			/*
 			 * Form and return a projection tuple using the aggregate results
-			 * and the representative input tuple.	Note we do not support
-			 * aggregates returning sets ...
+			 * and the representative input tuple.
 			 */
-			return ExecProject(projInfo, NULL);
+			TupleTableSlot *result;
+			ExprDoneCond isDone;
+
+			result = ExecProject(aggstate->ss.ps.ps_ProjInfo, &isDone);
+
+			if (isDone != ExprEndResult)
+			{
+				aggstate->ss.ps.ps_TupFromTlist =
+					(isDone == ExprMultipleResult);
+				return result;
+			}
 		}
 	}
 
@@ -1198,7 +1229,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * structures and transition values.  NOTE: the details of what is stored
 	 * in aggcontext and what is stored in the regular per-query memory
 	 * context are driven by a simple decision: we want to reset the
-	 * aggcontext in ExecReScanAgg to recover no-longer-wanted space.
+	 * aggcontext at group boundaries (if not hashing) and in ExecReScanAgg
+	 * to recover no-longer-wanted space.
 	 */
 	aggstate->aggcontext =
 		AllocSetContextCreate(CurrentMemoryContext,
@@ -1253,6 +1285,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	 */
 	ExecAssignResultTypeFromTL(&aggstate->ss.ps);
 	ExecAssignProjectionInfo(&aggstate->ss.ps, NULL);
+
+	aggstate->ss.ps.ps_TupFromTlist = false;
 
 	/*
 	 * get the count of aggregates in targetlist and quals
@@ -1508,7 +1542,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 
 		if (aggref->aggdistinct)
 		{
-			Oid			eq_function;
+			Oid			lt_opr;
+			Oid			eq_opr;
 
 			/* We don't implement DISTINCT aggs in the HASHED case */
 			Assert(node->aggstrategy != AGG_HASHED);
@@ -1536,9 +1571,11 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 			 * record it in the Aggref node ... or at latest, do it in the
 			 * planner.
 			 */
-			eq_function = equality_oper_funcid(inputTypes[0]);
-			fmgr_info(eq_function, &(peraggstate->equalfn));
-			peraggstate->sortOperator = ordering_oper_opid(inputTypes[0]);
+			get_sort_group_operators(inputTypes[0],
+									 true, true, false,
+									 &lt_opr, &eq_opr, NULL);
+			fmgr_info(get_opcode(eq_opr), &(peraggstate->equalfn));
+			peraggstate->sortOperator = lt_opr;
 			peraggstate->sortstate = NULL;
 		}
 
@@ -1560,7 +1597,7 @@ GetAggInitVal(Datum textInitVal, Oid transtype)
 	Datum		initVal;
 
 	getTypeInputInfo(transtype, &typinput, &typioparam);
-	strInitVal = DatumGetCString(DirectFunctionCall1(textout, textInitVal));
+	strInitVal = TextDatumGetCString(textInitVal);
 	initVal = OidInputFunctionCall(typinput, strInitVal,
 								   typioparam, -1);
 	pfree(strInitVal);
@@ -1613,6 +1650,8 @@ ExecReScanAgg(AggState *node, ExprContext *exprCtxt)
 	int			aggno;
 
 	node->agg_done = false;
+
+	node->ss.ps.ps_TupFromTlist = false;
 
 	if (((Agg *) node->ss.ps.plan)->aggstrategy == AGG_HASHED)
 	{

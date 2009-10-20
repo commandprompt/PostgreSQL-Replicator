@@ -112,6 +112,8 @@ SELECT * FROM tmp_new;
 ALTER TABLE tmp RENAME TO tmp_new2;
 SELECT * FROM tmp;		-- should fail
 ERROR:  relation "tmp" does not exist
+LINE 1: SELECT * FROM tmp;
+                      ^
 SELECT * FROM tmp_new;
  tmptable 
 ----------
@@ -351,7 +353,8 @@ alter table atacc3 inherit atacc2;
 ERROR:  child table is missing column "test2"
 -- fail due to mismatched data type
 alter table atacc3 add test2 bool;
-alter table atacc3 add inherit atacc2;
+alter table atacc3 inherit atacc2;
+ERROR:  child table "atacc3" has different type for column "test2"
 alter table atacc3 drop test2;
 -- succeed
 alter table atacc3 add test2 int;
@@ -376,21 +379,22 @@ select test2 from atacc2;
 
 drop table atacc2 cascade;
 NOTICE:  drop cascades to table atacc3
-NOTICE:  drop cascades to constraint foo on table atacc3
 drop table atacc1;
--- let's try only to add only to the parent
+-- adding only to a parent is disallowed as of 8.4
 create table atacc1 (test int);
-create table atacc2 (test2 int);
-create table atacc3 (test3 int) inherits (atacc1, atacc2);
-alter table only atacc2 add constraint foo check (test2>0);
--- fail and then succeed on atacc2
-insert into atacc2 (test2) values (-3);
+create table atacc2 (test2 int) inherits (atacc1);
+-- fail:
+alter table only atacc1 add constraint foo check (test>0);
+ERROR:  constraint must be added to child tables too
+-- ok:
+alter table only atacc2 add constraint foo check (test>0);
+-- check constraint not there on parent
+insert into atacc1 (test) values (-3);
+insert into atacc1 (test) values (3);
+-- check constraint is there on child
+insert into atacc2 (test) values (-3);
 ERROR:  new row for relation "atacc2" violates check constraint "foo"
-insert into atacc2 (test2) values (3);
--- both succeed on atacc3
-insert into atacc3 (test2) values (-3);
-insert into atacc3 (test2) values (3);
-drop table atacc3;
+insert into atacc2 (test) values (3);
 drop table atacc2;
 drop table atacc1;
 -- test unique constraint adding
@@ -778,8 +782,12 @@ LINE 1: update atacc1 set b = 2 where "........pg.dropped.1........"...
 -- INSERTs
 insert into atacc1 values (10, 11, 12, 13);
 ERROR:  INSERT has more expressions than target columns
+LINE 1: insert into atacc1 values (10, 11, 12, 13);
+                                               ^
 insert into atacc1 values (default, 11, 12, 13);
 ERROR:  INSERT has more expressions than target columns
+LINE 1: insert into atacc1 values (default, 11, 12, 13);
+                                                    ^
 insert into atacc1 values (11, 12, 13);
 insert into atacc1 (a) values (10);
 ERROR:  column "a" of relation "atacc1" does not exist
@@ -1159,10 +1167,11 @@ order by relname, attnum;
 (8 rows)
 
 drop table p1, p2 cascade;
-NOTICE:  drop cascades to table c1
-NOTICE:  drop cascades to table gc1
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to table c1
+drop cascades to table gc1
 --
--- Test the ALTER TABLE WITHOUT OIDS command
+-- Test the ALTER TABLE SET WITH/WITHOUT OIDS command
 --
 create table altstartwith (col integer) with oids;
 insert into altstartwith values (1);
@@ -1183,9 +1192,17 @@ select * from altstartwith;
    1
 (1 row)
 
--- Run inheritance tests
+alter table altstartwith set with oids;
+select oid > 0, * from altstartwith;
+ ?column? | col 
+----------+-----
+ t        |   1
+(1 row)
+
+drop table altstartwith;
+-- Check inheritance cases
 create table altwithoid (col integer) with oids;
--- Inherits parents oid column
+-- Inherits parents oid column anyway
 create table altinhoid () inherits (altwithoid) without oids;
 insert into altinhoid values (1);
 select oid > 0, * from altwithoid;
@@ -1201,7 +1218,6 @@ select oid > 0, * from altinhoid;
 (1 row)
 
 alter table altwithoid set without oids;
-alter table altinhoid set without oids;
 select oid > 0, * from altwithoid; -- fails
 ERROR:  column "oid" does not exist
 LINE 1: select oid > 0, * from altwithoid;
@@ -1222,6 +1238,63 @@ select * from altinhoid;
    1
 (1 row)
 
+alter table altwithoid set with oids;
+select oid > 0, * from altwithoid;
+ ?column? | col 
+----------+-----
+ t        |   1
+(1 row)
+
+select oid > 0, * from altinhoid;
+ ?column? | col 
+----------+-----
+ t        |   1
+(1 row)
+
+drop table altwithoid cascade;
+NOTICE:  drop cascades to table altinhoid
+create table altwithoid (col integer) without oids;
+-- child can have local oid column
+create table altinhoid () inherits (altwithoid) with oids;
+insert into altinhoid values (1);
+select oid > 0, * from altwithoid; -- fails
+ERROR:  column "oid" does not exist
+LINE 1: select oid > 0, * from altwithoid;
+               ^
+select oid > 0, * from altinhoid;
+ ?column? | col 
+----------+-----
+ t        |   1
+(1 row)
+
+alter table altwithoid set with oids;
+NOTICE:  merging definition of column "oid" for child "altinhoid"
+select oid > 0, * from altwithoid;
+ ?column? | col 
+----------+-----
+ t        |   1
+(1 row)
+
+select oid > 0, * from altinhoid;
+ ?column? | col 
+----------+-----
+ t        |   1
+(1 row)
+
+-- the child's local definition should remain
+alter table altwithoid set without oids;
+select oid > 0, * from altwithoid; -- fails
+ERROR:  column "oid" does not exist
+LINE 1: select oid > 0, * from altwithoid;
+               ^
+select oid > 0, * from altinhoid;
+ ?column? | col 
+----------+-----
+ t        |   1
+(1 row)
+
+drop table altwithoid cascade;
+NOTICE:  drop cascades to table altinhoid
 -- test renumbering of child-table columns in inherited operations
 create table p1 (f1 int);
 create table c1 (f2 text, f3 int) inherits (p1);
@@ -1230,7 +1303,7 @@ alter table p1 add column f2 text;
 NOTICE:  merging definition of column "f2" for child "c1"
 insert into p1 values (1,2,'abc');
 insert into c1 values(11,'xyz',33,0); -- should fail
-ERROR:  new row for relation "c1" violates check constraint "c1_a1_check"
+ERROR:  new row for relation "c1" violates check constraint "p1_a1_check"
 insert into c1 values(11,'xyz',33,22);
 select * from p1;
  f1 | a1 | f2  
@@ -1249,16 +1322,15 @@ select * from p1;
 
 drop table p1 cascade;
 NOTICE:  drop cascades to table c1
-NOTICE:  drop cascades to constraint c1_a1_check on table c1
 -- test that operations with a dropped column do not try to reference
 -- its datatype
 create domain mytype as text;
 create temp table foo (f1 text, f2 mytype, f3 text);
-insert into foo values('aa','bb','cc');
+insert into foo values('bb','cc','dd');
 select * from foo;
  f1 | f2 | f3 
 ----+----+----
- aa | bb | cc
+ bb | cc | dd
 (1 row)
 
 drop domain mytype cascade;
@@ -1266,14 +1338,14 @@ NOTICE:  drop cascades to table foo column f2
 select * from foo;
  f1 | f3 
 ----+----
- aa | cc
+ bb | dd
 (1 row)
 
 insert into foo values('qq','rr');
 select * from foo;
  f1 | f3 
 ----+----
- aa | cc
+ bb | dd
  qq | rr
 (2 rows)
 
@@ -1281,7 +1353,7 @@ update foo set f3 = 'zz';
 select * from foo;
  f1 | f3 
 ----+----
- aa | zz
+ bb | zz
  qq | zz
 (2 rows)
 
@@ -1293,7 +1365,7 @@ select f3,max(f1) from foo group by f3;
 
 -- Simple tests for alter table column type
 alter table foo alter f1 TYPE integer; -- fails
-ERROR:  column "f1" cannot be cast to type "pg_catalog.int4"
+ERROR:  column "f1" cannot be cast to type integer
 alter table foo alter f1 TYPE varchar(10);
 create table anothertab (atcol1 serial8, atcol2 boolean,
 	constraint anothertab_chk check (atcol1 <= 3));
@@ -1308,7 +1380,7 @@ select * from anothertab;
 (2 rows)
 
 alter table anothertab alter column atcol1 type boolean; -- fails
-ERROR:  column "atcol1" cannot be cast to type "pg_catalog.bool"
+ERROR:  column "atcol1" cannot be cast to type boolean
 alter table anothertab alter column atcol1 type integer;
 select * from anothertab;
  atcol1 | atcol2 
@@ -1342,7 +1414,7 @@ select * from anothertab;
 
 alter table anothertab alter column atcol1 type boolean
         using case when atcol1 % 2 = 0 then true else false end; -- fails
-ERROR:  default for column "atcol1" cannot be cast to type "pg_catalog.bool"
+ERROR:  default for column "atcol1" cannot be cast to type boolean
 alter table anothertab alter column atcol1 drop default;
 alter table anothertab alter column atcol1 type boolean
         using case when atcol1 % 2 = 0 then true else false end; -- fails
@@ -1468,12 +1540,9 @@ select alter2.plus1(41);
 
 -- clean up
 drop schema alter2 cascade;
-NOTICE:  drop cascades to type alter2.ctype
-NOTICE:  drop cascades to type alter2.posint
-NOTICE:  drop cascades to function alter2.plus1(integer)
-NOTICE:  drop cascades to view alter2.v1
-NOTICE:  drop cascades to rule _RETURN on view alter2.v1
-NOTICE:  drop cascades to sequence alter2.t1_f1_seq
-NOTICE:  drop cascades to default for table alter2.t1 column f1
-NOTICE:  drop cascades to table alter2.t1
-NOTICE:  drop cascades to constraint t1_f2_check on table alter2.t1
+NOTICE:  drop cascades to 5 other objects
+DETAIL:  drop cascades to table alter2.t1
+drop cascades to view alter2.v1
+drop cascades to function alter2.plus1(integer)
+drop cascades to type alter2.posint
+drop cascades to type alter2.ctype

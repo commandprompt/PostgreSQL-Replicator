@@ -3,7 +3,7 @@
  * relnode.c
  *	  Relation-node lookup/construction routines
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -17,6 +17,7 @@
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/placeholder.h"
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
@@ -101,6 +102,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 		case RTE_SUBQUERY:
 		case RTE_FUNCTION:
 		case RTE_VALUES:
+		case RTE_CTE:
 
 			/*
 			 * Subquery, function, or values list --- set up attr range and
@@ -273,7 +275,7 @@ find_join_rel(PlannerInfo *root, Relids relids)
  * 'joinrelids' is the Relids set that uniquely identifies the join
  * 'outer_rel' and 'inner_rel' are relation nodes for the relations to be
  *		joined
- * 'jointype': type of join (inner/outer)
+ * 'sjinfo': join context info
  * 'restrictlist_ptr': result variable.  If not NULL, *restrictlist_ptr
  *		receives the list of RestrictInfo nodes that apply to this
  *		particular pair of joinable relations.
@@ -286,7 +288,7 @@ build_join_rel(PlannerInfo *root,
 			   Relids joinrelids,
 			   RelOptInfo *outer_rel,
 			   RelOptInfo *inner_rel,
-			   JoinType jointype,
+			   SpecialJoinInfo *sjinfo,
 			   List **restrictlist_ptr)
 {
 	RelOptInfo *joinrel;
@@ -353,6 +355,7 @@ build_join_rel(PlannerInfo *root,
 	 */
 	build_joinrel_tlist(root, joinrel, outer_rel);
 	build_joinrel_tlist(root, joinrel, inner_rel);
+	add_placeholders_to_joinrel(root, joinrel);
 
 	/*
 	 * Construct restrict and join clause lists for the new joinrel. (The
@@ -375,7 +378,7 @@ build_join_rel(PlannerInfo *root,
 	 * Set estimates of the joinrel's size.
 	 */
 	set_joinrel_size_estimates(root, joinrel, outer_rel, inner_rel,
-							   jointype, restrictlist);
+							   sjinfo, restrictlist);
 
 	/*
 	 * Add the joinrel to the query's joinrel list, and store it into the
@@ -402,7 +405,8 @@ build_join_rel(PlannerInfo *root,
 
 /*
  * build_joinrel_tlist
- *	  Builds a join relation's target list.
+ *	  Builds a join relation's target list from an input relation.
+ *	  (This is invoked twice to handle the two input relations.)
  *
  * The join's targetlist includes all Vars of its member relations that
  * will still be needed above the join.  This subroutine adds all such
@@ -420,16 +424,23 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 
 	foreach(vars, input_rel->reltargetlist)
 	{
-		Var		   *origvar = (Var *) lfirst(vars);
+		Node	   *origvar = (Node *) lfirst(vars);
 		Var		   *var;
 		RelOptInfo *baserel;
 		int			ndx;
 
 		/*
+		 * Ignore PlaceHolderVars in the input tlists; we'll make our own
+		 * decisions about whether to copy them.
+		 */
+		if (IsA(origvar, PlaceHolderVar))
+			continue;
+
+		/*
 		 * We can't run into any child RowExprs here, but we could find a
 		 * whole-row Var with a ConvertRowtypeExpr atop it.
 		 */
-		var = origvar;
+		var = (Var *) origvar;
 		while (!IsA(var, Var))
 		{
 			if (IsA(var, ConvertRowtypeExpr))

@@ -2,7 +2,7 @@
 /*
  * Scanner for the configuration file
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  */
@@ -39,6 +39,8 @@ struct name_value_pair
 {
 	char       *name;
 	char       *value;
+	char	   *filename;
+	int			sourceline;
 	struct name_value_pair *next;
 };
 
@@ -59,6 +61,7 @@ static char *GUC_scanstr(const char *s);
 %option 8bit
 %option never-interactive
 %option nodefault
+%option noinput
 %option nounput
 %option noyywrap
 %option prefix="GUC_yy"
@@ -257,8 +260,9 @@ ProcessConfigFile(GucContext context)
 		{
 			ereport(elevel,
 					(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
-					 errmsg("parameter \"%s\" cannot be changed after server start; configuration file change ignored",
-							gconf->name)));
+					 errmsg("attempted change of parameter \"%s\" ignored",
+							gconf->name),
+					 errdetail("This parameter cannot be changed after server start.")));
 			continue;
 		}
 
@@ -305,9 +309,16 @@ ProcessConfigFile(GucContext context)
 	/* If we got here all the options checked out okay, so apply them. */
 	for (item = head; item; item = item->next)
 	{
-		set_config_option(item->name, item->value, context,
-						  PGC_S_FILE, GUC_ACTION_SET, true);
+		if (set_config_option(item->name, item->value, context,
+			   					 PGC_S_FILE, GUC_ACTION_SET, true))
+		{
+			set_config_sourcefile(item->name, item->filename,
+								  item->sourceline);
+		}
 	}
+
+	/* Remember when we last successfully loaded the config file. */
+	PgReloadTime = GetCurrentTimestamp();
 
  cleanup_list:
 	free_name_value_list(head);
@@ -435,8 +446,13 @@ ParseConfigFile(const char *config_file, const char *calling_file,
 
 		/* now we'd like an end of line, or possibly EOF */
 		token = yylex();
-		if (token != GUC_EOL && token != 0)
-			goto parse_error;
+		if (token != GUC_EOL)
+		{
+			if (token != 0)
+				goto parse_error;
+			/* treat EOF like \n for line numbering purposes, cf bug 4752 */
+			ConfigFileLineno++;
+		}
 
 		/* OK, process the option name and value */
 		if (guc_name_compare(opt_name, "include") == 0)
@@ -478,6 +494,8 @@ ParseConfigFile(const char *config_file, const char *calling_file,
 				pfree(item->value);
 				item->name = opt_name;
 				item->value = opt_value;
+				item->filename = pstrdup(config_file);
+				item->sourceline = ConfigFileLineno-1;
 			}
 			else
 			{
@@ -485,6 +503,8 @@ ParseConfigFile(const char *config_file, const char *calling_file,
 				item = palloc(sizeof *item);
 				item->name = opt_name;
 				item->value = opt_value;
+				item->filename = pstrdup(config_file);
+				item->sourceline = ConfigFileLineno-1;
 				item->next = *head_p;
 				*head_p = item;
 				if (*tail_p == NULL)
@@ -497,6 +517,8 @@ ParseConfigFile(const char *config_file, const char *calling_file,
 			item = palloc(sizeof *item);
 			item->name = opt_name;
 			item->value = opt_value;
+			item->filename = pstrdup(config_file);
+			item->sourceline = ConfigFileLineno-1;
 			item->next = NULL;
 			if (*head_p == NULL)
 				*head_p = item;
@@ -548,6 +570,7 @@ free_name_value_list(struct name_value_pair *list)
 
 		pfree(item->name);
 		pfree(item->value);
+		pfree(item->filename);
 		pfree(item);
 		item = next;
 	}

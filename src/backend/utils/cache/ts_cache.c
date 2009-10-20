@@ -17,7 +17,7 @@
  * any database access.
  *
  *
- * Copyright (c) 2006-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2006-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -48,6 +48,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
 /*
@@ -78,18 +79,19 @@ static Oid	TSCurrentConfigCache = InvalidOid;
 
 
 /*
- * We use this catcache callback to detect when a visible change to a TS
+ * We use this syscache callback to detect when a visible change to a TS
  * catalog entry has been made, by either our own backend or another one.
- * We don't get enough information to know *which* specific catalog row
- * changed, so we have to invalidate all related cache entries.  Fortunately,
- * it seems unlikely that TS configuration changes will occur often enough
- * for this to be a performance problem.
+ *
+ * In principle we could just flush the specific cache entry that changed,
+ * but given that TS configuration changes are probably infrequent, it
+ * doesn't seem worth the trouble to determine that; we just flush all the
+ * entries of the related hash table.
  *
  * We can use the same function for all TS caches by passing the hash
  * table address as the "arg".
  */
 static void
-InvalidateTSCacheCallBack(Datum arg, Oid relid)
+InvalidateTSCacheCallBack(Datum arg, int cacheid, ItemPointer tuplePtr)
 {
 	HTAB	   *hash = (HTAB *) DatumGetPointer(arg);
 	HASH_SEQ_STATUS status;
@@ -418,7 +420,7 @@ lookup_ts_config_cache(Oid cfgId)
 		Relation	maprel;
 		Relation	mapidx;
 		ScanKeyData mapskey;
-		IndexScanDesc mapscan;
+		SysScanDesc mapscan;
 		HeapTuple	maptup;
 		ListDictionary maplists[MAXTOKENTYPE + 1];
 		Oid			mapdicts[MAXDICTSPERTT];
@@ -487,9 +489,10 @@ lookup_ts_config_cache(Oid cfgId)
 
 		maprel = heap_open(TSConfigMapRelationId, AccessShareLock);
 		mapidx = index_open(TSConfigMapIndexId, AccessShareLock);
-		mapscan = index_beginscan(maprel, mapidx, SnapshotNow, 1, &mapskey);
+		mapscan = systable_beginscan_ordered(maprel, mapidx,
+											 SnapshotNow, 1, &mapskey);
 
-		while ((maptup = index_getnext(mapscan, ForwardScanDirection)) != NULL)
+		while ((maptup = systable_getnext_ordered(mapscan, ForwardScanDirection)) != NULL)
 		{
 			Form_pg_ts_config_map cfgmap = (Form_pg_ts_config_map) GETSTRUCT(maptup);
 			int			toktype = cfgmap->maptokentype;
@@ -523,7 +526,7 @@ lookup_ts_config_cache(Oid cfgId)
 			}
 		}
 
-		index_endscan(mapscan);
+		systable_endscan_ordered(mapscan);
 		index_close(mapidx, AccessShareLock);
 		heap_close(maprel, AccessShareLock);
 

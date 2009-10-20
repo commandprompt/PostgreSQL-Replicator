@@ -3,7 +3,7 @@
  * parse_type.c
  *		handle type operations for parser
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -22,6 +22,7 @@
 #include "parser/parse_type.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
@@ -68,7 +69,7 @@ LookupTypeName(ParseState *pstate, const TypeName *typename,
 	else if (typename->pct_type)
 	{
 		/* Handle %TYPE reference to type of an existing field */
-		RangeVar   *rel = makeRangeVar(NULL, NULL);
+		RangeVar   *rel = makeRangeVar(NULL, NULL, typename->location);
 		char	   *field = NULL;
 		Oid			relid;
 		AttrNumber	attnum;
@@ -121,7 +122,7 @@ LookupTypeName(ParseState *pstate, const TypeName *typename,
 		/* this construct should never have an array indicator */
 		Assert(typename->arrayBounds == NIL);
 
-		/* emit nuisance notice */
+		/* emit nuisance notice (intentionally not errposition'd) */
 		ereport(NOTICE,
 				(errmsg("type reference %s converted to %s",
 						TypeNameToString(typename),
@@ -246,6 +247,7 @@ typenameTypeMod(ParseState *pstate, const TypeName *typename, Type typ)
 	int			n;
 	ListCell   *l;
 	ArrayType  *arrtypmod;
+	ParseCallbackState pcbstate;
 
 	/* Return prespecified typmod if no typmod expressions */
 	if (typename->typmods == NIL)
@@ -288,19 +290,15 @@ typenameTypeMod(ParseState *pstate, const TypeName *typename, Type typ)
 		{
 			A_Const    *ac = (A_Const *) tm;
 
-			/*
-			 * The grammar hands back some integers with ::int4 attached, so
-			 * allow a cast decoration if it's an Integer value, but not
-			 * otherwise.
-			 */
 			if (IsA(&ac->val, Integer))
 			{
 				cstr = (char *) palloc(32);
 				snprintf(cstr, 32, "%ld", (long) ac->val.val.ival);
 			}
-			else if (ac->typename == NULL)		/* no casts allowed */
+			else if (IsA(&ac->val, Float) ||
+					 IsA(&ac->val, String))
 			{
-				/* otherwise we can just use the str field directly. */
+				/* we can just use the str field directly. */
 				cstr = ac->val.val.str;
 			}
 		}
@@ -308,7 +306,8 @@ typenameTypeMod(ParseState *pstate, const TypeName *typename, Type typ)
 		{
 			ColumnRef  *cr = (ColumnRef *) tm;
 
-			if (list_length(cr->fields) == 1)
+			if (list_length(cr->fields) == 1 &&
+				IsA(linitial(cr->fields), String))
 				cstr = strVal(linitial(cr->fields));
 		}
 		if (!cstr)
@@ -323,8 +322,13 @@ typenameTypeMod(ParseState *pstate, const TypeName *typename, Type typ)
 	arrtypmod = construct_array(datums, n, CSTRINGOID,
 								-2, false, 'c');
 
+	/* arrange to report location if type's typmodin function fails */
+	setup_parser_errposition_callback(&pcbstate, pstate, typename->location);
+
 	result = DatumGetInt32(OidFunctionCall1(typmodin,
 											PointerGetDatum(arrtypmod)));
+
+	cancel_parser_errposition_callback(&pcbstate);
 
 	pfree(datums);
 	pfree(arrtypmod);
@@ -485,13 +489,39 @@ typeTypeRelid(Type typ)
 Datum
 stringTypeDatum(Type tp, char *string, int32 atttypmod)
 {
-	Oid			typinput;
-	Oid			typioparam;
+	Form_pg_type typform = (Form_pg_type) GETSTRUCT(tp);
+	Oid			typinput = typform->typinput;
+	Oid			typioparam = getTypeIOParam(tp);
+	Datum		result;
 
-	typinput = ((Form_pg_type) GETSTRUCT(tp))->typinput;
-	typioparam = getTypeIOParam(tp);
-	return OidInputFunctionCall(typinput, string,
-								typioparam, atttypmod);
+	result = OidInputFunctionCall(typinput, string,
+								  typioparam, atttypmod);
+
+#ifdef RANDOMIZE_ALLOCATED_MEMORY
+
+	/*
+	 * For pass-by-reference data types, repeat the conversion to see if the
+	 * input function leaves any uninitialized bytes in the result.  We can
+	 * only detect that reliably if RANDOMIZE_ALLOCATED_MEMORY is enabled, so
+	 * we don't bother testing otherwise.  The reason we don't want any
+	 * instability in the input function is that comparison of Const nodes
+	 * relies on bytewise comparison of the datums, so if the input function
+	 * leaves garbage then subexpressions that should be identical may not get
+	 * recognized as such.	See pgsql-hackers discussion of 2008-04-04.
+	 */
+	if (string && !typform->typbyval)
+	{
+		Datum		result2;
+
+		result2 = OidInputFunctionCall(typinput, string,
+									   typioparam, atttypmod);
+		if (!datumIsEqual(result, result2, typform->typbyval, typform->typlen))
+			elog(WARNING, "type %s has unstable input conversion for \"%s\"",
+				 NameStr(typform->typname), string);
+	}
+#endif
+
+	return result;
 }
 
 /* given a typeid, return the type's typrelid (associated relation, if any) */
@@ -582,6 +612,8 @@ parseTypeString(const char *str, Oid *type_id, int32 *typmod_p)
 		stmt->whereClause != NULL ||
 		stmt->groupClause != NIL ||
 		stmt->havingClause != NULL ||
+		stmt->windowClause != NIL ||
+		stmt->withClause != NULL ||
 		stmt->valuesLists != NIL ||
 		stmt->sortClause != NIL ||
 		stmt->limitOffset != NULL ||

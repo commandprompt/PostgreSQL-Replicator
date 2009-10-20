@@ -135,6 +135,21 @@
     roll-forward recovery, also known as REDO.)
    </para>
 
+   <tip>
+    <para>
+     Because <acronym>WAL</acronym> restores database file
+     contents after a crash, journaled filesystems are not necessary for
+     reliable storage of the data files or WAL files.  In fact, journaling
+     overhead can reduce performance, especially if journaling
+     causes file system <emphasis>data</emphasis> to be flushed
+     to disk.  Fortunately, data flushing during journaling can
+     often be disabled with a filesystem mount option, e.g.
+     <literal>data=writeback</> on a Linux ext3 file system.
+     Journaled file systems do improve boot speed after a crash.
+    </para>
+   </tip>
+
+
    <para>
     Using <acronym>WAL</acronym> results in a
     significantly reduced number of disk writes, because only the log
@@ -311,15 +326,24 @@
    are points in the sequence of transactions at which it is guaranteed
    that the data files have been updated with all information written before
    the checkpoint.  At checkpoint time, all dirty data pages are flushed to
-   disk and a special checkpoint record is written to the log file.
+   disk and a special checkpoint record is written to the log file. 
+   (The changes were previously flushed to the <acronym>WAL</acronym> files.)
    In the event of a crash, the crash recovery procedure looks at the latest
    checkpoint record to determine the point in the log (known as the redo
    record) from which it should start the REDO operation.  Any changes made to
-   data files before that point are known to be already on disk.  Hence, after
-   a checkpoint has been made, any log segments preceding the one containing
+   data files before that point are guaranteed to be already on disk.  Hence, after
+   a checkpoint, log segments preceding the one containing
    the redo record are no longer needed and can be recycled or removed. (When
    <acronym>WAL</acronym> archiving is being done, the log segments must be
    archived before being recycled or removed.)
+  </para>
+
+  <para>
+   The checkpoint requirement of flushing all dirty data pages to disk
+   can cause a significant I/O load.  For this reason, checkpoint
+   activity is throttled so I/O begins at checkpoint start and completes
+   before the next checkpoint starts;  this minimizes performance
+   degradation during checkpoints.
   </para>
 
   <para>
@@ -487,8 +511,11 @@
   <para>
    <acronym>WAL</acronym> logs are stored in the directory
    <filename>pg_xlog</filename> under the data directory, as a set of
-   segment files, normally each 16 MB in size.  Each segment is divided into
-   pages, normally 8 kB each.  The log record headers are described in
+   segment files, normally each 16 MB in size (but the size can be changed
+   by altering the <option>--with-wal-segsize</> configure option when
+   building the server).  Each segment is divided into pages, normally
+   8 kB each (this size can be changed via the <option>--with-wal-blocksize</>
+   configure option).  The log record headers are described in
    <filename>access/xlog.h</filename>; the record content is dependent
    on the type of event that is being logged.  Segment files are given
    ever-increasing numbers as names, starting at
@@ -525,7 +552,8 @@
    then the checkpoint record; then it performs the REDO operation by
    scanning forward from the log position indicated in the checkpoint
    record.  Because the entire content of data pages is saved in the
-   log on the first page modification after a checkpoint, all pages
+   log on the first page modification after a checkpoint (assuming
+   <xref linkend="guc-full-page-writes"> is not disabled), all pages
    changed since the checkpoint will be restored to a consistent
    state.
   </para>

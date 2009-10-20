@@ -1,6 +1,5 @@
 /* Processed by ecpg (regression mode) */
 /* These include files are added by the preprocessor */
-#include <ecpgtype.h>
 #include <ecpglib.h>
 #include <ecpgerrno.h>
 #include <sqlca.h>
@@ -93,12 +92,12 @@ struct sqlca_t *ECPGget_sqlca(void);
 
 
 
-int main(int argc, char **argv)
+int main()
 {  /* exec sql begin declare section */
     
    
 #line 9 "code100.pgc"
- int  index    ;
+ int index ;
 /* exec sql end declare section */
 #line 10 "code100.pgc"
 
@@ -111,48 +110,48 @@ int main(int argc, char **argv)
 
    if (sqlca.sqlcode) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
 
-   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create  table test ( \"index\" numeric ( 3 )   primary key   , \"payload\" int4    not null )    ", ECPGt_EOIT, ECPGt_EORT);}
+   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create table test ( \"index\" numeric ( 3 ) primary key , \"payload\" int4 not null )", ECPGt_EOIT, ECPGt_EORT);}
 #line 20 "code100.pgc"
 
    if (sqlca.sqlcode) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
-   { ECPGtrans(__LINE__, NULL, "commit");}
+   { ECPGtrans(__LINE__, NULL, "commit work");}
 #line 22 "code100.pgc"
 
    if (sqlca.sqlcode) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
    
    for (index=0;index<10;++index)
-   {  { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "insert into test ( payload  , index  ) values ( 0 ,  $1  ) ", 
+   {  { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "insert into test ( payload , index ) values ( 0 , $1  )", 
 	ECPGt_int,&(index),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);}
 #line 28 "code100.pgc"
 
       if (sqlca.sqlcode) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
    }
-   { ECPGtrans(__LINE__, NULL, "commit");}
+   { ECPGtrans(__LINE__, NULL, "commit work");}
 #line 31 "code100.pgc"
 
    if (sqlca.sqlcode) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
    
-   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "update test set payload  = payload + 1  where index = - 1 ", ECPGt_EOIT, ECPGt_EORT);}
+   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "update test set payload = payload + 1 where index = - 1", ECPGt_EOIT, ECPGt_EORT);}
 #line 35 "code100.pgc"
 
    if (sqlca.sqlcode!=100) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
    
-   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "delete from test  where index = - 1 ", ECPGt_EOIT, ECPGt_EORT);}
+   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "delete from test where index = - 1", ECPGt_EOIT, ECPGt_EORT);}
 #line 38 "code100.pgc"
 
    if (sqlca.sqlcode!=100) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
 
-   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "insert into test ( select  *  from test where index = - 1   ) ", ECPGt_EOIT, ECPGt_EORT);}
+   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "insert into test ( select * from test where index = - 1 )", ECPGt_EOIT, ECPGt_EORT);}
 #line 41 "code100.pgc"
 
    if (sqlca.sqlcode!=100) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
 
-   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table test ", ECPGt_EOIT, ECPGt_EORT);}
+   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table test", ECPGt_EOIT, ECPGt_EORT);}
 #line 44 "code100.pgc"
 
    if (sqlca.sqlcode) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
-   { ECPGtrans(__LINE__, NULL, "commit");}
+   { ECPGtrans(__LINE__, NULL, "commit work");}
 #line 46 "code100.pgc"
 
    if (sqlca.sqlcode) printf("%ld:%s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);

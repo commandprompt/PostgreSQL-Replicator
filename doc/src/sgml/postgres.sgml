@@ -78,7 +78,7 @@
     chapters individually as they choose.  The information in this
     part is presented in a narrative fashion in topical units.
     Readers looking for a complete description of a particular command
-    should look into <xref linkend="reference">.
+    should see <xref linkend="reference">.
    </para>
 
    <para>
@@ -127,12 +127,12 @@
     self-contained and can be read individually as desired.  The
     information in this part is presented in a narrative fashion in
     topical units.  Readers looking for a complete description of a
-    particular command should look into <xref linkend="reference">.
+    particular command should see <xref linkend="reference">.
    </para>
 
    <para>
-    The first few chapters are written so that they can be understood
-    without prerequisite knowledge, so that new users who need to set
+    The first few chapters are written so they can be understood
+    without prerequisite knowledge, so new users who need to set
     up their own server can begin their exploration with this part.
     The rest of this part is about tuning and management; that material
     assumes that the reader is familiar with the general use of
@@ -146,9 +146,9 @@
   &installw;
   &runtime;
   &config;
+  &client-auth;
   &user-manag;
   &manage-ag;
-  &client-auth;
   &charset;
   &maintenance;
   &backup;

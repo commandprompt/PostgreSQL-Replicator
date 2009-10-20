@@ -21,7 +21,7 @@
  * are different.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	$PostgreSQL$
@@ -218,7 +218,7 @@ pq_send_ascii_string(StringInfo buf, const char *str)
 {
 	while (*str)
 	{
-		char	ch = *str++;
+		char		ch = *str++;
 
 		if (IS_HIGHBIT_SET(ch))
 			ch = '?';

@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -19,12 +19,7 @@
 #ifndef PG_TRIGGER_H
 #define PG_TRIGGER_H
 
-/* ----------------
- *		postgres.h contains the system type definitions and the
- *		CATALOG(), BKI_BOOTSTRAP and DATA() sugar words so this file
- *		can be read by both genbki.sh and the C compiler.
- * ----------------
- */
+#include "catalog/genbki.h"
 
 /* ----------------
  *		pg_trigger definition.	cpp turns this into
@@ -94,6 +89,7 @@ typedef FormData_pg_trigger *Form_pg_trigger;
 #define TRIGGER_TYPE_INSERT				(1 << 2)
 #define TRIGGER_TYPE_DELETE				(1 << 3)
 #define TRIGGER_TYPE_UPDATE				(1 << 4)
+#define TRIGGER_TYPE_TRUNCATE			(1 << 5)
 
 /* Macros for manipulating tgtype */
 #define TRIGGER_CLEAR_TYPE(type)		((type) = 0)
@@ -103,11 +99,13 @@ typedef FormData_pg_trigger *Form_pg_trigger;
 #define TRIGGER_SETT_INSERT(type)		((type) |= TRIGGER_TYPE_INSERT)
 #define TRIGGER_SETT_DELETE(type)		((type) |= TRIGGER_TYPE_DELETE)
 #define TRIGGER_SETT_UPDATE(type)		((type) |= TRIGGER_TYPE_UPDATE)
+#define TRIGGER_SETT_TRUNCATE(type)		((type) |= TRIGGER_TYPE_TRUNCATE)
 
 #define TRIGGER_FOR_ROW(type)			((type) & TRIGGER_TYPE_ROW)
 #define TRIGGER_FOR_BEFORE(type)		((type) & TRIGGER_TYPE_BEFORE)
 #define TRIGGER_FOR_INSERT(type)		((type) & TRIGGER_TYPE_INSERT)
 #define TRIGGER_FOR_DELETE(type)		((type) & TRIGGER_TYPE_DELETE)
 #define TRIGGER_FOR_UPDATE(type)		((type) & TRIGGER_TYPE_UPDATE)
+#define TRIGGER_FOR_TRUNCATE(type)		((type) & TRIGGER_TYPE_TRUNCATE)
 
 #endif   /* PG_TRIGGER_H */

@@ -3,7 +3,7 @@
  * pg_conversion.c
  *	  routines to support manipulation of the pg_conversion relation
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,18 +15,21 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/sysattr.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h"
 #include "catalog/pg_conversion.h"
+#include "catalog/pg_conversion_fn.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "mb/pg_wchar.h"
+#include "miscadmin.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
-#include "utils/acl.h"
-#include "miscadmin.h"
+#include "utils/tqual.h"
 
 /*
  * ConversionCreate
@@ -43,7 +46,7 @@ ConversionCreate(const char *conname, Oid connamespace,
 	Relation	rel;
 	TupleDesc	tupDesc;
 	HeapTuple	tup;
-	char		nulls[Natts_pg_conversion];
+	bool		nulls[Natts_pg_conversion];
 	Datum		values[Natts_pg_conversion];
 	NameData	cname;
 	Oid			oid;
@@ -86,7 +89,7 @@ ConversionCreate(const char *conname, Oid connamespace,
 	/* initialize nulls and values */
 	for (i = 0; i < Natts_pg_conversion; i++)
 	{
-		nulls[i] = ' ';
+		nulls[i] = false;
 		values[i] = (Datum) NULL;
 	}
 
@@ -100,7 +103,7 @@ ConversionCreate(const char *conname, Oid connamespace,
 	values[Anum_pg_conversion_conproc - 1] = ObjectIdGetDatum(conproc);
 	values[Anum_pg_conversion_condefault - 1] = BoolGetDatum(def);
 
-	tup = heap_formtuple(tupDesc, values, nulls);
+	tup = heap_form_tuple(tupDesc, values, nulls);
 
 	/* insert a new tuple */
 	oid = simple_heap_insert(rel, tup);
@@ -133,40 +136,6 @@ ConversionCreate(const char *conname, Oid connamespace,
 	heap_close(rel, RowExclusiveLock);
 
 	return oid;
-}
-
-/*
- * ConversionDrop
- *
- * Drop a conversion after doing permission checks.
- */
-void
-ConversionDrop(Oid conversionOid, DropBehavior behavior)
-{
-	HeapTuple	tuple;
-	ObjectAddress object;
-
-	tuple = SearchSysCache(CONVOID,
-						   ObjectIdGetDatum(conversionOid),
-						   0, 0, 0);
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for conversion %u", conversionOid);
-
-	if (!superuser() &&
-		((Form_pg_conversion) GETSTRUCT(tuple))->conowner != GetUserId())
-		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CONVERSION,
-				  NameStr(((Form_pg_conversion) GETSTRUCT(tuple))->conname));
-
-	ReleaseSysCache(tuple);
-
-	/*
-	 * Do the deletion
-	 */
-	object.classId = ConversionRelationId;
-	object.objectId = conversionOid;
-	object.objectSubId = 0;
-
-	performDeletion(&object, behavior);
 }
 
 /*

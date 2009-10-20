@@ -16,7 +16,7 @@
  * a quick copyObject() call before manipulating the query tree.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	$PostgreSQL$
@@ -40,7 +40,7 @@
 #include "commands/tablespace.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
-#include "optimizer/clauses.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/analyze.h"
 #include "parser/gramparse.h"
 #include "parser/parse_clause.h"
@@ -266,7 +266,8 @@ transformColumnDefinition(ParseState *pstate, CreateStmtContext *cxt,
 
 	/* Check for SERIAL pseudo-types */
 	is_serial = false;
-	if (list_length(column->typename->names) == 1)
+	if (list_length(column->typename->names) == 1 &&
+		!column->typename->pct_type)
 	{
 		char	   *typname = strVal(linitial(column->typename->names));
 
@@ -284,6 +285,16 @@ transformColumnDefinition(ParseState *pstate, CreateStmtContext *cxt,
 			column->typename->names = NIL;
 			column->typename->typeid = INT8OID;
 		}
+
+		/*
+		 * We have to reject "serial[]" explicitly, because once we've set
+		 * typeid, LookupTypeName won't notice arrayBounds.  We don't need any
+		 * special coding for serial(typmod) though.
+		 */
+		if (is_serial && column->typename->arrayBounds != NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("array of serial is not implemented")));
 	}
 
 	/* Do necessary work on the column type declaration */
@@ -297,6 +308,7 @@ transformColumnDefinition(ParseState *pstate, CreateStmtContext *cxt,
 		char	   *sname;
 		char	   *qstring;
 		A_Const    *snamenode;
+		TypeCast   *castnode;
 		FuncCall   *funccallnode;
 		CreateSeqStmt *seqstmt;
 		AlterSeqStmt *altseqstmt;
@@ -334,7 +346,7 @@ transformColumnDefinition(ParseState *pstate, CreateStmtContext *cxt,
 		 * TABLE.
 		 */
 		seqstmt = makeNode(CreateSeqStmt);
-		seqstmt->sequence = makeRangeVar(snamespace, sname);
+		seqstmt->sequence = makeRangeVar(snamespace, sname, -1);
 		seqstmt->options = NIL;
 
 		cxt->blist = lappend(cxt->blist, seqstmt);
@@ -345,7 +357,7 @@ transformColumnDefinition(ParseState *pstate, CreateStmtContext *cxt,
 		 * done after this CREATE/ALTER TABLE.
 		 */
 		altseqstmt = makeNode(AlterSeqStmt);
-		altseqstmt->sequence = makeRangeVar(snamespace, sname);
+		altseqstmt->sequence = makeRangeVar(snamespace, sname, -1);
 		attnamelist = list_make3(makeString(snamespace),
 								 makeString(cxt->relation->relname),
 								 makeString(column->colname));
@@ -368,12 +380,18 @@ transformColumnDefinition(ParseState *pstate, CreateStmtContext *cxt,
 		snamenode = makeNode(A_Const);
 		snamenode->val.type = T_String;
 		snamenode->val.val.str = qstring;
-		snamenode->typename = SystemTypeName("regclass");
+		snamenode->location = -1;
+		castnode = makeNode(TypeCast);
+		castnode->typename = SystemTypeName("regclass");
+		castnode->arg = (Node *) snamenode;
+		castnode->location = -1;
 		funccallnode = makeNode(FuncCall);
 		funccallnode->funcname = SystemFuncName("nextval");
-		funccallnode->args = list_make1(snamenode);
+		funccallnode->args = list_make1(castnode);
 		funccallnode->agg_star = false;
 		funccallnode->agg_distinct = false;
+		funccallnode->func_variadic = false;
+		funccallnode->over = NULL;
 		funccallnode->location = -1;
 
 		constraint = makeNode(Constraint);
@@ -531,7 +549,7 @@ transformInhRelation(ParseState *pstate, CreateStmtContext *cxt,
 	bool		including_indexes = false;
 	ListCell   *elem;
 
-	relation = heap_openrv(inhRelation->relation, AccessShareLock);
+	relation = parserOpenTable(pstate, inhRelation->relation, AccessShareLock);
 
 	if (relation->rd_rel->relkind != RELKIND_RELATION)
 		ereport(ERROR,
@@ -624,7 +642,7 @@ transformInhRelation(ParseState *pstate, CreateStmtContext *cxt,
 		 */
 		if (attribute->atthasdef && including_defaults)
 		{
-			char	   *this_default = NULL;
+			Node	   *this_default = NULL;
 			AttrDefault *attrdef;
 			int			i;
 
@@ -635,7 +653,7 @@ transformInhRelation(ParseState *pstate, CreateStmtContext *cxt,
 			{
 				if (attrdef[i].adnum == parent_attno)
 				{
-					this_default = attrdef[i].adbin;
+					this_default = stringToNode(attrdef[i].adbin);
 					break;
 				}
 			}
@@ -646,7 +664,7 @@ transformInhRelation(ParseState *pstate, CreateStmtContext *cxt,
 			 * but it can't; so default is ready to apply to child.
 			 */
 
-			def->cooked_default = pstrdup(this_default);
+			def->cooked_default = this_default;
 		}
 	}
 
@@ -782,9 +800,9 @@ generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
 	index->idxname = NULL;
 
 	/*
-	 * If the index is marked PRIMARY, it's certainly from a constraint;
-	 * else, if it's not marked UNIQUE, it certainly isn't; else, we have
-	 * to search pg_depend to see if there's an associated unique constraint.
+	 * If the index is marked PRIMARY, it's certainly from a constraint; else,
+	 * if it's not marked UNIQUE, it certainly isn't; else, we have to search
+	 * pg_depend to see if there's an associated unique constraint.
 	 */
 	if (index->primary)
 		index->isconstraint = true;
@@ -800,7 +818,7 @@ generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
 	{
 		char	   *exprsString;
 
-		exprsString = DatumGetCString(DirectFunctionCall1(textout, datum));
+		exprsString = TextDatumGetCString(datum);
 		indexprs = (List *) stringToNode(exprsString);
 	}
 	else
@@ -858,10 +876,10 @@ generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
 		if (amrec->amcanorder)
 		{
 			/*
-			 * If it supports sort ordering, copy DESC and NULLS opts.
-			 * Don't set non-default settings unnecessarily, though,
-			 * so as to improve the chance of recognizing equivalence
-			 * to constraint indexes.
+			 * If it supports sort ordering, copy DESC and NULLS opts. Don't
+			 * set non-default settings unnecessarily, though, so as to
+			 * improve the chance of recognizing equivalence to constraint
+			 * indexes.
 			 */
 			if (opt & INDOPTION_DESC)
 			{
@@ -893,7 +911,7 @@ generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
 		char	   *pred_str;
 
 		/* Convert text string to node tree */
-		pred_str = DatumGetCString(DirectFunctionCall1(textout, datum));
+		pred_str = TextDatumGetCString(datum);
 		index->whereClause = (Node *) stringToNode(pred_str);
 		/* Adjust attribute numbers */
 		change_varattnos_of_a_node(index->whereClause, attmap);
@@ -1024,6 +1042,7 @@ transformIndexConstraints(ParseState *pstate, CreateStmtContext *cxt)
 				strcmp(index->accessMethod, priorindex->accessMethod) == 0)
 			{
 				priorindex->unique |= index->unique;
+
 				/*
 				 * If the prior index is as yet unnamed, and this one is
 				 * named, then transfer the name to the prior index. This
@@ -1454,6 +1473,10 @@ transformRuleStmt(RuleStmt *stmt, const char *queryString,
 		ereport(ERROR,
 				(errcode(ERRCODE_GROUPING_ERROR),
 		   errmsg("cannot use aggregate function in rule WHERE condition")));
+	if (pstate->p_hasWindowFuncs)
+		ereport(ERROR,
+				(errcode(ERRCODE_WINDOWING_ERROR),
+			  errmsg("cannot use window function in rule WHERE condition")));
 
 	/*
 	 * 'instead nothing' rules with a qualification need a query rangetable so
@@ -1704,37 +1727,19 @@ transformAlterTableStmt(AlterTableStmt *stmt, const char *queryString)
 		switch (cmd->subtype)
 		{
 			case AT_AddColumn:
+			case AT_AddColumnToView:
 				{
 					ColumnDef  *def = (ColumnDef *) cmd->def;
 
-					Assert(IsA(cmd->def, ColumnDef));
-					transformColumnDefinition(pstate, &cxt,
-											  (ColumnDef *) cmd->def);
+					Assert(IsA(def, ColumnDef));
+					transformColumnDefinition(pstate, &cxt, def);
 
 					/*
 					 * If the column has a non-null default, we can't skip
 					 * validation of foreign keys.
 					 */
-					if (((ColumnDef *) cmd->def)->raw_default != NULL)
+					if (def->raw_default != NULL)
 						skipValidation = false;
-
-					newcmds = lappend(newcmds, cmd);
-
-					/*
-					 * Convert an ADD COLUMN ... NOT NULL constraint to a
-					 * separate command
-					 */
-					if (def->is_not_null)
-					{
-						/* Remove NOT NULL from AddColumn */
-						def->is_not_null = false;
-
-						/* Add as a separate AlterTableCmd */
-						newcmd = makeNode(AlterTableCmd);
-						newcmd->subtype = AT_SetNotNull;
-						newcmd->name = pstrdup(def->colname);
-						newcmds = lappend(newcmds, newcmd);
-					}
 
 					/*
 					 * All constraints are processed in other ways. Remove the
@@ -1742,6 +1747,7 @@ transformAlterTableStmt(AlterTableStmt *stmt, const char *queryString)
 					 */
 					def->constraints = NIL;
 
+					newcmds = lappend(newcmds, cmd);
 					break;
 				}
 			case AT_AddConstraint:
@@ -1749,7 +1755,6 @@ transformAlterTableStmt(AlterTableStmt *stmt, const char *queryString)
 				/*
 				 * The original AddConstraint cmd node doesn't go to newcmds
 				 */
-
 				if (IsA(cmd->def, Constraint))
 					transformTableConstraint(pstate, &cxt,
 											 (Constraint *) cmd->def);

@@ -3,7 +3,7 @@
  * varchar.c
  *	  Functions for the built-in types char(n) and varchar(n).
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -203,21 +203,16 @@ bpcharin(PG_FUNCTION_ARGS)
 
 /*
  * Convert a CHARACTER value to a C string.
+ *
+ * Uses the text conversion functions, which is only appropriate if BpChar
+ * and text are equivalent types.
  */
 Datum
 bpcharout(PG_FUNCTION_ARGS)
 {
-	BpChar	   *s = PG_GETARG_BPCHAR_PP(0);
-	char	   *result;
-	int			len;
+	Datum		txt = PG_GETARG_DATUM(0);
 
-	/* copy and add null term */
-	len = VARSIZE_ANY_EXHDR(s);
-	result = (char *) palloc(len + 1);
-	memcpy(result, VARDATA_ANY(s), len);
-	result[len] = '\0';
-
-	PG_RETURN_CSTRING(result);
+	PG_RETURN_CSTRING(TextDatumGetCString(txt));
 }
 
 /*
@@ -403,19 +398,17 @@ bpchar_name(PG_FUNCTION_ARGS)
 
 /* name_bpchar()
  * Converts a NameData type to a bpchar type.
+ *
+ * Uses the text conversion functions, which is only appropriate if BpChar
+ * and text are equivalent types.
  */
 Datum
 name_bpchar(PG_FUNCTION_ARGS)
 {
 	Name		s = PG_GETARG_NAME(0);
 	BpChar	   *result;
-	int			len;
 
-	len = strlen(NameStr(*s));
-	result = (BpChar *) palloc(VARHDRSZ + len);
-	memcpy(VARDATA(result), NameStr(*s), len);
-	SET_VARSIZE(result, VARHDRSZ + len);
-
+	result = (BpChar *) cstring_to_text(NameStr(*s));
 	PG_RETURN_BPCHAR_P(result);
 }
 
@@ -454,6 +447,9 @@ bpchartypmodout(PG_FUNCTION_ARGS)
  *
  * If the input string is too long, raise an error, unless the extra
  * characters are spaces, in which case they're truncated.  (per SQL)
+ *
+ * Uses the C string to text conversion function, which is only appropriate
+ * if VarChar and text are equivalent types.
  */
 static VarChar *
 varchar_input(const char *s, size_t len, int32 atttypmod)
@@ -481,10 +477,7 @@ varchar_input(const char *s, size_t len, int32 atttypmod)
 		len = mbmaxlen;
 	}
 
-	result = (VarChar *) palloc(len + VARHDRSZ);
-	SET_VARSIZE(result, len + VARHDRSZ);
-	memcpy(VARDATA(result), s, len);
-
+	result = (VarChar *) cstring_to_text_with_len(s, len);
 	return result;
 }
 
@@ -510,21 +503,16 @@ varcharin(PG_FUNCTION_ARGS)
 
 /*
  * Convert a VARCHAR value to a C string.
+ *
+ * Uses the text to C string conversion function, which is only appropriate
+ * if VarChar and text are equivalent types.
  */
 Datum
 varcharout(PG_FUNCTION_ARGS)
 {
-	VarChar    *s = PG_GETARG_VARCHAR_PP(0);
-	char	   *result;
-	int32		len;
+	Datum		txt = PG_GETARG_DATUM(0);
 
-	/* copy and add null term */
-	len = VARSIZE_ANY_EXHDR(s);
-	result = palloc(len + 1);
-	memcpy(result, VARDATA_ANY(s), len);
-	result[len] = '\0';
-
-	PG_RETURN_CSTRING(result);
+	PG_RETURN_CSTRING(TextDatumGetCString(txt));
 }
 
 /*
@@ -578,7 +566,6 @@ varchar(PG_FUNCTION_ARGS)
 	VarChar    *source = PG_GETARG_VARCHAR_PP(0);
 	int32		typmod = PG_GETARG_INT32(1);
 	bool		isExplicit = PG_GETARG_BOOL(2);
-	VarChar    *result;
 	int32		len,
 				maxlen;
 	size_t		maxmblen;
@@ -608,11 +595,8 @@ varchar(PG_FUNCTION_ARGS)
 							 maxlen)));
 	}
 
-	result = palloc(maxmblen + VARHDRSZ);
-	SET_VARSIZE(result, maxmblen + VARHDRSZ);
-	memcpy(VARDATA(result), s_data, maxmblen);
-
-	PG_RETURN_VARCHAR_P(result);
+	PG_RETURN_VARCHAR_P((VarChar *) cstring_to_text_with_len(s_data,
+															 maxmblen));
 }
 
 Datum
@@ -901,4 +885,113 @@ hashbpchar(PG_FUNCTION_ARGS)
 	PG_FREE_IF_COPY(key, 0);
 
 	return result;
+}
+
+
+/*
+ * The following operators support character-by-character comparison
+ * of bpchar datums, to allow building indexes suitable for LIKE clauses.
+ * Note that the regular bpchareq/bpcharne comparison operators are assumed
+ * to be compatible with these!
+ */
+
+static int
+internal_bpchar_pattern_compare(BpChar *arg1, BpChar *arg2)
+{
+	int			result;
+	int			len1,
+				len2;
+
+	len1 = bcTruelen(arg1);
+	len2 = bcTruelen(arg2);
+
+	result = strncmp(VARDATA_ANY(arg1), VARDATA_ANY(arg2), Min(len1, len2));
+	if (result != 0)
+		return result;
+	else if (len1 < len2)
+		return -1;
+	else if (len1 > len2)
+		return 1;
+	else
+		return 0;
+}
+
+
+Datum
+bpchar_pattern_lt(PG_FUNCTION_ARGS)
+{
+	BpChar	   *arg1 = PG_GETARG_BPCHAR_PP(0);
+	BpChar	   *arg2 = PG_GETARG_BPCHAR_PP(1);
+	int			result;
+
+	result = internal_bpchar_pattern_compare(arg1, arg2);
+
+	PG_FREE_IF_COPY(arg1, 0);
+	PG_FREE_IF_COPY(arg2, 1);
+
+	PG_RETURN_BOOL(result < 0);
+}
+
+
+Datum
+bpchar_pattern_le(PG_FUNCTION_ARGS)
+{
+	BpChar	   *arg1 = PG_GETARG_BPCHAR_PP(0);
+	BpChar	   *arg2 = PG_GETARG_BPCHAR_PP(1);
+	int			result;
+
+	result = internal_bpchar_pattern_compare(arg1, arg2);
+
+	PG_FREE_IF_COPY(arg1, 0);
+	PG_FREE_IF_COPY(arg2, 1);
+
+	PG_RETURN_BOOL(result <= 0);
+}
+
+
+Datum
+bpchar_pattern_ge(PG_FUNCTION_ARGS)
+{
+	BpChar	   *arg1 = PG_GETARG_BPCHAR_PP(0);
+	BpChar	   *arg2 = PG_GETARG_BPCHAR_PP(1);
+	int			result;
+
+	result = internal_bpchar_pattern_compare(arg1, arg2);
+
+	PG_FREE_IF_COPY(arg1, 0);
+	PG_FREE_IF_COPY(arg2, 1);
+
+	PG_RETURN_BOOL(result >= 0);
+}
+
+
+Datum
+bpchar_pattern_gt(PG_FUNCTION_ARGS)
+{
+	BpChar	   *arg1 = PG_GETARG_BPCHAR_PP(0);
+	BpChar	   *arg2 = PG_GETARG_BPCHAR_PP(1);
+	int			result;
+
+	result = internal_bpchar_pattern_compare(arg1, arg2);
+
+	PG_FREE_IF_COPY(arg1, 0);
+	PG_FREE_IF_COPY(arg2, 1);
+
+	PG_RETURN_BOOL(result > 0);
+}
+
+
+Datum
+btbpchar_pattern_cmp(PG_FUNCTION_ARGS)
+{
+	BpChar	   *arg1 = PG_GETARG_BPCHAR_PP(0);
+	BpChar	   *arg2 = PG_GETARG_BPCHAR_PP(1);
+	int			result;
+
+	result = internal_bpchar_pattern_compare(arg1, arg2);
+
+	PG_FREE_IF_COPY(arg1, 0);
+	PG_FREE_IF_COPY(arg2, 1);
+
+	PG_RETURN_INT32(result);
 }

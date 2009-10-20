@@ -4,7 +4,7 @@
  *	  This file contains routines to support creation of toast tables
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -32,21 +32,32 @@
 #include "utils/syscache.h"
 
 
-static bool create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid);
+static bool create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
+				   Datum reloptions, bool force);
 static bool needs_toast_table(Relation rel);
 
 
 /*
  * AlterTableCreateToastTable
  *		If the table needs a toast table, and doesn't already have one,
- *		then create a toast table for it.
+ *		then create a toast table for it.  (With the force option, make
+ *		a toast table even if it appears unnecessary.)
+ *
+ * The caller can also specify the OID to be used for the toast table.
+ * Usually, toastOid should be InvalidOid to allow a free OID to be assigned.
+ * (This option, as well as the force option, is not used by core Postgres,
+ * but is provided to support pg_migrator.)
+ *
+ * reloptions for the toast table can be passed, too.  Pass (Datum) 0
+ * for default reloptions.
  *
  * We expect the caller to have verified that the relation is a table and have
  * already done any necessary permission checks.  Callers expect this function
  * to end with CommandCounterIncrement if it makes any changes.
  */
 void
-AlterTableCreateToastTable(Oid relOid)
+AlterTableCreateToastTable(Oid relOid, Oid toastOid,
+						   Datum reloptions, bool force)
 {
 	Relation	rel;
 
@@ -58,7 +69,7 @@ AlterTableCreateToastTable(Oid relOid)
 	rel = heap_open(relOid, AccessExclusiveLock);
 
 	/* create_toast_table does all the work */
-	(void) create_toast_table(rel, InvalidOid, InvalidOid);
+	(void) create_toast_table(rel, toastOid, InvalidOid, reloptions, force);
 
 	heap_close(rel, NoLock);
 }
@@ -73,7 +84,7 @@ BootstrapToastTable(char *relName, Oid toastOid, Oid toastIndexOid)
 {
 	Relation	rel;
 
-	rel = heap_openrv(makeRangeVar(NULL, relName), AccessExclusiveLock);
+	rel = heap_openrv(makeRangeVar(NULL, relName, -1), AccessExclusiveLock);
 
 	/* Note: during bootstrap may see uncataloged relation */
 	if (rel->rd_rel->relkind != RELKIND_RELATION &&
@@ -84,7 +95,7 @@ BootstrapToastTable(char *relName, Oid toastOid, Oid toastIndexOid)
 						relName)));
 
 	/* create_toast_table does all the work */
-	if (!create_toast_table(rel, toastOid, toastIndexOid))
+	if (!create_toast_table(rel, toastOid, toastIndexOid, (Datum) 0, false))
 		elog(ERROR, "\"%s\" does not require a toast table",
 			 relName);
 
@@ -96,11 +107,12 @@ BootstrapToastTable(char *relName, Oid toastOid, Oid toastIndexOid)
  * create_toast_table --- internal workhorse
  *
  * rel is already opened and exclusive-locked
- * toastOid and toastIndexOid are normally InvalidOid, but during
- * bootstrap they can be nonzero to specify hand-assigned OIDs
+ * toastOid and toastIndexOid are normally InvalidOid, but
+ * either or both can be nonzero to specify caller-assigned OIDs
  */
 static bool
-create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid)
+create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
+				   Datum reloptions, bool force)
 {
 	Oid			relOid = RelationGetRelid(rel);
 	HeapTuple	reltup;
@@ -138,8 +150,12 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid)
 
 	/*
 	 * Check to see whether the table actually needs a TOAST table.
+	 *
+	 * Caller can optionally override this check.  (Note: at present no
+	 * callers in core Postgres do so, but this option is needed by
+	 * pg_migrator.)
 	 */
-	if (!needs_toast_table(rel))
+	if (!force && !needs_toast_table(rel))
 		return false;
 
 	/*
@@ -178,27 +194,24 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid)
 	 * Toast tables for regular relations go in pg_toast; those for temp
 	 * relations go into the per-backend temp-toast-table namespace.
 	 */
-	if (rel->rd_istemp)
+	if (rel->rd_islocaltemp)
 		namespaceid = GetTempToastNamespace();
 	else
 		namespaceid = PG_TOAST_NAMESPACE;
 
-	/*
-	 * XXX would it make sense to apply the master's reloptions to the toast
-	 * table?  Or maybe some toast-specific reloptions?
-	 */
 	toast_relid = heap_create_with_catalog(toast_relname,
 										   namespaceid,
 										   rel->rd_rel->reltablespace,
 										   toastOid,
 										   rel->rd_rel->relowner,
 										   tupdesc,
+										   NIL,
 										   RELKIND_TOASTVALUE,
 										   shared_relation,
 										   true,
 										   0,
 										   ONCOMMIT_NOOP,
-										   (Datum) 0,
+										   reloptions,
 										   true);
 
 	/* make the toast relation visible, else index creation will fail */

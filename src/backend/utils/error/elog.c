@@ -37,7 +37,7 @@
  * overflow.)
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -75,6 +75,11 @@
 #undef _
 #define _(x) err_gettext(x)
 
+static const char *err_gettext(const char *str)
+/* This extension allows gcc to check the format string for consistency with
+   the supplied arguments. */
+__attribute__((format_arg(1)));
+
 /* Global variables */
 ErrorContextCallback *error_context_stack = NULL;
 
@@ -83,11 +88,22 @@ sigjmp_buf *PG_exception_stack = NULL;
 extern bool redirection_done;
 
 /* GUC parameters */
-PGErrorVerbosity Log_error_verbosity = PGERROR_VERBOSE;
+int			Log_error_verbosity = PGERROR_VERBOSE;
 char	   *Log_line_prefix = NULL;		/* format for extra log line info */
 int			Log_destination = LOG_DESTINATION_STDERR;
 
 #ifdef HAVE_SYSLOG
+
+/*
+ * Max string length to send to syslog().  Note that this doesn't count the
+ * sequence-number prefix we add, and of course it doesn't count the prefix
+ * added by syslog itself.	On many implementations it seems that the hard
+ * limit is approximately 2K bytes including both those prefixes.
+ */
+#ifndef PG_SYSLOG_LIMIT
+#define PG_SYSLOG_LIMIT 1024
+#endif
+
 static bool openlog_done = false;
 static char *syslog_ident = NULL;
 static int	syslog_facility = LOG_LOCAL0;
@@ -138,6 +154,8 @@ static void append_with_tabs(StringInfo buf, const char *str);
 static bool is_log_level_output(int elevel, int log_min_level);
 static void write_pipe_chunks(char *data, int len, int dest);
 static void write_csvlog(ErrorData *edata);
+static void setup_formatted_log_time(void);
+static void setup_formatted_start_time(void);
 
 
 /*
@@ -186,7 +204,7 @@ err_gettext(const char *str)
  */
 bool
 errstart(int elevel, const char *filename, int lineno,
-		 const char *funcname)
+		 const char *funcname, const char *domain)
 {
 	ErrorData  *edata;
 	bool		output_to_server;
@@ -285,8 +303,8 @@ errstart(int elevel, const char *filename, int lineno,
 		MemoryContextReset(ErrorContext);
 
 		/*
-		 * Infinite error recursion might be due to something broken
-		 * in a context traceback routine.	Abandon them too.  We also abandon
+		 * Infinite error recursion might be due to something broken in a
+		 * context traceback routine.  Abandon them too.  We also abandon
 		 * attempting to print the error statement (which, if long, could
 		 * itself be the source of the recursive failure).
 		 */
@@ -316,6 +334,8 @@ errstart(int elevel, const char *filename, int lineno,
 	edata->filename = filename;
 	edata->lineno = lineno;
 	edata->funcname = funcname;
+	/* the default text domain is the backend's */
+	edata->domain = domain ? domain : PG_TEXTDOMAIN("postgres");
 	/* Select default errcode based on elevel */
 	if (elevel >= ERROR)
 		edata->sqlerrcode = ERRCODE_INTERNAL_ERROR;
@@ -419,6 +439,8 @@ errfinish(int dummy,...)
 		pfree(edata->message);
 	if (edata->detail)
 		pfree(edata->detail);
+	if (edata->detail_log)
+		pfree(edata->detail_log);
 	if (edata->hint)
 		pfree(edata->hint);
 	if (edata->context)
@@ -637,7 +659,7 @@ errcode_for_socket_access(void)
 		StringInfoData	buf; \
 		/* Internationalize the error format string */ \
 		if (translateit && !in_error_recursion_trouble()) \
-			fmt = gettext(fmt); \
+			fmt = dgettext(edata->domain, fmt); \
 		/* Expand %m in format string */ \
 		fmtbuf = expand_fmt_string(fmt, edata); \
 		initStringInfo(&buf); \
@@ -649,6 +671,47 @@ errcode_for_socket_access(void)
 			va_list		args; \
 			bool		success; \
 			va_start(args, fmt); \
+			success = appendStringInfoVA(&buf, fmtbuf, args); \
+			va_end(args); \
+			if (success) \
+				break; \
+			enlargeStringInfo(&buf, buf.maxlen); \
+		} \
+		/* Done with expanded fmt */ \
+		pfree(fmtbuf); \
+		/* Save the completed message into the stack item */ \
+		if (edata->targetfield) \
+			pfree(edata->targetfield); \
+		edata->targetfield = pstrdup(buf.data); \
+		pfree(buf.data); \
+	}
+
+/*
+ * Same as above, except for pluralized error messages.  The calling routine
+ * must be declared like "const char *fmt_singular, const char *fmt_plural,
+ * unsigned long n, ...".  Translation is assumed always wanted.
+ */
+#define EVALUATE_MESSAGE_PLURAL(targetfield, appendval)  \
+	{ \
+		const char	   *fmt; \
+		char		   *fmtbuf; \
+		StringInfoData	buf; \
+		/* Internationalize the error format string */ \
+		if (!in_error_recursion_trouble()) \
+			fmt = dngettext(edata->domain, fmt_singular, fmt_plural, n); \
+		else \
+			fmt = (n == 1 ? fmt_singular : fmt_plural); \
+		/* Expand %m in format string */ \
+		fmtbuf = expand_fmt_string(fmt, edata); \
+		initStringInfo(&buf); \
+		if ((appendval) && edata->targetfield) \
+			appendStringInfo(&buf, "%s\n", edata->targetfield); \
+		/* Generate actual output --- have to use appendStringInfoVA */ \
+		for (;;) \
+		{ \
+			va_list		args; \
+			bool		success; \
+			va_start(args, n); \
 			success = appendStringInfoVA(&buf, fmtbuf, args); \
 			va_end(args); \
 			if (success) \
@@ -722,6 +785,29 @@ errmsg_internal(const char *fmt,...)
 
 
 /*
+ * errmsg_plural --- add a primary error message text to the current error,
+ * with support for pluralization of the message text
+ */
+int
+errmsg_plural(const char *fmt_singular, const char *fmt_plural,
+			  unsigned long n,...)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+	MemoryContext oldcontext;
+
+	recursion_depth++;
+	CHECK_STACK_DEPTH();
+	oldcontext = MemoryContextSwitchTo(ErrorContext);
+
+	EVALUATE_MESSAGE_PLURAL(message, false);
+
+	MemoryContextSwitchTo(oldcontext);
+	recursion_depth--;
+	return 0;					/* return value does not matter */
+}
+
+
+/*
  * errdetail --- add a detail error message text to the current error
  */
 int
@@ -735,6 +821,50 @@ errdetail(const char *fmt,...)
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
 	EVALUATE_MESSAGE(detail, false, true);
+
+	MemoryContextSwitchTo(oldcontext);
+	recursion_depth--;
+	return 0;					/* return value does not matter */
+}
+
+
+/*
+ * errdetail_log --- add a detail_log error message text to the current error
+ */
+int
+errdetail_log(const char *fmt,...)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+	MemoryContext oldcontext;
+
+	recursion_depth++;
+	CHECK_STACK_DEPTH();
+	oldcontext = MemoryContextSwitchTo(ErrorContext);
+
+	EVALUATE_MESSAGE(detail_log, false, true);
+
+	MemoryContextSwitchTo(oldcontext);
+	recursion_depth--;
+	return 0;					/* return value does not matter */
+}
+
+
+/*
+ * errdetail_plural --- add a detail error message text to the current error,
+ * with support for pluralization of the message text
+ */
+int
+errdetail_plural(const char *fmt_singular, const char *fmt_plural,
+				 unsigned long n,...)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+	MemoryContext oldcontext;
+
+	recursion_depth++;
+	CHECK_STACK_DEPTH();
+	oldcontext = MemoryContextSwitchTo(ErrorContext);
+
+	EVALUATE_MESSAGE_PLURAL(detail, false);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -888,6 +1018,23 @@ internalerrquery(const char *query)
 }
 
 /*
+ * geterrcode --- return the currently set SQLSTATE error code
+ *
+ * This is only intended for use in error callback subroutines, since there
+ * is no other place outside elog.c where the concept is meaningful.
+ */
+int
+geterrcode(void)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+
+	/* we don't bother incrementing recursion_depth */
+	CHECK_STACK_DEPTH();
+
+	return edata->sqlerrcode;
+}
+
+/*
  * geterrposition --- return the currently set error position (0 if none)
  *
  * This is only intended for use in error callback subroutines, since there
@@ -943,7 +1090,9 @@ elog_start(const char *filename, int lineno, const char *funcname)
 		/*
 		 * Wups, stack not big enough.	We treat this as a PANIC condition
 		 * because it suggests an infinite loop of errors during error
-		 * recovery.
+		 * recovery.  Note that the message is intentionally not localized,
+		 * else failure to convert it to client encoding could cause further
+		 * recursion.
 		 */
 		errordata_stack_depth = -1;		/* make room on stack */
 		ereport(PANIC, (errmsg_internal("ERRORDATA_STACK_SIZE exceeded")));
@@ -973,7 +1122,7 @@ elog_finish(int elevel, const char *fmt,...)
 	 */
 	errordata_stack_depth--;
 	errno = edata->saved_errno;
-	if (!errstart(elevel, edata->filename, edata->lineno, edata->funcname))
+	if (!errstart(elevel, edata->filename, edata->lineno, edata->funcname, NULL))
 		return;					/* nothing to do */
 
 	/*
@@ -1052,6 +1201,8 @@ CopyErrorData(void)
 		newedata->message = pstrdup(newedata->message);
 	if (newedata->detail)
 		newedata->detail = pstrdup(newedata->detail);
+	if (newedata->detail_log)
+		newedata->detail_log = pstrdup(newedata->detail_log);
 	if (newedata->hint)
 		newedata->hint = pstrdup(newedata->hint);
 	if (newedata->context)
@@ -1075,6 +1226,8 @@ FreeErrorData(ErrorData *edata)
 		pfree(edata->message);
 	if (edata->detail)
 		pfree(edata->detail);
+	if (edata->detail_log)
+		pfree(edata->detail_log);
 	if (edata->hint)
 		pfree(edata->hint);
 	if (edata->context)
@@ -1131,9 +1284,7 @@ ReThrowError(ErrorData *edata)
 		/*
 		 * Wups, stack not big enough.	We treat this as a PANIC condition
 		 * because it suggests an infinite loop of errors during error
-		 * recovery.  Note that the message is intentionally not localized,
-		 * else failure to convert it to client encoding could cause further
-		 * recursion.
+		 * recovery.
 		 */
 		errordata_stack_depth = -1;		/* make room on stack */
 		ereport(PANIC, (errmsg_internal("ERRORDATA_STACK_SIZE exceeded")));
@@ -1147,6 +1298,8 @@ ReThrowError(ErrorData *edata)
 		newedata->message = pstrdup(newedata->message);
 	if (newedata->detail)
 		newedata->detail = pstrdup(newedata->detail);
+	if (newedata->detail_log)
+		newedata->detail_log = pstrdup(newedata->detail_log);
 	if (newedata->hint)
 		newedata->hint = pstrdup(newedata->hint);
 	if (newedata->context)
@@ -1272,7 +1425,6 @@ DebugFileOpen(void)
 }
 
 
-
 #ifdef HAVE_SYSLOG
 
 /*
@@ -1307,10 +1459,6 @@ set_syslog_parameters(const char *ident, int facility)
 	}
 }
 
-
-#ifndef PG_SYSLOG_LIMIT
-#define PG_SYSLOG_LIMIT 128
-#endif
 
 /*
  * Write a message line to syslog
@@ -1472,6 +1620,60 @@ write_eventlog(int level, const char *line)
 #endif   /* WIN32 */
 
 /*
+ * setup formatted_log_time, for consistent times between CSV and regular logs
+ */
+static void
+setup_formatted_log_time(void)
+{
+	struct timeval tv;
+	pg_time_t	stamp_time;
+	pg_tz	   *tz;
+	char		msbuf[8];
+
+	gettimeofday(&tv, NULL);
+	stamp_time = (pg_time_t) tv.tv_sec;
+
+	/*
+	 * Normally we print log timestamps in log_timezone, but during startup we
+	 * could get here before that's set. If so, fall back to gmt_timezone
+	 * (which guc.c ensures is set up before Log_line_prefix can become
+	 * nonempty).
+	 */
+	tz = log_timezone ? log_timezone : gmt_timezone;
+
+	pg_strftime(formatted_log_time, FORMATTED_TS_LEN,
+	/* leave room for milliseconds... */
+				"%Y-%m-%d %H:%M:%S     %Z",
+				pg_localtime(&stamp_time, tz));
+
+	/* 'paste' milliseconds into place... */
+	sprintf(msbuf, ".%03d", (int) (tv.tv_usec / 1000));
+	strncpy(formatted_log_time + 19, msbuf, 4);
+}
+
+/*
+ * setup formatted_start_time
+ */
+static void
+setup_formatted_start_time(void)
+{
+	pg_time_t	stamp_time = (pg_time_t) MyStartTime;
+	pg_tz	   *tz;
+
+	/*
+	 * Normally we print log timestamps in log_timezone, but during startup we
+	 * could get here before that's set. If so, fall back to gmt_timezone
+	 * (which guc.c ensures is set up before Log_line_prefix can become
+	 * nonempty).
+	 */
+	tz = log_timezone ? log_timezone : gmt_timezone;
+
+	pg_strftime(formatted_start_time, FORMATTED_TS_LEN,
+				"%Y-%m-%d %H:%M:%S %Z",
+				pg_localtime(&stamp_time, tz));
+}
+
+/*
  * Format tag info for log lines; append to the provided buffer.
  */
 static void
@@ -1551,34 +1753,8 @@ log_line_prefix(StringInfo buf)
 				appendStringInfo(buf, "%ld", log_line_number);
 				break;
 			case 'm':
-				{
-					struct timeval tv;
-					pg_time_t	stamp_time;
-					pg_tz	   *tz;
-					char		msbuf[8];
-
-					gettimeofday(&tv, NULL);
-					stamp_time = (pg_time_t) tv.tv_sec;
-
-					/*
-					 * Normally we print log timestamps in log_timezone, but
-					 * during startup we could get here before that's set. If
-					 * so, fall back to gmt_timezone (which guc.c ensures is
-					 * set up before Log_line_prefix can become nonempty).
-					 */
-					tz = log_timezone ? log_timezone : gmt_timezone;
-
-					pg_strftime(formatted_log_time, FORMATTED_TS_LEN,
-					/* leave room for milliseconds... */
-								"%Y-%m-%d %H:%M:%S     %Z",
-								pg_localtime(&stamp_time, tz));
-
-					/* 'paste' milliseconds into place... */
-					sprintf(msbuf, ".%03d", (int) (tv.tv_usec / 1000));
-					strncpy(formatted_log_time + 19, msbuf, 4);
-
-					appendStringInfoString(buf, formatted_log_time);
-				}
+				setup_formatted_log_time();
+				appendStringInfoString(buf, formatted_log_time);
 				break;
 			case 't':
 				{
@@ -1596,16 +1772,7 @@ log_line_prefix(StringInfo buf)
 				break;
 			case 's':
 				if (formatted_start_time[0] == '\0')
-				{
-					pg_time_t	stamp_time = (pg_time_t) MyStartTime;
-					pg_tz	   *tz;
-
-					tz = log_timezone ? log_timezone : gmt_timezone;
-
-					pg_strftime(formatted_start_time, FORMATTED_TS_LEN,
-								"%Y-%m-%d %H:%M:%S %Z",
-								pg_localtime(&stamp_time, tz));
-				}
+					setup_formatted_start_time();
 				appendStringInfoString(buf, formatted_start_time);
 				break;
 			case 'i':
@@ -1640,7 +1807,7 @@ log_line_prefix(StringInfo buf)
 				break;
 			case 'v':
 				/* keep VXID format in sync with lockfuncs.c */
-				if (MyProc != NULL)
+				if (MyProc != NULL && MyProc->backendId != InvalidBackendId)
 					appendStringInfo(buf, "%d/%u",
 									 MyProc->backendId, MyProc->lxid);
 				break;
@@ -1690,7 +1857,7 @@ static void
 write_csvlog(ErrorData *edata)
 {
 	StringInfoData buf;
-	bool	print_stmt = false;
+	bool		print_stmt = false;
 
 	/* static counter for line numbers */
 	static long log_line_number = 0;
@@ -1721,32 +1888,8 @@ write_csvlog(ErrorData *edata)
 	 * to put same timestamp in both syslog and csvlog messages.
 	 */
 	if (formatted_log_time[0] == '\0')
-	{
-		struct timeval tv;
-		pg_time_t	stamp_time;
-		pg_tz	   *tz;
-		char		msbuf[8];
+		setup_formatted_log_time();
 
-		gettimeofday(&tv, NULL);
-		stamp_time = (pg_time_t) tv.tv_sec;
-
-		/*
-		 * Normally we print log timestamps in log_timezone, but during
-		 * startup we could get here before that's set. If so, fall back to
-		 * gmt_timezone (which guc.c ensures is set up before Log_line_prefix
-		 * can become nonempty).
-		 */
-		tz = log_timezone ? log_timezone : gmt_timezone;
-
-		pg_strftime(formatted_log_time, FORMATTED_TS_LEN,
-		/* leave room for milliseconds... */
-					"%Y-%m-%d %H:%M:%S     %Z",
-					pg_localtime(&stamp_time, tz));
-
-		/* 'paste' milliseconds into place... */
-		sprintf(msbuf, ".%03d", (int) (tv.tv_usec / 1000));
-		strncpy(formatted_log_time + 19, msbuf, 4);
-	}
 	appendStringInfoString(&buf, formatted_log_time);
 	appendStringInfoChar(&buf, ',');
 
@@ -1796,21 +1939,14 @@ write_csvlog(ErrorData *edata)
 		psdisp = get_ps_display(&displen);
 		appendStringInfo(&msgbuf, "%.*s", displen, psdisp);
 		appendCSVLiteral(&buf, msgbuf.data);
-	
+
 		pfree(msgbuf.data);
 	}
 	appendStringInfoChar(&buf, ',');
 
 	/* session start timestamp */
 	if (formatted_start_time[0] == '\0')
-	{
-		pg_time_t	stamp_time = (pg_time_t) MyStartTime;
-		pg_tz	   *tz = log_timezone ? log_timezone : gmt_timezone;
-
-		pg_strftime(formatted_start_time, FORMATTED_TS_LEN,
-					"%Y-%m-%d %H:%M:%S %Z",
-					pg_localtime(&stamp_time, tz));
-	}
+		setup_formatted_start_time();
 	appendStringInfoString(&buf, formatted_start_time);
 	appendStringInfoChar(&buf, ',');
 
@@ -1836,8 +1972,11 @@ write_csvlog(ErrorData *edata)
 	appendCSVLiteral(&buf, edata->message);
 	appendStringInfoCharMacro(&buf, ',');
 
-	/* errdetail */
-	appendCSVLiteral(&buf, edata->detail);
+	/* errdetail or errdetail_log */
+	if (edata->detail_log)
+		appendCSVLiteral(&buf, edata->detail_log);
+	else
+		appendCSVLiteral(&buf, edata->detail);
 	appendStringInfoCharMacro(&buf, ',');
 
 	/* errhint */
@@ -1872,7 +2011,7 @@ write_csvlog(ErrorData *edata)
 	/* file error location */
 	if (Log_error_verbosity >= PGERROR_VERBOSE)
 	{
-		StringInfoData	msgbuf;
+		StringInfoData msgbuf;
 
 		initStringInfo(&msgbuf);
 
@@ -1953,7 +2092,14 @@ send_message_to_server_log(ErrorData *edata)
 
 	if (Log_error_verbosity >= PGERROR_DEFAULT)
 	{
-		if (edata->detail)
+		if (edata->detail_log)
+		{
+			log_line_prefix(&buf);
+			appendStringInfoString(&buf, _("DETAIL:  "));
+			append_with_tabs(&buf, edata->detail_log);
+			appendStringInfoChar(&buf, '\n');
+		}
+		else if (edata->detail)
 		{
 			log_line_prefix(&buf);
 			appendStringInfoString(&buf, _("DETAIL:  "));
@@ -2222,6 +2368,8 @@ send_message_to_frontend(ErrorData *edata)
 			pq_sendbyte(&msgbuf, PG_DIAG_MESSAGE_DETAIL);
 			err_sendstring(&msgbuf, edata->detail);
 		}
+
+		/* detail_log is intentionally not used here */
 
 		if (edata->hint)
 		{

@@ -143,6 +143,7 @@ InitArchiveFmt_Tar(ArchiveHandle *AH)
 	AH->WriteBufPtr = _WriteBuf;
 	AH->ReadBufPtr = _ReadBuf;
 	AH->ClosePtr = _CloseArchive;
+	AH->ReopenPtr = NULL;
 	AH->PrintTocDataPtr = _PrintTocData;
 	AH->ReadExtraTocPtr = _ReadExtraToc;
 	AH->WriteExtraTocPtr = _WriteExtraToc;
@@ -152,6 +153,8 @@ InitArchiveFmt_Tar(ArchiveHandle *AH)
 	AH->StartBlobPtr = _StartBlob;
 	AH->EndBlobPtr = _EndBlob;
 	AH->EndBlobsPtr = _EndBlobs;
+	AH->ClonePtr = NULL;
+	AH->DeClonePtr = NULL;
 
 	/*
 	 * Set up some special context used in compressing data.
@@ -545,11 +548,6 @@ _tarReadRaw(ArchiveHandle *AH, void *buf, size_t len, TAR_MEMBER *th, FILE *fh)
 		else
 			die_horribly(AH, modulename, "internal error -- neither th nor fh specified in tarReadRaw()\n");
 	}
-
-#if 0
-	write_msg(modulename, "requested %d bytes, got %d from lookahead and %d from file\n",
-			  reqLen, used, res);
-#endif
 
 	ctx->tarFHpos += res + used;
 
@@ -1243,7 +1241,9 @@ _tarGetHeader(ArchiveHandle *AH, TAR_MEMBER *th)
 
 		if (len != 512)
 			die_horribly(AH, modulename,
-						 "incomplete tar header found (%lu bytes)\n",
+						 ngettext("incomplete tar header found (%lu byte)\n",
+								  "incomplete tar header found (%lu bytes)\n",
+								  len),
 						 (unsigned long) len);
 
 		/* Calc checksum */
@@ -1383,5 +1383,4 @@ _tarWriteHeader(TAR_MEMBER *th)
 
 	if (fwrite(h, 1, 512, th->tarFH) != 512)
 		die_horribly(th->AH, modulename, "could not write to output file: %s\n", strerror(errno));
-
 }

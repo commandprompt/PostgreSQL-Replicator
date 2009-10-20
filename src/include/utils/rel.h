@@ -4,7 +4,7 @@
  *	  POSTGRES relation descriptor (a/k/a relcache entry) definitions.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -23,6 +23,7 @@
 #include "rewrite/prs2lock.h"
 #include "storage/block.h"
 #include "storage/relfilenode.h"
+#include "utils/relcache.h"
 
 
 /*
@@ -71,9 +72,10 @@ typedef struct TriggerDesc
 	/*
 	 * Index data to identify which triggers are which.  Since each trigger
 	 * can appear in more than one class, for each class we provide a list of
-	 * integer indexes into the triggers array.
+	 * integer indexes into the triggers array.  The class codes are defined
+	 * by TRIGGER_EVENT_xxx macros in commands/trigger.h.
 	 */
-#define TRIGGER_NUM_EVENT_CLASSES  3
+#define TRIGGER_NUM_EVENT_CLASSES  4
 
 	uint16		n_before_statement[TRIGGER_NUM_EVENT_CLASSES];
 	uint16		n_before_row[TRIGGER_NUM_EVENT_CLASSES];
@@ -99,7 +101,7 @@ typedef struct RelationAmInfo
 	FmgrInfo	aminsert;
 	FmgrInfo	ambeginscan;
 	FmgrInfo	amgettuple;
-	FmgrInfo	amgetmulti;
+	FmgrInfo	amgetbitmap;
 	FmgrInfo	amrescan;
 	FmgrInfo	amendscan;
 	FmgrInfo	ammarkpos;
@@ -124,7 +126,8 @@ typedef struct RelationData
 	BlockNumber rd_targblock;	/* current insertion target block, or
 								 * InvalidBlockNumber */
 	int			rd_refcnt;		/* reference count */
-	bool		rd_istemp;		/* rel uses the local buffer mgr */
+	bool		rd_istemp;		/* rel is a temporary relation */
+	bool		rd_islocaltemp; /* rel is a temp rel of this session */
 	bool		rd_isnailed;	/* rel is nailed in cache */
 	bool		rd_isvalid;		/* relcache entry is valid */
 	char		rd_indexvalid;	/* state of rd_indexlist: 0 = not valid, 1 =
@@ -194,21 +197,16 @@ typedef struct RelationData
 	List	   *rd_indpred;		/* index predicate tree, if any */
 	void	   *rd_amcache;		/* available for use by index AM */
 
+	/*
+	 * sizes of the free space and visibility map forks, or InvalidBlockNumber
+	 * if not known yet
+	 */
+	BlockNumber rd_fsm_nblocks;
+	BlockNumber rd_vm_nblocks;
+
 	/* use "struct" here to avoid needing to include pgstat.h: */
 	struct PgStat_TableStatus *pgstat_info;		/* statistics collection area */
 } RelationData;
-
-typedef RelationData *Relation;
-
-
-/* ----------------
- *		RelationPtr is used in the executor to support index scans
- *		where we have to keep track of several index relations in an
- *		array.	-cim 9/10/89
- * ----------------
- */
-typedef Relation *RelationPtr;
-
 
 /*
  * StdRdOptions
@@ -218,10 +216,26 @@ typedef Relation *RelationPtr;
  * be applied to relations that use this format or a superset for
  * private options data.
  */
+ /* autovacuum-related reloptions. */
+typedef struct AutoVacOpts
+{
+	bool		enabled;
+	int			vacuum_threshold;
+	int			analyze_threshold;
+	int			vacuum_cost_delay;
+	int			vacuum_cost_limit;
+	int			freeze_min_age;
+	int			freeze_max_age;
+	int			freeze_table_age;
+	float8		vacuum_scale_factor;
+	float8		analyze_scale_factor;
+} AutoVacOpts;
+
 typedef struct StdRdOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	int			fillfactor;		/* page fill factor in percent (0..100) */
+	AutoVacOpts autovacuum;		/* autovacuum-related options */
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
@@ -343,8 +357,17 @@ typedef struct StdRdOptions
  * Beware of multiple eval of argument
  */
 #define RELATION_IS_LOCAL(relation) \
-	((relation)->rd_istemp || \
+	((relation)->rd_islocaltemp || \
 	 (relation)->rd_createSubid != InvalidSubTransactionId)
+
+/*
+ * RELATION_IS_OTHER_TEMP
+ *		Test for a temporary relation that belongs to some other session.
+ *
+ * Beware of multiple eval of argument
+ */
+#define RELATION_IS_OTHER_TEMP(relation) \
+	((relation)->rd_istemp && !(relation)->rd_islocaltemp)
 
 /* routines in utils/cache/relcache.c */
 extern void RelationIncrementReferenceCount(Relation rel);

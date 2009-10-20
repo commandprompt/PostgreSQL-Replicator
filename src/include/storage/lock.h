@@ -4,7 +4,7 @@
  *	  POSTGRES low-level lock mechanism
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -14,9 +14,7 @@
 #ifndef LOCK_H_
 #define LOCK_H_
 
-#include "nodes/pg_list.h"
 #include "storage/backendid.h"
-#include "storage/itemptr.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
 
@@ -69,6 +67,12 @@ typedef struct
 #define VirtualTransactionIdIsValid(vxid) \
 	(((vxid).backendId != InvalidBackendId) && \
 	 LocalTransactionIdIsValid((vxid).localTransactionId))
+#define VirtualTransactionIdEquals(vxid1, vxid2) \
+	((vxid1).backendId == (vxid2).backendId && \
+	 (vxid1).localTransactionId == (vxid2).localTransactionId)
+#define SetInvalidVirtualTransactionId(vxid) \
+	((vxid).backendId = InvalidBackendId, \
+	 (vxid).localTransactionId = InvalidLocalTransactionId)
 #define GET_VXID_FROM_PGPROC(vxid, proc) \
 	((vxid).backendId = (proc).backendId, \
 	 (vxid).localTransactionId = (proc).lxid)

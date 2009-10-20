@@ -1,6 +1,5 @@
 /* Processed by ecpg (regression mode) */
 /* These include files are added by the preprocessor */
-#include <ecpgtype.h>
 #include <ecpglib.h>
 #include <ecpgerrno.h>
 #include <sqlca.h>
@@ -127,7 +126,7 @@ if (sqlca.sqlcode < 0) sqlprint();
 	return 0;
 }
 
-int main (int argc, char** argv)
+int main ()
 {
 #ifdef ENABLE_THREAD_SAFETY
 	int i;

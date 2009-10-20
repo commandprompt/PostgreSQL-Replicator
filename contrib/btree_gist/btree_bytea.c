@@ -1,3 +1,6 @@
+/*
+ * $PostgreSQL$
+ */
 #include "btree_gist.h"
 #include "btree_utils_var.h"
 #include "utils/builtins.h"
@@ -96,11 +99,17 @@ Datum
 gbt_bytea_consistent(PG_FUNCTION_ARGS)
 {
 	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
-	GBT_VARKEY *key = (GBT_VARKEY *) DatumGetPointer(entry->key);
 	void	   *query = (void *) DatumGetByteaP(PG_GETARG_DATUM(1));
 	StrategyNumber strategy = (StrategyNumber) PG_GETARG_UINT16(2);
+
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	bool	   *recheck = (bool *) PG_GETARG_POINTER(4);
 	bool		retval;
+	GBT_VARKEY *key = (GBT_VARKEY *) DatumGetPointer(entry->key);
 	GBT_VARKEY_R r = gbt_var_key_readable(key);
+
+	/* All cases served by this function are exact */
+	*recheck = false;
 
 	retval = gbt_var_consistent(&r, query, &strategy, GIST_LEAF(entry), &tinfo);
 	PG_RETURN_BOOL(retval);

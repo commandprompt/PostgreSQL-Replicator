@@ -7,7 +7,7 @@
  * for debug printouts, because that's more flexible than printf().
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -189,20 +189,5 @@ extern int	NIndexTupleInserted;
 #define MJ_DEBUG_QUAL(clause, res)
 #define MJ_DEBUG_PROC_NODE(slot)
 #endif   /* EXEC_MERGEJOINDEBUG */
-
-/* ----------------------------------------------------------------
- *		DO NOT DEFINE THESE EVER OR YOU WILL BURN!
- * ----------------------------------------------------------------
- */
-/* ----------------
- *		NOTYET is placed around any code not yet implemented
- *		in the executor.  Only remove these when actually implementing
- *		said code.
- * ----------------
- */
-#undef NOTYET
-
-extern long NDirectFileRead;
-extern long NDirectFileWrite;
 
 #endif   /* ExecDebugIncluded */

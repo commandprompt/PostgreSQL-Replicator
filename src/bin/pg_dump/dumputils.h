@@ -5,7 +5,7 @@
  *	Lately it's also being used by psql and bin/scripts/ ...
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -19,6 +19,7 @@
 #include "libpq-fe.h"
 #include "pqexpbuffer.h"
 
+extern void init_parallel_dump_utils(void);
 extern const char *fmtId(const char *identifier);
 extern void appendStringLiteral(PQExpBuffer buf, const char *str,
 					int encoding, bool std_strings);
@@ -28,8 +29,8 @@ extern void appendStringLiteralDQ(PQExpBuffer buf, const char *str,
 					  const char *dqprefix);
 extern int	parse_version(const char *versionString);
 extern bool parsePGArray(const char *atext, char ***itemarray, int *nitems);
-extern bool buildACLCommands(const char *name, const char *type,
-				 const char *acls, const char *owner,
+extern bool buildACLCommands(const char *name, const char *subname,
+				 const char *type, const char *acls, const char *owner,
 				 int remoteVersion,
 				 PQExpBuffer sql);
 extern void processSQLNamePattern(PGconn *conn, PQExpBuffer buf,

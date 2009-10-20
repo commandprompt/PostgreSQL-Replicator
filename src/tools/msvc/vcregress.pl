@@ -36,8 +36,8 @@ else
 # use a capital C here because config.pl has $config
 my $Config = -e "release/postgres/postgres.exe" ? "Release" : "Debug";
 
-copy("$Config/refint/refint.dll","contrib/spi");
-copy("$Config/autoinc/autoinc.dll","contrib/spi");
+copy("$Config/refint/refint.dll","src/test/regress");
+copy("$Config/autoinc/autoinc.dll","src/test/regress");
 copy("$Config/regress/regress.dll","src/test/regress");
 
 $ENV{PATH} = "../../../$Config/libpq;../../$Config/libpq;$ENV{PATH}";
@@ -48,16 +48,6 @@ unless ($schedule)
 	$schedule = "serial";
 	$schedule = "parallel" if ($what eq 'CHECK' || $what =~ /PARALLEL/);
 }
-
-my $temp_port;
-if (-e "src/tools/msvc/config.pl")
-{
-    eval{
-        require "src/tools/msvc/config.pl";
-        $temp_port = $config->{'--with-pgport'};
-      }
-}
-$temp_port ||= 55432;
 
 my $topdir = getcwd();
 
@@ -95,6 +85,7 @@ sub installcheck
 {
     my @args = (
         "../../../$Config/pg_regress/pg_regress",
+        "--dlpath=.",
         "--psqldir=../../../$Config/psql",
         "--schedule=${schedule}_schedule",
         "--multibyte=SQL_ASCII",
@@ -111,14 +102,14 @@ sub check
 {
     my @args = (
         "../../../$Config/pg_regress/pg_regress",
+        "--dlpath=.",
         "--psqldir=../../../$Config/psql",
         "--schedule=${schedule}_schedule",
         "--multibyte=SQL_ASCII",
         "--load-language=plpgsql",
         "--no-locale",
         "--temp-install=./tmp_check",
-        "--top-builddir=\"$topdir\"",
-        "--temp-port=$temp_port"
+        "--top-builddir=\"$topdir\""
     );
     push(@args,$maxconn) if $maxconn;
 	push(@args,$temp_config) if $temp_config;
@@ -145,8 +136,7 @@ sub ecpgcheck
         "--load-language=plpgsql",
         "--no-locale",
         "--temp-install=./tmp_chk",
-        "--top-builddir=\"$topdir\"",
-        "--temp-port=$temp_port"
+        "--top-builddir=\"$topdir\""
     );
     push(@args,$maxconn) if $maxconn;
     system(@args);

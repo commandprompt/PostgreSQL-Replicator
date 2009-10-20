@@ -80,10 +80,6 @@ all: $(PROGRAM) $(DATA_built) $(SCRIPTS_built) $(addsuffix $(DLSUFFIX), $(MODULE
 ifdef MODULE_big
 # shared library parameters
 NAME = $(MODULE_big)
-SO_MAJOR_VERSION= 0
-SO_MINOR_VERSION= 0
-
-SHLIB_LINK += $(BE_DLLLIBS)
 
 include $(top_srcdir)/src/Makefile.shlib
 
@@ -121,9 +117,6 @@ endif # DOCS
 ifdef PROGRAM
 	$(INSTALL_PROGRAM) $(PROGRAM)$(X) '$(DESTDIR)$(bindir)'
 endif # PROGRAM
-ifdef MODULE_big
-	$(INSTALL_SHLIB) $(shlib) '$(DESTDIR)$(pkglibdir)/$(MODULE_big)$(DLSUFFIX)'
-endif # MODULE_big
 ifdef SCRIPTS
 	@for file in $(addprefix $(srcdir)/, $(SCRIPTS)); do \
 	  echo "$(INSTALL_SCRIPT) $$file '$(DESTDIR)$(bindir)'"; \
@@ -137,6 +130,10 @@ ifdef SCRIPTS_built
 	done
 endif # SCRIPTS_built
 
+ifdef MODULE_big
+install: install-lib
+endif # MODULE_big
+
 
 installdirs:
 ifneq (,$(DATA)$(DATA_built))
@@ -145,7 +142,7 @@ endif
 ifneq (,$(DATA_TSEARCH))
 	$(mkinstalldirs) '$(DESTDIR)$(datadir)/tsearch_data'
 endif
-ifneq (,$(MODULES)$(MODULE_big))
+ifneq (,$(MODULES))
 	$(mkinstalldirs) '$(DESTDIR)$(pkglibdir)'
 endif
 ifdef DOCS
@@ -156,6 +153,10 @@ endif # DOCS
 ifneq (,$(PROGRAM)$(SCRIPTS)$(SCRIPTS_built))
 	$(mkinstalldirs) '$(DESTDIR)$(bindir)'
 endif
+
+ifdef MODULE_big
+installdirs: installdirs-lib
+endif # MODULE_big
 
 
 uninstall:
@@ -174,15 +175,16 @@ endif
 ifdef PROGRAM
 	rm -f '$(DESTDIR)$(bindir)/$(PROGRAM)$(X)'
 endif
-ifdef MODULE_big
-	rm -f '$(DESTDIR)$(pkglibdir)/$(MODULE_big)$(DLSUFFIX)'
-endif
 ifdef SCRIPTS
 	rm -f $(addprefix '$(DESTDIR)$(bindir)'/, $(SCRIPTS))
 endif
 ifdef SCRIPTS_built
 	rm -f $(addprefix '$(DESTDIR)$(bindir)'/, $(SCRIPTS_built))
 endif
+
+ifdef MODULE_big
+uninstall: uninstall-lib
+endif # MODULE_big
 
 
 clean:
@@ -230,16 +232,16 @@ endif
 # where to find psql for running the tests
 PSQLDIR = $(bindir)
 
-# When doing a VPATH build, must copy over the test .sql and .out
-# files so that the driver script can find them.  We have to use an
-# absolute path for the targets, because otherwise make will try to
-# locate the missing files using VPATH, and will find them in
-# $(srcdir), but the point here is that we want to copy them from
-# $(srcdir) to the build directory.
+# When doing a VPATH build, must copy over the data files so that the
+# driver script can find them.  We have to use an absolute path for
+# the targets, because otherwise make will try to locate the missing
+# files using VPATH, and will find them in $(srcdir), but the point
+# here is that we want to copy them from $(srcdir) to the build
+# directory.
 
 ifdef VPATH
 abs_builddir := $(shell pwd)
-test_files_src := $(wildcard $(srcdir)/sql/*.sql) $(wildcard $(srcdir)/expected/*.out) $(wildcard $(srcdir)/data/*.data)
+test_files_src := $(wildcard $(srcdir)/data/*.data)
 test_files_build := $(patsubst $(srcdir)/%, $(abs_builddir)/%, $(test_files_src))
 
 all: $(test_files_build)
@@ -255,7 +257,7 @@ endif
 
 # against installed postmaster
 installcheck: submake
-	$(top_builddir)/src/test/regress/pg_regress --psqldir=$(PSQLDIR) $(REGRESS_OPTS) $(REGRESS)
+	$(top_builddir)/src/test/regress/pg_regress --inputdir=$(srcdir) --psqldir=$(PSQLDIR) $(REGRESS_OPTS) $(REGRESS)
 
 # in-tree test doesn't work yet (no way to install my shared library)
 #check: all submake

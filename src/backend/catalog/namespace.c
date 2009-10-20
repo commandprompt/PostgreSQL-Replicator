@@ -9,7 +9,7 @@
  * and implementing search-path-controlled searches.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -24,6 +24,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_conversion.h"
+#include "catalog/pg_conversion_fn.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_operator.h"
@@ -37,6 +38,7 @@
 #include "commands/dbcommands.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "parser/parse_func.h"
 #include "storage/backendid.h"
 #include "storage/ipc.h"
 #include "utils/acl.h"
@@ -45,6 +47,7 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 
@@ -184,7 +187,7 @@ static void recomputeNamespacePath(void);
 static void InitTempTableNamespace(void);
 static void RemoveTempRelations(Oid tempNamespaceId);
 static void RemoveTempRelationsCallback(int code, Datum arg);
-static void NamespaceCallback(Datum arg, Oid relid);
+static void NamespaceCallback(Datum arg, int cacheid, ItemPointer tuplePtr);
 
 static Oid 
 ReplLookupExplicitNamespace(const char *nspname, AclResult *aclresult);
@@ -638,23 +641,61 @@ TypeIsVisible(Oid typid)
  *		retrieve a list of the possible matches.
  *
  * If nargs is -1, we return all functions matching the given name,
- * regardless of argument count.
+ * regardless of argument count.  (expand_variadic and expand_defaults must be
+ * false in this case.)
+ *
+ * If expand_variadic is true, then variadic functions having the same number
+ * or fewer arguments will be retrieved, with the variadic argument and any
+ * additional argument positions filled with the variadic element type.
+ * nvargs in the returned struct is set to the number of such arguments.
+ * If expand_variadic is false, variadic arguments are not treated specially,
+ * and the returned nvargs will always be zero.
+ *
+ * If expand_defaults is true, functions that could match after insertion of
+ * default argument values will also be retrieved.	In this case the returned
+ * structs could have nargs > passed-in nargs, and ndargs is set to the number
+ * of additional args (which can be retrieved from the function's
+ * proargdefaults entry).
+ *
+ * It is not possible for nvargs and ndargs to both be nonzero in the same
+ * list entry, since default insertion allows matches to functions with more
+ * than nargs arguments while the variadic transformation requires the same
+ * number or less.
  *
  * We search a single namespace if the function name is qualified, else
- * all namespaces in the search path.  The return list will never contain
- * multiple entries with identical argument lists --- in the multiple-
- * namespace case, we arrange for entries in earlier namespaces to mask
- * identical entries in later namespaces.
+ * all namespaces in the search path.  In the multiple-namespace case,
+ * we arrange for entries in earlier namespaces to mask identical entries in
+ * later namespaces.
+ *
+ * When expanding variadics, we arrange for non-variadic functions to mask
+ * variadic ones if the expanded argument list is the same.  It is still
+ * possible for there to be conflicts between different variadic functions,
+ * however.
+ *
+ * It is guaranteed that the return list will never contain multiple entries
+ * with identical argument lists.  When expand_defaults is true, the entries
+ * could have more than nargs positions, but we still guarantee that they are
+ * distinct in the first nargs positions.  However, if either expand_variadic
+ * or expand_defaults is true, there might be multiple candidate functions
+ * that expand to identical argument lists.  Rather than throw error here,
+ * we report such situations by setting oid = 0 in the ambiguous entries.
+ * The caller might end up discarding such an entry anyway, but if it selects
+ * such an entry it should react as though the call were ambiguous.
  */
 FuncCandidateList
-FuncnameGetCandidates(List *names, int nargs)
+FuncnameGetCandidates(List *names, int nargs,
+					  bool expand_variadic, bool expand_defaults)
 {
 	FuncCandidateList resultList = NULL;
+	bool		any_special = false;
 	char	   *schemaname;
 	char	   *funcname;
 	Oid			namespaceId;
 	CatCList   *catlist;
 	int			i;
+
+	/* check for caller error */
+	Assert(nargs >= 0 || !(expand_variadic | expand_defaults));
 
 	/* deconstruct the name list */
 	DeconstructQualifiedName(names, &schemaname, &funcname);
@@ -681,11 +722,45 @@ FuncnameGetCandidates(List *names, int nargs)
 		HeapTuple	proctup = &catlist->members[i]->tuple;
 		Form_pg_proc procform = (Form_pg_proc) GETSTRUCT(proctup);
 		int			pronargs = procform->pronargs;
+		int			effective_nargs;
 		int			pathpos = 0;
+		bool		variadic;
+		bool		use_defaults;
+		Oid			va_elem_type;
 		FuncCandidateList newResult;
 
+		/*
+		 * Check if function is variadic, and get variadic element type if so.
+		 * If expand_variadic is false, we should just ignore variadic-ness.
+		 */
+		if (pronargs <= nargs && expand_variadic)
+		{
+			va_elem_type = procform->provariadic;
+			variadic = OidIsValid(va_elem_type);
+			any_special |= variadic;
+		}
+		else
+		{
+			va_elem_type = InvalidOid;
+			variadic = false;
+		}
+
+		/*
+		 * Check if function can match by using parameter defaults.
+		 */
+		if (pronargs > nargs && expand_defaults)
+		{
+			/* Ignore if not enough default expressions */
+			if (nargs + procform->pronargdefaults < pronargs)
+				continue;
+			use_defaults = true;
+			any_special = true;
+		}
+		else
+			use_defaults = false;
+
 		/* Ignore if it doesn't match requested argument count */
-		if (nargs >= 0 && pronargs != nargs)
+		if (nargs >= 0 && pronargs != nargs && !variadic && !use_defaults)
 			continue;
 
 		if (OidIsValid(namespaceId))
@@ -693,7 +768,6 @@ FuncnameGetCandidates(List *names, int nargs)
 			/* Consider only procs in specified namespace */
 			if (procform->pronamespace != namespaceId)
 				continue;
-			/* No need to check args, they must all be different */
 		}
 		else
 		{
@@ -712,55 +786,168 @@ FuncnameGetCandidates(List *names, int nargs)
 			}
 			if (nsp == NULL)
 				continue;		/* proc is not in search path */
+		}
 
+		/*
+		 * We must compute the effective argument list so that we can easily
+		 * compare it to earlier results.  We waste a palloc cycle if it gets
+		 * masked by an earlier result, but really that's a pretty infrequent
+		 * case so it's not worth worrying about.
+		 */
+		effective_nargs = Max(pronargs, nargs);
+		newResult = (FuncCandidateList)
+			palloc(sizeof(struct _FuncCandidateList) - sizeof(Oid)
+				   + effective_nargs * sizeof(Oid));
+		newResult->pathpos = pathpos;
+		newResult->oid = HeapTupleGetOid(proctup);
+		newResult->nargs = effective_nargs;
+		memcpy(newResult->args, procform->proargtypes.values,
+			   pronargs * sizeof(Oid));
+		if (variadic)
+		{
+			int			i;
+
+			newResult->nvargs = effective_nargs - pronargs + 1;
+			/* Expand variadic argument into N copies of element type */
+			for (i = pronargs - 1; i < effective_nargs; i++)
+				newResult->args[i] = va_elem_type;
+		}
+		else
+			newResult->nvargs = 0;
+		newResult->ndargs = use_defaults ? pronargs - nargs : 0;
+
+		/*
+		 * Does it have the same arguments as something we already accepted?
+		 * If so, decide what to do to avoid returning duplicate argument
+		 * lists.  We can skip this check for the single-namespace case if no
+		 * special (variadic or defaults) match has been made, since then the
+		 * unique index on pg_proc guarantees all the matches have different
+		 * argument lists.
+		 */
+		if (resultList != NULL &&
+			(any_special || !OidIsValid(namespaceId)))
+		{
 			/*
-			 * Okay, it's in the search path, but does it have the same
-			 * arguments as something we already accepted?	If so, keep only
-			 * the one that appears earlier in the search path.
-			 *
 			 * If we have an ordered list from SearchSysCacheList (the normal
 			 * case), then any conflicting proc must immediately adjoin this
 			 * one in the list, so we only need to look at the newest result
 			 * item.  If we have an unordered list, we have to scan the whole
-			 * result list.
+			 * result list.  Also, if either the current candidate or any
+			 * previous candidate is a special match, we can't assume that
+			 * conflicts are adjacent.
+			 *
+			 * We ignore defaulted arguments in deciding what is a match.
 			 */
-			if (resultList)
-			{
-				FuncCandidateList prevResult;
+			FuncCandidateList prevResult;
 
-				if (catlist->ordered)
+			if (catlist->ordered && !any_special)
+			{
+				/* ndargs must be 0 if !any_special */
+				if (effective_nargs == resultList->nargs &&
+					memcmp(newResult->args,
+						   resultList->args,
+						   effective_nargs * sizeof(Oid)) == 0)
+					prevResult = resultList;
+				else
+					prevResult = NULL;
+			}
+			else
+			{
+				int			cmp_nargs = newResult->nargs - newResult->ndargs;
+
+				for (prevResult = resultList;
+					 prevResult;
+					 prevResult = prevResult->next)
 				{
-					if (pronargs == resultList->nargs &&
-						memcmp(procform->proargtypes.values,
-							   resultList->args,
-							   pronargs * sizeof(Oid)) == 0)
-						prevResult = resultList;
-					else
-						prevResult = NULL;
+					if (cmp_nargs == prevResult->nargs - prevResult->ndargs &&
+						memcmp(newResult->args,
+							   prevResult->args,
+							   cmp_nargs * sizeof(Oid)) == 0)
+						break;
+				}
+			}
+
+			if (prevResult)
+			{
+				/*
+				 * We have a match with a previous result.	Decide which one
+				 * to keep, or mark it ambiguous if we can't decide.  The
+				 * logic here is preference > 0 means prefer the old result,
+				 * preference < 0 means prefer the new, preference = 0 means
+				 * ambiguous.
+				 */
+				int			preference;
+
+				if (pathpos != prevResult->pathpos)
+				{
+					/*
+					 * Prefer the one that's earlier in the search path.
+					 */
+					preference = pathpos - prevResult->pathpos;
+				}
+				else if (variadic && prevResult->nvargs == 0)
+				{
+					/*
+					 * With variadic functions we could have, for example,
+					 * both foo(numeric) and foo(variadic numeric[]) in the
+					 * same namespace; if so we prefer the non-variadic match
+					 * on efficiency grounds.
+					 */
+					preference = 1;
+				}
+				else if (!variadic && prevResult->nvargs > 0)
+				{
+					preference = -1;
 				}
 				else
 				{
-					for (prevResult = resultList;
-						 prevResult;
-						 prevResult = prevResult->next)
-					{
-						if (pronargs == prevResult->nargs &&
-							memcmp(procform->proargtypes.values,
-								   prevResult->args,
-								   pronargs * sizeof(Oid)) == 0)
-							break;
-					}
+					/*----------
+					 * We can't decide.  This can happen with, for example,
+					 * both foo(numeric, variadic numeric[]) and
+					 * foo(variadic numeric[]) in the same namespace, or
+					 * both foo(int) and foo (int, int default something)
+					 * in the same namespace.
+					 *----------
+					 */
+					preference = 0;
 				}
-				if (prevResult)
+
+				if (preference > 0)
 				{
-					/* We have a match with a previous result */
-					Assert(pathpos != prevResult->pathpos);
-					if (pathpos > prevResult->pathpos)
-						continue;		/* keep previous result */
-					/* replace previous result */
-					prevResult->pathpos = pathpos;
-					prevResult->oid = HeapTupleGetOid(proctup);
-					continue;	/* args are same, of course */
+					/* keep previous result */
+					pfree(newResult);
+					continue;
+				}
+				else if (preference < 0)
+				{
+					/* remove previous result from the list */
+					if (prevResult == resultList)
+						resultList = prevResult->next;
+					else
+					{
+						FuncCandidateList prevPrevResult;
+
+						for (prevPrevResult = resultList;
+							 prevPrevResult;
+							 prevPrevResult = prevPrevResult->next)
+						{
+							if (prevResult == prevPrevResult->next)
+							{
+								prevPrevResult->next = prevResult->next;
+								break;
+							}
+						}
+						Assert(prevPrevResult); /* assert we found it */
+					}
+					pfree(prevResult);
+					/* fall through to add newResult to list */
+				}
+				else
+				{
+					/* mark old result as ambiguous, discard new */
+					prevResult->oid = InvalidOid;
+					pfree(newResult);
+					continue;
 				}
 			}
 		}
@@ -768,15 +955,6 @@ FuncnameGetCandidates(List *names, int nargs)
 		/*
 		 * Okay to add it to result list
 		 */
-		newResult = (FuncCandidateList)
-			palloc(sizeof(struct _FuncCandidateList) - sizeof(Oid)
-				   + pronargs * sizeof(Oid));
-		newResult->pathpos = pathpos;
-		newResult->oid = HeapTupleGetOid(proctup);
-		newResult->nargs = pronargs;
-		memcpy(newResult->args, procform->proargtypes.values,
-			   pronargs * sizeof(Oid));
-
 		newResult->next = resultList;
 		resultList = newResult;
 	}
@@ -832,7 +1010,8 @@ FunctionIsVisible(Oid funcid)
 
 		visible = false;
 
-		clist = FuncnameGetCandidates(list_make1(makeString(proname)), nargs);
+		clist = FuncnameGetCandidates(list_make1(makeString(proname)),
+									  nargs, false, false);
 
 		for (; clist; clist = clist->next)
 		{
@@ -1100,6 +1279,8 @@ OpernameGetCandidates(List *names, char oprkind)
 		newResult->pathpos = pathpos;
 		newResult->oid = HeapTupleGetOid(opertup);
 		newResult->nargs = 2;
+		newResult->nvargs = 0;
+		newResult->ndargs = 0;
 		newResult->args[0] = operform->oprleft;
 		newResult->args[1] = operform->oprright;
 		newResult->next = resultList;
@@ -2177,7 +2358,7 @@ QualifiedNameGetCreationNamespace(List *names, char **objname_p)
 RangeVar *
 makeRangeVarFromNameList(List *names)
 {
-	RangeVar   *rel = makeRangeVar(NULL, NULL);
+	RangeVar   *rel = makeRangeVar(NULL, NULL, -1);
 
 	switch (list_length(names))
 	{
@@ -2210,6 +2391,9 @@ makeRangeVarFromNameList(List *names)
  *
  * This is used primarily to form error messages, and so we do not quote
  * the list elements, for the sake of legibility.
+ *
+ * In most scenarios the list elements should always be Value strings,
+ * but we also allow A_Star for the convenience of ColumnRef processing.
  */
 char *
 NameListToString(List *names)
@@ -2221,9 +2405,18 @@ NameListToString(List *names)
 
 	foreach(l, names)
 	{
+		Node	   *name = (Node *) lfirst(l);
+
 		if (l != list_head(names))
 			appendStringInfoChar(&string, '.');
-		appendStringInfoString(&string, strVal(lfirst(l)));
+
+		if (IsA(name, String))
+			appendStringInfoString(&string, strVal(name));
+		else if (IsA(name, A_Star))
+			appendStringInfoString(&string, "*");
+		else
+			elog(ERROR, "unexpected node type in name list: %d",
+				 (int) nodeTag(name));
 	}
 
 	return string.data;
@@ -2314,6 +2507,9 @@ isAnyTempNamespace(Oid namespaceId)
 /*
  * isOtherTempNamespace - is the given namespace some other backend's
  * temporary-table namespace (including temporary-toast-table namespaces)?
+ *
+ * Note: for most purposes in the C code, this function is obsolete.  Use
+ * RELATION_IS_OTHER_TEMP() instead to detect non-local temp relations.
  */
 bool
 isOtherTempNamespace(Oid namespaceId)
@@ -2323,6 +2519,32 @@ isOtherTempNamespace(Oid namespaceId)
 		return false;
 	/* Else, if it's any temp namespace, say "true" */
 	return isAnyTempNamespace(namespaceId);
+}
+
+/*
+ * GetTempNamespaceBackendId - if the given namespace is a temporary-table
+ * namespace (either my own, or another backend's), return the BackendId
+ * that owns it.  Temporary-toast-table namespaces are included, too.
+ * If it isn't a temp namespace, return -1.
+ */
+int
+GetTempNamespaceBackendId(Oid namespaceId)
+{
+	int			result;
+	char	   *nspname;
+
+	/* See if the namespace name starts with "pg_temp_" or "pg_toast_temp_" */
+	nspname = get_namespace_name(namespaceId);
+	if (!nspname)
+		return -1;				/* no such namespace? */
+	if (strncmp(nspname, "pg_temp_", 8) == 0)
+		result = atoi(nspname + 8);
+	else if (strncmp(nspname, "pg_toast_temp_", 14) == 0)
+		result = atoi(nspname + 14);
+	else
+		result = -1;
+	pfree(nspname);
+	return result;
 }
 
 /*
@@ -2761,8 +2983,8 @@ InitTempTableNamespace(void)
 	}
 
 	/*
-	 * If the corresponding toast-table namespace doesn't exist yet, create it.
-	 * (We assume there is no need to clean it out if it does exist, since
+	 * If the corresponding toast-table namespace doesn't exist yet, create
+	 * it. (We assume there is no need to clean it out if it does exist, since
 	 * dropping a parent table should make its toast table go away.)
 	 */
 	snprintf(namespaceName, sizeof(namespaceName), "pg_toast_temp_%d",
@@ -3077,7 +3299,7 @@ InitializeSearchPath(void)
  *		Syscache inval callback function
  */
 static void
-NamespaceCallback(Datum arg, Oid relid)
+NamespaceCallback(Datum arg, int cacheid, ItemPointer tuplePtr)
 {
 	/* Force search path to be recomputed on next use */
 	baseSearchPathValid = false;
@@ -3126,7 +3348,7 @@ fetch_search_path(bool includeImplicit)
 
 /*
  * Fetch the active search path into a caller-allocated array of OIDs.
- * Returns the number of path entries.  (If this is more than sarray_len,
+ * Returns the number of path entries.	(If this is more than sarray_len,
  * then the data didn't fit and is not all stored.)
  *
  * The returned list always includes the implicitly-prepended namespaces,
@@ -3160,12 +3382,26 @@ fetch_search_path_array(Oid *sarray, int sarray_len)
 
 /*
  * Export the FooIsVisible functions as SQL-callable functions.
+ *
+ * Note: as of Postgres 8.4, these will silently return NULL if called on
+ * a nonexistent object OID, rather than failing.  This is to avoid race
+ * condition errors when a query that's scanning a catalog using an MVCC
+ * snapshot uses one of these functions.  The underlying IsVisible functions
+ * operate on SnapshotNow semantics and so might see the object as already
+ * gone when it's still visible to the MVCC snapshot.  (There is no race
+ * condition in the current coding because we don't accept sinval messages
+ * between the SearchSysCacheExists test and the subsequent lookup.)
  */
 
 Datum
 pg_table_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
+
+	if (!SearchSysCacheExists(RELOID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
 
 	PG_RETURN_BOOL(RelationIsVisible(oid));
 }
@@ -3175,6 +3411,11 @@ pg_type_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
 
+	if (!SearchSysCacheExists(TYPEOID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
+
 	PG_RETURN_BOOL(TypeIsVisible(oid));
 }
 
@@ -3182,6 +3423,11 @@ Datum
 pg_function_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
+
+	if (!SearchSysCacheExists(PROCOID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
 
 	PG_RETURN_BOOL(FunctionIsVisible(oid));
 }
@@ -3191,6 +3437,11 @@ pg_operator_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
 
+	if (!SearchSysCacheExists(OPEROID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
+
 	PG_RETURN_BOOL(OperatorIsVisible(oid));
 }
 
@@ -3198,6 +3449,11 @@ Datum
 pg_opclass_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
+
+	if (!SearchSysCacheExists(CLAOID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
 
 	PG_RETURN_BOOL(OpclassIsVisible(oid));
 }
@@ -3207,6 +3463,11 @@ pg_conversion_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
 
+	if (!SearchSysCacheExists(CONVOID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
+
 	PG_RETURN_BOOL(ConversionIsVisible(oid));
 }
 
@@ -3214,6 +3475,11 @@ Datum
 pg_ts_parser_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
+
+	if (!SearchSysCacheExists(TSPARSEROID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
 
 	PG_RETURN_BOOL(TSParserIsVisible(oid));
 }
@@ -3223,6 +3489,11 @@ pg_ts_dict_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
 
+	if (!SearchSysCacheExists(TSDICTOID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
+
 	PG_RETURN_BOOL(TSDictionaryIsVisible(oid));
 }
 
@@ -3231,6 +3502,11 @@ pg_ts_template_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
 
+	if (!SearchSysCacheExists(TSTEMPLATEOID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
+
 	PG_RETURN_BOOL(TSTemplateIsVisible(oid));
 }
 
@@ -3238,6 +3514,11 @@ Datum
 pg_ts_config_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
+
+	if (!SearchSysCacheExists(TSCONFIGOID,
+							  ObjectIdGetDatum(oid),
+							  0, 0, 0))
+		PG_RETURN_NULL();
 
 	PG_RETURN_BOOL(TSConfigIsVisible(oid));
 }

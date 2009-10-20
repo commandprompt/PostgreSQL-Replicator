@@ -4,7 +4,7 @@
  *	  support for the POSTGRES executor module
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -60,6 +60,21 @@
 	((*(expr)->evalfunc) (expr, econtext, isNull, isDone))
 
 
+/* Hook for plugins to get control in ExecutorStart() */
+typedef void (*ExecutorStart_hook_type) (QueryDesc *queryDesc, int eflags);
+extern PGDLLIMPORT ExecutorStart_hook_type ExecutorStart_hook;
+
+/* Hook for plugins to get control in ExecutorRun() */
+typedef void (*ExecutorRun_hook_type) (QueryDesc *queryDesc,
+												   ScanDirection direction,
+												   long count);
+extern PGDLLIMPORT ExecutorRun_hook_type ExecutorRun_hook;
+
+/* Hook for plugins to get control in ExecutorEnd() */
+typedef void (*ExecutorEnd_hook_type) (QueryDesc *queryDesc);
+extern PGDLLIMPORT ExecutorEnd_hook_type ExecutorEnd_hook;
+
+
 /*
  * prototypes from functions in execAmi.c
  */
@@ -68,7 +83,6 @@ extern void ExecMarkPos(PlanState *node);
 extern void ExecRestrPos(PlanState *node);
 extern bool ExecSupportsMarkRestore(NodeTag plantype);
 extern bool ExecSupportsBackwardScan(Plan *node);
-extern bool ExecMayReturnRawTuples(PlanState *node);
 
 /*
  * prototypes from functions in execCurrent.c
@@ -134,10 +148,19 @@ extern HeapTuple ExecRemoveJunk(JunkFilter *junkfilter, TupleTableSlot *slot);
  * prototypes from functions in execMain.c
  */
 extern void ExecutorStart(QueryDesc *queryDesc, int eflags);
-extern TupleTableSlot *ExecutorRun(QueryDesc *queryDesc,
+extern void standard_ExecutorStart(QueryDesc *queryDesc, int eflags);
+extern void ExecutorRun(QueryDesc *queryDesc,
 			ScanDirection direction, long count);
+extern void standard_ExecutorRun(QueryDesc *queryDesc,
+					 ScanDirection direction, long count);
 extern void ExecutorEnd(QueryDesc *queryDesc);
+extern void standard_ExecutorEnd(QueryDesc *queryDesc);
 extern void ExecutorRewind(QueryDesc *queryDesc);
+extern void InitResultRelInfo(ResultRelInfo *resultRelInfo,
+				  Relation resultRelationDesc,
+				  Index resultRelationIndex,
+				  CmdType operation,
+				  bool doInstrument);
 extern ResultRelInfo *ExecGetTriggerResultRel(EState *estate, Oid relid);
 extern bool ExecContextForcesOids(PlanState *planstate, bool *hasoids);
 extern void ExecConstraints(ResultRelInfo *resultRelInfo,
@@ -174,16 +197,10 @@ extern Datum GetAttributeByNum(HeapTupleHeader tuple, AttrNumber attrno,
 				  bool *isNull);
 extern Datum GetAttributeByName(HeapTupleHeader tuple, const char *attname,
 				   bool *isNull);
-extern void init_fcache(Oid foid, FuncExprState *fcache,
-			MemoryContext fcacheCxt);
-extern Datum ExecMakeFunctionResult(FuncExprState *fcache,
-					   ExprContext *econtext,
-					   bool *isNull,
-					   ExprDoneCond *isDone);
 extern Tuplestorestate *ExecMakeTableFunctionResult(ExprState *funcexpr,
 							ExprContext *econtext,
 							TupleDesc expectedDesc,
-							TupleDesc *returnDesc);
+							bool randomAccess);
 extern Datum ExecEvalExprSwitchContext(ExprState *expression, ExprContext *econtext,
 						  bool *isNull, ExprDoneCond *isDone);
 extern ExprState *ExecInitExpr(Expr *node, PlanState *parent);
@@ -249,7 +266,7 @@ extern EState *CreateExecutorState(void);
 extern void FreeExecutorState(EState *estate);
 extern ExprContext *CreateExprContext(EState *estate);
 extern ExprContext *CreateStandaloneExprContext(void);
-extern void FreeExprContext(ExprContext *econtext);
+extern void FreeExprContext(ExprContext *econtext, bool isCommit);
 extern void ReScanExprContext(ExprContext *econtext);
 
 #define ResetExprContext(econtext) \

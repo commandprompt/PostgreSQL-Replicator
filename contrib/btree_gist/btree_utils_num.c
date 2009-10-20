@@ -1,22 +1,31 @@
+/*
+ * $PostgreSQL$
+ */
 #include "btree_gist.h"
 #include "btree_utils_num.h"
+#include "utils/cash.h"
 #include "utils/date.h"
 
-GISTENTRY *
-gbt_num_compress(GISTENTRY *retval, GISTENTRY *entry, const gbtree_ninfo * tinfo)
-{
 
+GISTENTRY *
+gbt_num_compress(GISTENTRY *retval, GISTENTRY *entry, const gbtree_ninfo *tinfo)
+{
 	if (entry->leafkey)
 	{
-
 		union
 		{
 			int16		i2;
 			int32		i4;
+			int64		i8;
+			float4		f4;
+			float8		f8;
 			DateADT		dt;
+			TimeADT		tm;
+			Timestamp	ts;
+			Cash		ch;
 		}			v;
 
-		GBT_NUMKEY *r = (GBT_NUMKEY *) palloc(2 * tinfo->size);
+		GBT_NUMKEY *r = (GBT_NUMKEY *) palloc0(2 * tinfo->size);
 		void	   *leaf = NULL;
 
 		switch (tinfo->t)
@@ -29,19 +38,42 @@ gbt_num_compress(GISTENTRY *retval, GISTENTRY *entry, const gbtree_ninfo * tinfo
 				v.i4 = DatumGetInt32(entry->key);
 				leaf = &v.i4;
 				break;
+			case gbt_t_int8:
+				v.i8 = DatumGetInt64(entry->key);
+				leaf = &v.i8;
+				break;
 			case gbt_t_oid:
 				v.i4 = DatumGetObjectId(entry->key);
 				leaf = &v.i4;
+				break;
+			case gbt_t_float4:
+				v.f4 = DatumGetFloat4(entry->key);
+				leaf = &v.f4;
+				break;
+			case gbt_t_float8:
+				v.f8 = DatumGetFloat8(entry->key);
+				leaf = &v.f8;
 				break;
 			case gbt_t_date:
 				v.dt = DatumGetDateADT(entry->key);
 				leaf = &v.dt;
 				break;
+			case gbt_t_time:
+				v.tm = DatumGetTimeADT(entry->key);
+				leaf = &v.tm;
+				break;
+			case gbt_t_ts:
+				v.ts = DatumGetTimestamp(entry->key);
+				leaf = &v.ts;
+				break;
+			case gbt_t_cash:
+				v.ch = DatumGetCash(entry->key);
+				leaf = &v.ch;
+				break;
 			default:
 				leaf = DatumGetPointer(entry->key);
 		}
 
-		memset((void *) &r[0], 0, 2 * tinfo->size);
 		memcpy((void *) &r[0], leaf, tinfo->size);
 		memcpy((void *) &r[tinfo->size], leaf, tinfo->size);
 		retval = palloc(sizeof(GISTENTRY));
@@ -62,7 +94,7 @@ gbt_num_compress(GISTENTRY *retval, GISTENTRY *entry, const gbtree_ninfo * tinfo
 */
 
 void *
-gbt_num_union(GBT_NUMKEY * out, const GistEntryVector *entryvec, const gbtree_ninfo * tinfo)
+gbt_num_union(GBT_NUMKEY *out, const GistEntryVector *entryvec, const gbtree_ninfo *tinfo)
 {
 	int			i,
 				numranges;
@@ -100,7 +132,7 @@ gbt_num_union(GBT_NUMKEY * out, const GistEntryVector *entryvec, const gbtree_ni
 */
 
 bool
-gbt_num_same(const GBT_NUMKEY * a, const GBT_NUMKEY * b, const gbtree_ninfo * tinfo)
+gbt_num_same(const GBT_NUMKEY *a, const GBT_NUMKEY *b, const gbtree_ninfo *tinfo)
 {
 
 	GBT_NUMKEY_R b1,
@@ -122,7 +154,7 @@ gbt_num_same(const GBT_NUMKEY * a, const GBT_NUMKEY * b, const gbtree_ninfo * ti
 
 
 void
-gbt_num_bin_union(Datum *u, GBT_NUMKEY * e, const gbtree_ninfo * tinfo)
+gbt_num_bin_union(Datum *u, GBT_NUMKEY *e, const gbtree_ninfo *tinfo)
 {
 
 	GBT_NUMKEY_R rd;
@@ -157,11 +189,11 @@ gbt_num_bin_union(Datum *u, GBT_NUMKEY * e, const gbtree_ninfo * tinfo)
 
 bool
 gbt_num_consistent(
-				   const GBT_NUMKEY_R * key,
+				   const GBT_NUMKEY_R *key,
 				   const void *query,
 				   const StrategyNumber *strategy,
 				   bool is_leaf,
-				   const gbtree_ninfo * tinfo
+				   const gbtree_ninfo *tinfo
 )
 {
 
@@ -203,7 +235,7 @@ gbt_num_consistent(
 
 GIST_SPLITVEC *
 gbt_num_picksplit(const GistEntryVector *entryvec, GIST_SPLITVEC *v,
-				  const gbtree_ninfo * tinfo)
+				  const gbtree_ninfo *tinfo)
 {
 	OffsetNumber i,
 				maxoff = entryvec->n - 1;

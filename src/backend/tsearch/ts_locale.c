@@ -3,7 +3,7 @@
  * ts_locale.c
  *		locale compatibility layer for tsearch
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -20,116 +20,7 @@
 static void tsearch_readline_callback(void *arg);
 
 
-#ifdef TS_USE_WIDE
-
-/*
- * wchar2char --- convert wide characters to multibyte format
- *
- * This has the same API as the standard wcstombs() function; in particular,
- * tolen is the maximum number of bytes to store at *to, and *from must be
- * zero-terminated.  The output will be zero-terminated iff there is room.
- */
-size_t
-wchar2char(char *to, const wchar_t *from, size_t tolen)
-{
-	if (tolen == 0)
-		return 0;
-
-#ifdef WIN32
-	if (GetDatabaseEncoding() == PG_UTF8)
-	{
-		int			r;
-
-		r = WideCharToMultiByte(CP_UTF8, 0, from, -1, to, tolen,
-								NULL, NULL);
-
-		if (r <= 0)
-			return (size_t) -1;
-
-		Assert(r <= tolen);
-
-		/* Microsoft counts the zero terminator in the result */
-		return r - 1;
-	}
-#endif   /* WIN32 */
-
-	Assert( !lc_ctype_is_c() );
-	return wcstombs(to, from, tolen);
-}
-
-/*
- * char2wchar --- convert multibyte characters to wide characters
- *
- * This has almost the API of mbstowcs(), except that *from need not be
- * null-terminated; instead, the number of input bytes is specified as
- * fromlen.  Also, we ereport() rather than returning -1 for invalid
- * input encoding.	tolen is the maximum number of wchar_t's to store at *to.
- * The output will be zero-terminated iff there is room.
- */
-size_t
-char2wchar(wchar_t *to, size_t tolen, const char *from, size_t fromlen)
-{
-	if (tolen == 0)
-		return 0;
-
-#ifdef WIN32
-	if (GetDatabaseEncoding() == PG_UTF8)
-	{
-		int			r;
-
-		/* stupid Microsloth API does not work for zero-length input */
-		if (fromlen == 0)
-			r = 0;
-		else
-		{
-			r = MultiByteToWideChar(CP_UTF8, 0, from, fromlen, to, tolen - 1);
-
-			if (r <= 0)
-			{
-				/* see notes in oracle_compat.c about error reporting */
-				pg_verifymbstr(from, fromlen, false);
-				ereport(ERROR,
-						(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
-						 errmsg("invalid multibyte character for locale"),
-						 errhint("The server's LC_CTYPE locale is probably incompatible with the database encoding.")));
-			}
-		}
-
-		Assert(r < tolen);
-		to[r] = 0;
-
-		return r;
-	}
-	else
-#endif   /* WIN32 */
-	{
-		/*
-		 * mbstowcs requires ending '\0'
-		 */
-		char	   *str = pnstrdup(from, fromlen);
-		size_t		result;
-
-		Assert( !lc_ctype_is_c() );
-		result = mbstowcs(to, str, tolen);
-
-		pfree(str);
-
-		if (result == (size_t) -1)
-		{
-			pg_verifymbstr(from, fromlen, false);
-			ereport(ERROR,
-					(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
-					 errmsg("invalid multibyte character for locale"),
-					 errhint("The server's LC_CTYPE locale is probably incompatible with the database encoding.")));
-		}
-
-		if (result < tolen)
-			to[result] = 0;
-
-		return result;
-	}
-}
-
+#ifdef USE_WIDE_UPPER_LOWER
 
 int
 t_isdigit(const char *ptr)
@@ -186,11 +77,11 @@ t_isprint(const char *ptr)
 
 	return iswprint((wint_t) character[0]);
 }
-#endif   /* TS_USE_WIDE */
+#endif   /* USE_WIDE_UPPER_LOWER */
 
 
 /*
- * Set up to read a file using tsearch_readline().  This facility is
+ * Set up to read a file using tsearch_readline().	This facility is
  * better than just reading the file directly because it provides error
  * context pointing to the specific line where a problem is detected.
  *
@@ -268,10 +159,10 @@ tsearch_readline_callback(void *arg)
 
 	/*
 	 * We can't include the text of the config line for errors that occur
-	 * during t_readline() itself.  This is only partly a consequence of
-	 * our arms-length use of that routine: the major cause of such
-	 * errors is encoding violations, and we daren't try to print error
-	 * messages containing badly-encoded data.
+	 * during t_readline() itself.	This is only partly a consequence of our
+	 * arms-length use of that routine: the major cause of such errors is
+	 * encoding violations, and we daren't try to print error messages
+	 * containing badly-encoded data.
 	 */
 	if (stp->curline)
 		errcontext("line %d of configuration file \"%s\": \"%s\"",
@@ -313,10 +204,6 @@ t_readline(FILE *fp)
 												 len,
 												 PG_UTF8,
 												 GetDatabaseEncoding());
-
-	if (recoded == NULL)		/* should not happen */
-		elog(ERROR, "encoding conversion failed");
-
 	if (recoded == buf)
 	{
 		/*
@@ -355,7 +242,7 @@ lowerstr_with_len(const char *str, int len)
 	if (len == 0)
 		return pstrdup("");
 
-#ifdef TS_USE_WIDE
+#ifdef USE_WIDE_UPPER_LOWER
 
 	/*
 	 * Use wide char code only when max encoding length > 1 and ctype != C.
@@ -398,11 +285,11 @@ lowerstr_with_len(const char *str, int len)
 		if (wlen < 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
-					 errmsg("conversion from wchar_t to server encoding failed: %m")));
+			errmsg("conversion from wchar_t to server encoding failed: %m")));
 		Assert(wlen < len);
 	}
 	else
-#endif   /* TS_USE_WIDE */
+#endif   /* USE_WIDE_UPPER_LOWER */
 	{
 		const char *ptr = str;
 		char	   *outptr;

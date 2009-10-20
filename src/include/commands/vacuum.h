@@ -4,7 +4,7 @@
  *	  header file for postgres vacuum cleaner and statistics analyzer
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -20,7 +20,7 @@
 #include "nodes/parsenodes.h"
 #include "storage/buf.h"
 #include "storage/lock.h"
-#include "utils/rel.h"
+#include "utils/relcache.h"
 
 
 /*----------
@@ -94,6 +94,18 @@ typedef struct VacAttrStats
 	Datum	   *stavalues[STATISTIC_NUM_SLOTS];
 
 	/*
+	 * These fields describe the stavalues[n] element types. They will be
+	 * initialized to be the same as the column's that's underlying the slot,
+	 * but a custom typanalyze function might want to store an array of
+	 * something other than the analyzed column's elements. It should then
+	 * overwrite these fields.
+	 */
+	Oid			statypid[STATISTIC_NUM_SLOTS];
+	int2		statyplen[STATISTIC_NUM_SLOTS];
+	bool		statypbyval[STATISTIC_NUM_SLOTS];
+	char		statypalign[STATISTIC_NUM_SLOTS];
+
+	/*
 	 * These fields are private to the main ANALYZE code and should not be
 	 * looked at by type-specific functions.
 	 */
@@ -110,32 +122,35 @@ typedef struct VacAttrStats
 extern PGDLLIMPORT int default_statistics_target;		/* PGDLLIMPORT for
 														 * PostGIS */
 extern int	vacuum_freeze_min_age;
+extern int	vacuum_freeze_table_age;
 
 
 /* in commands/vacuum.c */
-extern void vacuum(VacuumStmt *vacstmt, List *relids,
+extern void vacuum(VacuumStmt *vacstmt, Oid relid, bool do_toast,
 	   BufferAccessStrategy bstrategy, bool for_wraparound, bool isTopLevel);
 extern void vac_open_indexes(Relation relation, LOCKMODE lockmode,
 				 int *nindexes, Relation **Irel);
 extern void vac_close_indexes(int nindexes, Relation *Irel, LOCKMODE lockmode);
-extern void vac_update_relstats(Oid relid,
+extern void vac_update_relstats(Relation relation,
 					BlockNumber num_pages,
 					double num_tuples,
 					bool hasindex,
 					TransactionId frozenxid);
-extern void vacuum_set_xid_limits(int freeze_min_age, bool sharedRel,
+extern void vacuum_set_xid_limits(int freeze_min_age, int freeze_table_age,
+					  bool sharedRel,
 					  TransactionId *oldestXmin,
-					  TransactionId *freezeLimit);
+					  TransactionId *freezeLimit,
+					  TransactionId *freezeTableLimit);
 extern void vac_update_datfrozenxid(void);
 extern bool vac_is_partial_index(Relation indrel);
 extern void vacuum_delay_point(void);
 
 /* in commands/vacuumlazy.c */
 extern void lazy_vacuum_rel(Relation onerel, VacuumStmt *vacstmt,
-				BufferAccessStrategy bstrategy);
+				BufferAccessStrategy bstrategy, bool *scanned_all);
 
 /* in commands/analyze.c */
 extern void analyze_rel(Oid relid, VacuumStmt *vacstmt,
-			BufferAccessStrategy bstrategy);
+			BufferAccessStrategy bstrategy, bool update_reltuples);
 
 #endif   /* VACUUM_H */

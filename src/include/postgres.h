@@ -7,7 +7,7 @@
  * Client-side code should include postgres_fe.h instead.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1995, Regents of the University of California
  *
  * $PostgreSQL$
@@ -26,7 +26,6 @@
  *		1)		variable-length datatypes (TOAST support)
  *		2)		datum type + support macros
  *		3)		exception handling definitions
- *		4)		genbki macros used by catalog/pg_xxx.h files
  *
  *	 NOTES
  *
@@ -315,9 +314,15 @@ typedef Datum *DatumPtr;
 #define GET_1_BYTE(datum)	(((Datum) (datum)) & 0x000000ff)
 #define GET_2_BYTES(datum)	(((Datum) (datum)) & 0x0000ffff)
 #define GET_4_BYTES(datum)	(((Datum) (datum)) & 0xffffffff)
+#if SIZEOF_DATUM == 8
+#define GET_8_BYTES(datum)	((Datum) (datum))
+#endif
 #define SET_1_BYTE(value)	(((Datum) (value)) & 0x000000ff)
 #define SET_2_BYTES(value)	(((Datum) (value)) & 0x0000ffff)
 #define SET_4_BYTES(value)	(((Datum) (value)) & 0xffffffff)
+#if SIZEOF_DATUM == 8
+#define SET_8_BYTES(value)	((Datum) (value))
+#endif
 
 /*
  * DatumGetBool
@@ -528,37 +533,48 @@ typedef Datum *DatumPtr;
  * DatumGetInt64
  *		Returns 64-bit integer value of a datum.
  *
- * Note: this macro hides the fact that int64 is currently a
- * pass-by-reference type.	Someday it may be pass-by-value,
- * at least on some platforms.
+ * Note: this macro hides whether int64 is pass by value or by reference.
  */
 
+#ifdef USE_FLOAT8_BYVAL
+#define DatumGetInt64(X) ((int64) GET_8_BYTES(X))
+#else
 #define DatumGetInt64(X) (* ((int64 *) DatumGetPointer(X)))
+#endif
 
 /*
  * Int64GetDatum
  *		Returns datum representation for a 64-bit integer.
  *
- * Note: this routine returns a reference to palloc'd space.
+ * Note: if int64 is pass by reference, this function returns a reference
+ * to palloc'd space.
  */
 
+#ifdef USE_FLOAT8_BYVAL
+#define Int64GetDatum(X) ((Datum) SET_8_BYTES(X))
+#else
 extern Datum Int64GetDatum(int64 X);
+#endif
 
 /*
  * DatumGetFloat4
  *		Returns 4-byte floating point value of a datum.
  *
- * Note: this macro hides the fact that float4 is currently a
- * pass-by-reference type.	Someday it may be pass-by-value.
+ * Note: this macro hides whether float4 is pass by value or by reference.
  */
 
+#ifdef USE_FLOAT4_BYVAL
+extern float4 DatumGetFloat4(Datum X);
+#else
 #define DatumGetFloat4(X) (* ((float4 *) DatumGetPointer(X)))
+#endif
 
 /*
  * Float4GetDatum
  *		Returns datum representation for a 4-byte floating point number.
  *
- * Note: this routine returns a reference to palloc'd space.
+ * Note: if float4 is pass by reference, this function returns a reference
+ * to palloc'd space.
  */
 
 extern Datum Float4GetDatum(float4 X);
@@ -567,74 +583,33 @@ extern Datum Float4GetDatum(float4 X);
  * DatumGetFloat8
  *		Returns 8-byte floating point value of a datum.
  *
- * Note: this macro hides the fact that float8 is currently a
- * pass-by-reference type.	Someday it may be pass-by-value,
- * at least on some platforms.
+ * Note: this macro hides whether float8 is pass by value or by reference.
  */
 
+#ifdef USE_FLOAT8_BYVAL
+extern float8 DatumGetFloat8(Datum X);
+#else
 #define DatumGetFloat8(X) (* ((float8 *) DatumGetPointer(X)))
+#endif
 
 /*
  * Float8GetDatum
  *		Returns datum representation for an 8-byte floating point number.
  *
- * Note: this routine returns a reference to palloc'd space.
+ * Note: if float8 is pass by reference, this function returns a reference
+ * to palloc'd space.
  */
 
 extern Datum Float8GetDatum(float8 X);
 
 
 /*
- * DatumGetFloat32
- *		Returns 32-bit floating point value of a datum.
- *		This is really a pointer, of course.
- *
- * XXX: this macro is now deprecated in favor of DatumGetFloat4.
- * It will eventually go away.
- */
-
-#define DatumGetFloat32(X) ((float32) DatumGetPointer(X))
-
-/*
- * Float32GetDatum
- *		Returns datum representation for a 32-bit floating point number.
- *		This is really a pointer, of course.
- *
- * XXX: this macro is now deprecated in favor of Float4GetDatum.
- * It will eventually go away.
- */
-
-#define Float32GetDatum(X) PointerGetDatum(X)
-
-/*
- * DatumGetFloat64
- *		Returns 64-bit floating point value of a datum.
- *		This is really a pointer, of course.
- *
- * XXX: this macro is now deprecated in favor of DatumGetFloat8.
- * It will eventually go away.
- */
-
-#define DatumGetFloat64(X) ((float64) DatumGetPointer(X))
-
-/*
- * Float64GetDatum
- *		Returns datum representation for a 64-bit floating point number.
- *		This is really a pointer, of course.
- *
- * XXX: this macro is now deprecated in favor of Float8GetDatum.
- * It will eventually go away.
- */
-
-#define Float64GetDatum(X) PointerGetDatum(X)
-
-/*
  * Int64GetDatumFast
- * Float4GetDatumFast
  * Float8GetDatumFast
+ * Float4GetDatumFast
  *
  * These macros are intended to allow writing code that does not depend on
- * whether int64, float4, float8 are pass-by-reference types, while not
+ * whether int64, float8, float4 are pass-by-reference types, while not
  * sacrificing performance when they are.  The argument must be a variable
  * that will exist and have the same value for as long as the Datum is needed.
  * In the pass-by-ref case, the address of the variable is taken to use as
@@ -642,9 +617,19 @@ extern Datum Float8GetDatum(float8 X);
  * macros.
  */
 
+#ifdef USE_FLOAT8_BYVAL
+#define Int64GetDatumFast(X)  Int64GetDatum(X)
+#define Float8GetDatumFast(X) Float8GetDatum(X)
+#else
 #define Int64GetDatumFast(X)  PointerGetDatum(&(X))
-#define Float4GetDatumFast(X) PointerGetDatum(&(X))
 #define Float8GetDatumFast(X) PointerGetDatum(&(X))
+#endif
+
+#ifdef USE_FLOAT4_BYVAL
+#define Float4GetDatumFast(X) Float4GetDatum(X)
+#else
+#define Float4GetDatumFast(X) PointerGetDatum(&(X))
+#endif
 
 
 /* ----------------------------------------------------------------
@@ -707,22 +692,5 @@ extern PGDLLIMPORT bool assert_enabled;
 extern int ExceptionalCondition(const char *conditionName,
 					 const char *errorType,
 					 const char *fileName, int lineNumber);
-
-/* ----------------------------------------------------------------
- *				Section 4: genbki macros used by catalog/pg_xxx.h files
- * ----------------------------------------------------------------
- */
-#define CATALOG(name,oid)	typedef struct CppConcat(FormData_,name)
-
-#define BKI_BOOTSTRAP
-#define BKI_SHARED_RELATION
-#define BKI_WITHOUT_OIDS
-
-/* these need to expand into some harmless, repeatable declaration */
-#define DATA(x)   extern int no_such_variable
-#define DESCR(x)  extern int no_such_variable
-#define SHDESCR(x) extern int no_such_variable
-
-typedef int4 aclitem;			/* PHONY definition for catalog use only */
 
 #endif   /* POSTGRES_H */

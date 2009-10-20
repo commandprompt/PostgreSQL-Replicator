@@ -4,7 +4,7 @@
  *		Common support routines for bin/scripts/
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -23,10 +23,6 @@
 
 static void SetCancelConn(PGconn *conn);
 static void ResetCancelConn(void);
-
-#ifndef HAVE_INT_OPTRESET
-int			optreset;
-#endif
 
 static PGcancel *volatile cancelConn = NULL;
 
@@ -96,14 +92,14 @@ handle_help_version_opts(int argc, char *argv[],
  */
 PGconn *
 connectDatabase(const char *dbname, const char *pghost, const char *pgport,
-				const char *pguser, bool require_password,
+				const char *pguser, enum trivalue prompt_password,
 				const char *progname)
 {
 	PGconn	   *conn;
 	char	   *password = NULL;
 	bool		new_pass;
 
-	if (require_password)
+	if (prompt_password == TRI_YES)
 		password = simple_prompt("Password: ", 100, false);
 
 	/*
@@ -125,7 +121,7 @@ connectDatabase(const char *dbname, const char *pghost, const char *pgport,
 		if (PQstatus(conn) == CONNECTION_BAD &&
 			PQconnectionNeedsPassword(conn) &&
 			password == NULL &&
-			!feof(stdin))
+			prompt_password != TRI_NO)
 		{
 			PQfinish(conn);
 			password = simple_prompt("Password: ", 100, false);
@@ -229,6 +225,27 @@ executeMaintenanceCommand(PGconn *conn, const char *query, bool echo)
 	return r;
 }
 
+/*
+ * "Safe" wrapper around strdup().	Pulled from psql/common.c
+ */
+char *
+pg_strdup(const char *string)
+{
+	char	   *tmp;
+
+	if (!string)
+	{
+		fprintf(stderr, _("pg_strdup: cannot duplicate null pointer (internal error)\n"));
+		exit(EXIT_FAILURE);
+	}
+	tmp = strdup(string);
+	if (!tmp)
+	{
+		fprintf(stderr, _("out of memory\n"));
+		exit(EXIT_FAILURE);
+	}
+	return tmp;
+}
 
 /*
  * Check yes/no answer in a localized way.	1=yes, 0=no, -1=neither.
@@ -273,7 +290,6 @@ yesno_prompt(const char *question)
 			   _(PG_YESLETTER), _(PG_NOLETTER));
 	}
 }
-
 
 /*
  * SetCancelConn

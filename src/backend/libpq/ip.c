@@ -3,7 +3,7 @@
  * ip.c
  *	  IPv6-aware network access.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -77,33 +77,6 @@ pg_getaddrinfo_all(const char *hostname, const char *servname,
 	/* NULL has special meaning to getaddrinfo(). */
 	rc = getaddrinfo((!hostname || hostname[0] == '\0') ? NULL : hostname,
 					 servname, hintp, result);
-
-#ifdef _AIX
-
-	/*
-	 * It seems some versions of AIX's getaddrinfo don't reliably zero
-	 * sin_port when servname is NULL, so clean up after it.
-	 */
-	if (servname == NULL && rc == 0)
-	{
-		struct addrinfo *addr;
-
-		for (addr = *result; addr; addr = addr->ai_next)
-		{
-			switch (addr->ai_family)
-			{
-				case AF_INET:
-					((struct sockaddr_in *) addr->ai_addr)->sin_port = htons(0);
-					break;
-#ifdef HAVE_IPV6
-				case AF_INET6:
-					((struct sockaddr_in6 *) addr->ai_addr)->sin6_port = htons(0);
-					break;
-#endif
-			}
-		}
-	}
-#endif
 
 	return rc;
 }
@@ -384,6 +357,7 @@ pg_sockaddr_cidr_mask(struct sockaddr_storage * mask, char *numbits, int family)
 
 				if (bits < 0 || bits > 32)
 					return -1;
+				memset(&mask4, 0, sizeof(mask4));
 				/* avoid "x << 32", which is not portable */
 				if (bits > 0)
 					maskl = (0xffffffffUL << (32 - (int) bits))
@@ -403,6 +377,7 @@ pg_sockaddr_cidr_mask(struct sockaddr_storage * mask, char *numbits, int family)
 
 				if (bits < 0 || bits > 128)
 					return -1;
+				memset(&mask6, 0, sizeof(mask6));
 				for (i = 0; i < 16; i++)
 				{
 					if (bits <= 0)

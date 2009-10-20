@@ -3,7 +3,7 @@
  * tsquery_op.c
  *	  Various operations with tsquery
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -188,7 +188,9 @@ NAME(PG_FUNCTION_ARGS) {						\
 	PG_FREE_IF_COPY(b,1);						\
 												\
 	PG_RETURN_BOOL( CONDITION );				\
-}
+}	\
+/* keep compiler quiet - no extra ; */			\
+extern int no_such_variable
 
 CMPFUNC(tsquery_lt, res < 0);
 CMPFUNC(tsquery_le, res <= 0);

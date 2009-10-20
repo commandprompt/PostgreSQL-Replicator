@@ -1,8 +1,14 @@
-#include "hstore.h"
+/*
+ * $PostgreSQL$
+ */
+#include "postgres.h"
 
 #include "access/gist.h"
 #include "access/itup.h"
+#include "access/skey.h"
 #include "crc32.h"
+
+#include "hstore.h"
 
 /* bigint defines */
 #define BITBYTE 8
@@ -36,7 +42,7 @@ typedef struct
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	int4		flag;
 	char		data[1];
-}	GISTTYPE;
+} GISTTYPE;
 
 #define ALLISTRUE		0x04
 
@@ -249,7 +255,7 @@ hemdistsign(BITVECP a, BITVECP b)
 }
 
 static int
-hemdist(GISTTYPE * a, GISTTYPE * b)
+hemdist(GISTTYPE *a, GISTTYPE *b)
 {
 	if (ISALLTRUE(a))
 	{
@@ -265,7 +271,7 @@ hemdist(GISTTYPE * a, GISTTYPE * b)
 }
 
 static int4
-unionkey(BITVECP sbase, GISTTYPE * add)
+unionkey(BITVECP sbase, GISTTYPE *add)
 {
 	int4		i;
 	BITVECP		sadd = GETSIGN(add);
@@ -508,8 +514,14 @@ ghstore_consistent(PG_FUNCTION_ARGS)
 {
 	GISTTYPE   *entry = (GISTTYPE *) DatumGetPointer(((GISTENTRY *) PG_GETARG_POINTER(0))->key);
 	StrategyNumber strategy = (StrategyNumber) PG_GETARG_UINT16(2);
+
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	bool	   *recheck = (bool *) PG_GETARG_POINTER(4);
 	bool		res = true;
 	BITVECP		sign;
+
+	/* All cases served by this function are inexact */
+	*recheck = true;
 
 	if (ISALLTRUE(entry))
 		PG_RETURN_BOOL(true);

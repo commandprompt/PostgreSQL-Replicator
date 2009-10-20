@@ -27,11 +27,6 @@
  <itemizedlist>
   <listitem>
    <para>
-    Supports copy or link for restoring WAL files
-   </para>
-  </listitem>
-  <listitem>
-   <para>
     Written in C, so very portable and easy to install
    </para>
   </listitem>
@@ -92,6 +87,40 @@ pg_standby <optional> <replaceable>option</> ... </optional> <replaceable>archiv
    is specified,
    the <replaceable>archivelocation</> directory must be writable too.
   </para>
+  <para>
+   There are two ways to fail over to a <quote>warm standby</> database server
+   when the master server fails:
+
+   <variablelist>
+    <varlistentry>
+     <term>Smart Failover</term>
+     <listitem>
+      <para>
+       In smart failover, the server is brought up after applying all WAL
+       files available in the archive. This results in zero data loss, even if
+       the standby server has fallen behind, but if there is a lot of
+       unapplied WAL it can be a long time before the standby server becomes
+       ready. To trigger a smart failover, create a trigger file containing
+       the word <literal>smart</>, or just create it and leave it empty.
+      </para>
+     </listitem>
+    </varlistentry>
+    <varlistentry>
+     <term>Fast Failover</term>
+     <listitem>
+      <para>
+       In fast failover, the server is brought up immediately. Any WAL files
+       in the archive that have not yet been applied will be ignored, and
+       all transactions in those files are lost. To trigger a fast failover,
+       create a trigger file and write the word <literal>fast</> into it.
+       <application>pg_standby</> can also be configured to execute a fast
+       failover automatically if no new WAL file appears within a defined
+       interval.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </para>
 
   <table>
    <title><application>pg_standby</> options</title>
@@ -138,22 +167,10 @@ pg_standby <optional> <replaceable>option</> ... </optional> <replaceable>archiv
       </entry>
      </row>
      <row>
-      <entry><literal>-l</></entry>
-      <entry>no</entry>
-      <entry>
-       Use <literal>ln</> command to restore WAL files from archive.
-       Link is more efficient than copy, but the default is copy since link
-       will not work in all scenarios.
-       On Windows, this option uses the <literal>mklink</> command
-       to provide a file-to-file symbolic link. <literal>-l</> will
-       not work on versions of Windows prior to Vista.
-      </entry>
-     </row>
-     <row>
       <entry><literal>-r</> <replaceable>maxretries</></entry>
       <entry>3</entry>
       <entry>
-        Set the maximum number of times to retry the copy or link command if it
+        Set the maximum number of times to retry the copy command if it
         fails. After each failure, we wait for <replaceable>sleeptime</> *
         <replaceable>num_retries</>
         so that the wait time increases progressively.  So by default,
@@ -177,8 +194,7 @@ pg_standby <optional> <replaceable>option</> ... </optional> <replaceable>archiv
       <entry><literal>-t</> <replaceable>triggerfile</></entry>
       <entry>none</entry>
       <entry>
-       Specify a trigger file whose presence should cause recovery to end
-       whether or not the next WAL file is available.
+       Specify a trigger file whose presence should cause failover.
        It is recommended that you use a structured filename to
        avoid confusion as to which server is being triggered
        when multiple servers exist on the same system; for example
@@ -190,7 +206,7 @@ pg_standby <optional> <replaceable>option</> ... </optional> <replaceable>archiv
       <entry>0</entry>
       <entry>
        Set the maximum number of seconds to wait for the next WAL file,
-       after which recovery will end and the standby will come up.
+       after which a fast failover will be performed.
        A setting of zero (the default) means wait forever.
        The default setting is not necessarily recommended;
        consult <xref linkend="warm-standby"> for discussion.
@@ -199,13 +215,6 @@ pg_standby <optional> <replaceable>option</> ... </optional> <replaceable>archiv
     </tbody>
    </tgroup>
   </table>
-  <note>
-   <para>
-    <literal>--help</literal> is not supported since
-    <application>pg_standby</application> is not intended for interactive use,
-    except during development and testing.
-   </para>
-  </note>
  </sect2>
 
  <sect2>
@@ -216,7 +225,9 @@ pg_standby <optional> <replaceable>option</> ... </optional> <replaceable>archiv
   <programlisting>
 archive_command = 'cp %p .../archive/%f'
 
-restore_command = 'pg_standby -l -d -s 2 -t /tmp/pgsql.trigger.5442 .../archive %f %p %r 2>>standby.log'
+restore_command = 'pg_standby -d -s 2 -t /tmp/pgsql.trigger.5442 .../archive %f %p %r 2>>standby.log'
+
+recovery_end_command = 'rm -f /tmp/pgsql.trigger.5442'
   </programlisting>
   <para>
    where the archive directory is physically located on the standby server,
@@ -225,11 +236,6 @@ restore_command = 'pg_standby -l -d -s 2 -t /tmp/pgsql.trigger.5442 .../archive 
    This will:
   </para>
   <itemizedlist>
-   <listitem>
-    <para>
-     use the <literal>ln</> command to restore WAL files from archive
-    </para>
-   </listitem>
    <listitem>
     <para>
      produce debugging output in <filename>standby.log</>
@@ -243,7 +249,13 @@ restore_command = 'pg_standby -l -d -s 2 -t /tmp/pgsql.trigger.5442 .../archive 
    <listitem>
     <para>
      stop waiting only when a trigger file called
-     <filename>/tmp/pgsql.trigger.5442</> appears
+     <filename>/tmp/pgsql.trigger.5442</> appears,
+     and perform failover according to its content
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     remove the trigger file when recovery ends
     </para>
    </listitem>
    <listitem>
@@ -259,11 +271,14 @@ restore_command = 'pg_standby -l -d -s 2 -t /tmp/pgsql.trigger.5442 .../archive 
 archive_command = 'copy %p ...\\archive\\%f'
 
 restore_command = 'pg_standby -d -s 5 -t C:\pgsql.trigger.5442 ...\archive %f %p %r 2>>standby.log'
+
+recovery_end_command = 'del C:\pgsql.trigger.5442'
   </programlisting>
   <para>
    Note that backslashes need to be doubled in the
    <literal>archive_command</>, but <emphasis>not</emphasis> in the
-   <literal>restore_command</>.  This will:
+   <literal>restore_command</> or <literal>recovery_end_command</>.
+   This will:
   </para>
   <itemizedlist>
    <listitem>
@@ -284,7 +299,13 @@ restore_command = 'pg_standby -d -s 5 -t C:\pgsql.trigger.5442 ...\archive %f %p
    <listitem>
     <para>
      stop waiting only when a trigger file called
-     <filename>C:\pgsql.trigger.5442</> appears
+     <filename>C:\pgsql.trigger.5442</> appears,
+     and perform failover according to its content
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     remove the trigger file when recovery ends
     </para>
    </listitem>
    <listitem>
@@ -293,6 +314,15 @@ restore_command = 'pg_standby -d -s 5 -t C:\pgsql.trigger.5442 ...\archive %f %p
     </para>
    </listitem>
   </itemizedlist>
+
+  <para>
+   The <literal>copy</> command on Windows sets the final file size
+   before the file is completely copied, which would ordinarly confuse
+   <application>pg_standby</application>.  Therefore
+   <application>pg_standby</application> waits <literal>sleeptime</>
+   seconds once it sees the proper file size.  GNUWin32's <literal>cp</>
+   sets the file size only after the file copy is complete.
+  </para>
 
   <para>
    Since the Windows example uses <literal>copy</> at both ends, either
@@ -315,6 +345,11 @@ restore_command = 'pg_standby -d -s 5 -t C:\pgsql.trigger.5442 ...\archive %f %p
    last file it needs to keep.  With <productname>PostgreSQL</> 8.2, the
    <literal>-k</literal> option must be used if archive cleanup is
    required.  This option remains available in 8.3, but its use is deprecated.
+  </para>
+  <para>
+   <productname>PostgreSQL</> 8.4 provides the
+   <literal>recovery_end_command</literal> option.  Without this option
+   a leftover trigger file can be hazardous.
   </para>
  </sect2>
 

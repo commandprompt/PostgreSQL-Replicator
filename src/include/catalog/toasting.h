@@ -4,7 +4,7 @@
  *	  This file provides some definitions to support creation of toast tables
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -17,7 +17,8 @@
 /*
  * toasting.c prototypes
  */
-extern void AlterTableCreateToastTable(Oid relOid);
+extern void AlterTableCreateToastTable(Oid relOid, Oid toastOid,
+						   Datum reloptions, bool force);
 extern void BootstrapToastTable(char *relName,
 					Oid toastOid, Oid toastIndexOid);
 

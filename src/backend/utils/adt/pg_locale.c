@@ -2,7 +2,7 @@
  *
  * PostgreSQL locale utilities
  *
- * Portions Copyright (c) 2002-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2002-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
@@ -11,9 +11,9 @@
 
 /*----------
  * Here is how the locale stuff is handled: LC_COLLATE and LC_CTYPE
- * are fixed by initdb, stored in pg_control, and cannot be changed.
- * Thus, the effects of strcoll(), strxfrm(), isupper(), toupper(),
- * etc. are always in the same fixed locale.
+ * are fixed at CREATE DATABASE time, stored in pg_database, and cannot
+ * be changed. Thus, the effects of strcoll(), strxfrm(), isupper(),
+ * toupper(), etc. are always in the same fixed locale.
  *
  * LC_MESSAGES is settable at run time and will take effect
  * immediately.
@@ -48,24 +48,39 @@
 #include "postgres.h"
 
 #include <locale.h>
+#include <time.h>
 
 #include "catalog/pg_control.h"
+#include "mb/pg_wchar.h"
+#include "utils/memutils.h"
 #include "utils/pg_locale.h"
 
+#ifdef WIN32
+#include <shlwapi.h>
+#endif
 
-/* GUC storage area */
+#define		MAX_L10N_DATA		80
 
+
+/* GUC settings */
 char	   *locale_messages;
 char	   *locale_monetary;
 char	   *locale_numeric;
 char	   *locale_time;
 
+/* lc_time localization cache */
+char	   *localized_abbrev_days[7];
+char	   *localized_full_days[7];
+char	   *localized_abbrev_months[12];
+char	   *localized_full_months[12];
+
 /* indicates whether locale information cache is valid */
 static bool CurrentLocaleConvValid = false;
+static bool CurrentLCTimeValid = false;
 
 /* Environment variable storage area */
 
-#define LC_ENV_BUFSIZE (LOCALE_NAME_BUFLEN + 20)
+#define LC_ENV_BUFSIZE (NAMEDATALEN + 20)
 
 static char lc_collate_envbuf[LC_ENV_BUFSIZE];
 static char lc_ctype_envbuf[LC_ENV_BUFSIZE];
@@ -76,6 +91,10 @@ static char lc_messages_envbuf[LC_ENV_BUFSIZE];
 static char lc_monetary_envbuf[LC_ENV_BUFSIZE];
 static char lc_numeric_envbuf[LC_ENV_BUFSIZE];
 static char lc_time_envbuf[LC_ENV_BUFSIZE];
+
+#if defined(WIN32) && defined(LC_MESSAGES)
+static char *IsoLocaleName(const char *);		/* MSVC specific */
+#endif
 
 
 /*
@@ -136,8 +155,13 @@ pg_perm_setlocale(int category, const char *locale)
 		case LC_MESSAGES:
 			envvar = "LC_MESSAGES";
 			envbuf = lc_messages_envbuf;
+#ifdef WIN32
+			result = IsoLocaleName(locale);
+			if (result == NULL)
+				result = (char *) locale;
+#endif   /* WIN32 */
 			break;
-#endif
+#endif   /* LC_MESSAGES */
 		case LC_MONETARY:
 			envvar = "LC_MONETARY";
 			envbuf = lc_monetary_envbuf;
@@ -154,29 +178,42 @@ pg_perm_setlocale(int category, const char *locale)
 			elog(FATAL, "unrecognized LC category: %d", category);
 			envvar = NULL;		/* keep compiler quiet */
 			envbuf = NULL;
-			break;
+			return NULL;
 	}
 
 	snprintf(envbuf, LC_ENV_BUFSIZE - 1, "%s=%s", envvar, result);
 
-#ifndef WIN32
 	if (putenv(envbuf))
 		return NULL;
-#else
-
-	/*
-	 * On Windows, we need to modify both the process environment and the
-	 * cached version in msvcrt
-	 */
-	if (!SetEnvironmentVariable(envvar, result))
-		return NULL;
-	if (_putenv(envbuf))
-		return NULL;
-#endif
 
 	return result;
 }
 
+
+/*
+ * Is the locale name valid for the locale category?
+ */
+bool
+check_locale(int category, const char *value)
+{
+	char	   *save;
+	bool		ret;
+
+	save = setlocale(category, NULL);
+	if (!save)
+		return false;			/* won't happen, we hope */
+
+	/* save may be pointing at a modifiable scratch variable, see above */
+	save = pstrdup(save);
+
+	/* set the locale with setlocale, to see if it accepts it. */
+	ret = (setlocale(category, value) != NULL);
+
+	setlocale(category, save);	/* assume this won't fail */
+	pfree(save);
+
+	return ret;
+}
 
 /* GUC assign hooks */
 
@@ -192,24 +229,15 @@ pg_perm_setlocale(int category, const char *locale)
 static const char *
 locale_xxx_assign(int category, const char *value, bool doit, GucSource source)
 {
-	char	   *save;
-
-	save = setlocale(category, NULL);
-	if (!save)
-		return NULL;			/* won't happen, we hope */
-
-	/* save may be pointing at a modifiable scratch variable, see above */
-	save = pstrdup(save);
-
-	if (!setlocale(category, value))
+	if (!check_locale(category, value))
 		value = NULL;			/* set failure return marker */
-
-	setlocale(category, save);	/* assume this won't fail */
-	pfree(save);
 
 	/* need to reload cache next time? */
 	if (doit && value != NULL)
+	{
 		CurrentLocaleConvValid = false;
+		CurrentLCTimeValid = false;
+	}
 
 	return value;
 }
@@ -424,3 +452,207 @@ PGLC_localeconv(void)
 	CurrentLocaleConvValid = true;
 	return &CurrentLocaleConv;
 }
+
+#ifdef WIN32
+/*
+ * On win32, strftime() returns the encoding in CP_ACP, which is likely
+ * different from SERVER_ENCODING. This is especially important in Japanese
+ * versions of Windows which will use SJIS encoding, which we don't support
+ * as a server encoding.
+ *
+ * Replace strftime() with a version that gets the string in UTF16 and then
+ * converts it to the appropriate encoding as necessary.
+ *
+ * Note that this only affects the calls to strftime() in this file, which are
+ * used to get the locale-aware strings. Other parts of the backend use
+ * pg_strftime(), which isn't locale-aware and does not need to be replaced.
+ */
+static size_t
+strftime_win32(char *dst, size_t dstlen, const wchar_t *format, const struct tm * tm)
+{
+	size_t		len;
+	wchar_t		wbuf[MAX_L10N_DATA];
+	int			encoding;
+
+	encoding = GetDatabaseEncoding();
+
+	len = wcsftime(wbuf, MAX_L10N_DATA, format, tm);
+	if (len == 0)
+
+		/*
+		 * strftime call failed - return 0 with the contents of dst
+		 * unspecified
+		 */
+		return 0;
+
+	len = WideCharToMultiByte(CP_UTF8, 0, wbuf, len, dst, dstlen, NULL, NULL);
+	if (len == 0)
+		elog(ERROR,
+			 "could not convert string to UTF-8:error %lu", GetLastError());
+
+	dst[len] = '\0';
+	if (encoding != PG_UTF8)
+	{
+		char	   *convstr = pg_do_encoding_conversion(dst, len, PG_UTF8, encoding);
+
+		if (dst != convstr)
+		{
+			strlcpy(dst, convstr, dstlen);
+			len = strlen(dst);
+		}
+	}
+
+	return len;
+}
+
+#define strftime(a,b,c,d) strftime_win32(a,b,L##c,d)
+#endif   /* WIN32 */
+
+
+/*
+ * Update the lc_time localization cache variables if needed.
+ */
+void
+cache_locale_time(void)
+{
+	char	   *save_lc_time;
+	time_t		timenow;
+	struct tm  *timeinfo;
+	char		buf[MAX_L10N_DATA];
+	char	   *ptr;
+	int			i;
+
+#ifdef WIN32
+	char	   *save_lc_ctype;
+#endif
+
+	/* did we do this already? */
+	if (CurrentLCTimeValid)
+		return;
+
+	elog(DEBUG3, "cache_locale_time() executed; locale: \"%s\"", locale_time);
+
+#ifdef WIN32
+	/* set user's value of ctype locale */
+	save_lc_ctype = setlocale(LC_CTYPE, NULL);
+	if (save_lc_ctype)
+		save_lc_ctype = pstrdup(save_lc_ctype);
+
+	setlocale(LC_CTYPE, locale_time);
+#endif
+
+	/* set user's value of time locale */
+	save_lc_time = setlocale(LC_TIME, NULL);
+	if (save_lc_time)
+		save_lc_time = pstrdup(save_lc_time);
+
+	setlocale(LC_TIME, locale_time);
+
+	timenow = time(NULL);
+	timeinfo = localtime(&timenow);
+
+	/* localized days */
+	for (i = 0; i < 7; i++)
+	{
+		timeinfo->tm_wday = i;
+		strftime(buf, MAX_L10N_DATA, "%a", timeinfo);
+		ptr = MemoryContextStrdup(TopMemoryContext, buf);
+		if (localized_abbrev_days[i])
+			pfree(localized_abbrev_days[i]);
+		localized_abbrev_days[i] = ptr;
+
+		strftime(buf, MAX_L10N_DATA, "%A", timeinfo);
+		ptr = MemoryContextStrdup(TopMemoryContext, buf);
+		if (localized_full_days[i])
+			pfree(localized_full_days[i]);
+		localized_full_days[i] = ptr;
+	}
+
+	/* localized months */
+	for (i = 0; i < 12; i++)
+	{
+		timeinfo->tm_mon = i;
+		timeinfo->tm_mday = 1;	/* make sure we don't have invalid date */
+		strftime(buf, MAX_L10N_DATA, "%b", timeinfo);
+		ptr = MemoryContextStrdup(TopMemoryContext, buf);
+		if (localized_abbrev_months[i])
+			pfree(localized_abbrev_months[i]);
+		localized_abbrev_months[i] = ptr;
+
+		strftime(buf, MAX_L10N_DATA, "%B", timeinfo);
+		ptr = MemoryContextStrdup(TopMemoryContext, buf);
+		if (localized_full_months[i])
+			pfree(localized_full_months[i]);
+		localized_full_months[i] = ptr;
+	}
+
+	/* try to restore internal settings */
+	if (save_lc_time)
+	{
+		setlocale(LC_TIME, save_lc_time);
+		pfree(save_lc_time);
+	}
+
+#ifdef WIN32
+	/* try to restore internal ctype settings */
+	if (save_lc_ctype)
+	{
+		setlocale(LC_CTYPE, save_lc_ctype);
+		pfree(save_lc_ctype);
+	}
+#endif
+
+	CurrentLCTimeValid = true;
+}
+
+
+#if defined(WIN32) && defined(LC_MESSAGES)
+/*
+ *	Convert Windows locale name to the ISO formatted one
+ *	if possible.
+ *
+ *	This function returns NULL if conversion is impossible,
+ *	otherwise returns the pointer to a static area which
+ *	contains the iso formatted locale name.
+ */
+static
+char *
+IsoLocaleName(const char *winlocname)
+{
+#if (_MSC_VER >= 1400)			/* VC8.0 or later */
+	static char iso_lc_messages[32];
+	_locale_t	loct = NULL;
+
+	if (pg_strcasecmp("c", winlocname) == 0 ||
+		pg_strcasecmp("posix", winlocname) == 0)
+	{
+		strcpy(iso_lc_messages, "C");
+		return iso_lc_messages;
+	}
+
+	loct = _create_locale(LC_CTYPE, winlocname);
+	if (loct != NULL)
+	{
+		char		isolang[32],
+					isocrty[32];
+		LCID		lcid;
+
+		lcid = loct->locinfo->lc_handle[LC_CTYPE];
+		if (lcid == 0)
+			lcid = MAKELCID(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), SORT_DEFAULT);
+		_free_locale(loct);
+
+		if (!GetLocaleInfoA(lcid, LOCALE_SISO639LANGNAME, isolang, sizeof(isolang)))
+			return NULL;
+		if (!GetLocaleInfoA(lcid, LOCALE_SISO3166CTRYNAME, isocrty, sizeof(isocrty)))
+			return NULL;
+		snprintf(iso_lc_messages, sizeof(iso_lc_messages) - 1, "%s_%s", isolang, isocrty);
+		return iso_lc_messages;
+	}
+	return NULL;
+#else
+	return NULL;				/* Not supported on this version of msvc/mingw */
+#endif   /* _MSC_VER >= 1400 */
+}
+
+#endif   /* WIN32 && LC_MESSAGES */

@@ -151,7 +151,7 @@ static char *
 ecpg_strndup(const char *str, size_t len)
 {
 	int			real_len = strlen(str);
-	int			use_len = (real_len > len) ? len : real_len;
+	int			use_len = (real_len > len) ? (int) len : real_len;
 
 	char	   *new = malloc(use_len + 1);
 
@@ -755,10 +755,16 @@ rfmtlong(long lng_val, char *fmt, char *outbuf)
 				fmtchar = ' ';
 
 	temp = (char *) malloc(fmt_len + 1);
+	if (!temp)
+	{
+		errno = ENOMEM;
+		return -1;
+	}
 
 	/* put all info about the long in a struct */
-	if (!temp || initValue(lng_val) == -1)
+	if (initValue(lng_val) == -1)
 	{
+		free(temp);
 		errno = ENOMEM;
 		return -1;
 	}
@@ -1004,7 +1010,7 @@ ECPG_informix_set_var(int number, void *pointer, int lineno)
 
 		sqlca->sqlcode = ECPG_OUT_OF_MEMORY;
 		strncpy(sqlca->sqlstate, "YE001", sizeof("YE001"));
-		snprintf(sqlca->sqlerrm.sqlerrmc, sizeof(sqlca->sqlerrm.sqlerrmc), "Out of memory in line %d.", lineno);
+		snprintf(sqlca->sqlerrm.sqlerrmc, sizeof(sqlca->sqlerrm.sqlerrmc), "out of memory on line %d", lineno);
 		sqlca->sqlerrm.sqlerrml = strlen(sqlca->sqlerrm.sqlerrmc);
 		/* free all memory we have allocated for the user */
 		ECPGfree_auto_mem();

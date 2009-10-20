@@ -1,11 +1,16 @@
 /*
+ * $PostgreSQL$
+ *
+ *
  * op function for ltree[]
  * Teodor Sigaev <teodor@stack.net>
  */
+#include "postgres.h"
 
-#include "ltree.h"
 #include <ctype.h>
+
 #include "utils/array.h"
+#include "ltree.h"
 
 PG_FUNCTION_INFO_V1(_ltree_isparent);
 PG_FUNCTION_INFO_V1(_ltree_r_isparent);
@@ -38,7 +43,7 @@ typedef Datum (*PGCALL2) (PG_FUNCTION_ARGS);
 #define NEXTVAL(x) ( (ltree*)( (char*)(x) + INTALIGN( VARSIZE(x) ) ) )
 
 static bool
-array_iterator(ArrayType *la, PGCALL2 callback, void *param, ltree ** found)
+array_iterator(ArrayType *la, PGCALL2 callback, void *param, ltree **found)
 {
 	int			num = ArrayGetNItems(ARR_NDIM(la), ARR_DIMS(la));
 	ltree	   *item = (ltree *) ARR_DATA_PTR(la);

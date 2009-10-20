@@ -8,7 +8,7 @@
  * exit-time cleanup for either a postmaster or a backend.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -19,6 +19,7 @@
 #define IPC_H
 
 typedef void (*pg_on_exit_callback) (int code, Datum arg);
+typedef void (*shmem_startup_hook_type) (void);
 
 /*----------
  * API for handling cleanup that must occur during either ereport(ERROR)
@@ -43,12 +44,12 @@ typedef void (*pg_on_exit_callback) (int code, Datum arg);
  * Note: the macro arguments are multiply evaluated, so avoid side-effects.
  *----------
  */
-#define PG_ENSURE_ERROR_CLEANUP(cleanup_function, arg)  \
+#define PG_ENSURE_ERROR_CLEANUP(cleanup_function, arg)	\
 	do { \
 		on_shmem_exit(cleanup_function, arg); \
 		PG_TRY()
 
-#define PG_END_ENSURE_ERROR_CLEANUP(cleanup_function, arg)  \
+#define PG_END_ENSURE_ERROR_CLEANUP(cleanup_function, arg)	\
 		cancel_shmem_exit(cleanup_function, arg); \
 		PG_CATCH(); \
 		{ \
@@ -71,6 +72,8 @@ extern void cancel_shmem_exit(pg_on_exit_callback function, Datum arg);
 extern void on_exit_reset(void);
 
 /* ipci.c */
+extern PGDLLIMPORT shmem_startup_hook_type shmem_startup_hook;
+
 extern void CreateSharedMemoryAndSemaphores(bool makePrivate, int port);
 
 #endif   /* IPC_H */

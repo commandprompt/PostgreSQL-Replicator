@@ -26,13 +26,8 @@
  * (At the moment, ints and Oids are the same size, but they may not
  * always be so; try to be careful to maintain the distinction.)
  *
- * There is also limited support for lists of TransactionIds; since these
- * are used in only one or two places, we don't provide a full implementation,
- * but map them onto Oid lists.  This effectively assumes that TransactionId
- * is no wider than Oid and both are unsigned types.
  *
- *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -160,12 +155,6 @@ extern int	list_length(List *l);
 #define list_make4_oid(x1,x2,x3,x4) lcons_oid(x1, list_make3_oid(x2, x3, x4))
 
 /*
- * Limited support for lists of TransactionIds, mapped onto lists of Oids
- */
-#define lfirst_xid(lc)				((TransactionId) lfirst_oid(lc))
-#define lappend_xid(list, datum)	lappend_oid(list, (Oid) (datum))
-
-/*
  * foreach -
  *	  a convenience macro which loops through the list
  */
@@ -228,6 +217,10 @@ extern List *list_union(List *list1, List *list2);
 extern List *list_union_ptr(List *list1, List *list2);
 extern List *list_union_int(List *list1, List *list2);
 extern List *list_union_oid(List *list1, List *list2);
+
+extern List *list_intersection(List *list1, List *list2);
+
+/* currently, there's no need for list_intersection_int etc */
 
 extern List *list_difference(List *list1, List *list2);
 extern List *list_difference_ptr(List *list1, List *list2);

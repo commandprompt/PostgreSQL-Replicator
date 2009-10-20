@@ -39,7 +39,7 @@
  * anything we saw during replay.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -53,10 +53,11 @@
 #include "access/transam.h"
 #include "access/xact.h"
 #include "miscadmin.h"
+#include "pg_trace.h"
 #include "storage/backendid.h"
 #include "storage/lmgr.h"
-#include "utils/memutils.h"
 #include "storage/procarray.h"
+#include "utils/memutils.h"
 
 
 /*
@@ -1497,8 +1498,10 @@ void
 ShutdownMultiXact(void)
 {
 	/* Flush dirty MultiXact pages to disk */
+	TRACE_POSTGRESQL_MULTIXACT_CHECKPOINT_START(false);
 	SimpleLruFlush(MultiXactOffsetCtl, false);
 	SimpleLruFlush(MultiXactMemberCtl, false);
+	TRACE_POSTGRESQL_MULTIXACT_CHECKPOINT_DONE(false);
 }
 
 /*
@@ -1526,6 +1529,8 @@ MultiXactGetCheckptMulti(bool is_shutdown,
 void
 CheckPointMultiXact(void)
 {
+	TRACE_POSTGRESQL_MULTIXACT_CHECKPOINT_START(true);
+
 	/* Flush dirty MultiXact pages to disk */
 	SimpleLruFlush(MultiXactOffsetCtl, true);
 	SimpleLruFlush(MultiXactMemberCtl, true);
@@ -1538,8 +1543,10 @@ CheckPointMultiXact(void)
 	 * SimpleLruTruncate would get confused.  It seems best not to risk
 	 * removing any data during recovery anyway, so don't truncate.
 	 */
-	if (!InRecovery)
+	if (!RecoveryInProgress())
 		TruncateMultiXact();
+
+	TRACE_POSTGRESQL_MULTIXACT_CHECKPOINT_DONE(true);
 }
 
 /*
@@ -1862,6 +1869,9 @@ void
 multixact_redo(XLogRecPtr lsn, XLogRecord *record)
 {
 	uint8		info = record->xl_info & ~XLR_INFO_MASK;
+
+	/* Backup blocks are not used in multixact records */
+	Assert(!(record->xl_info & XLR_BKP_BLOCK_MASK));
 
 	if (info == XLOG_MULTIXACT_ZERO_OFF_PAGE)
 	{

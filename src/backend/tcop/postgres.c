@@ -3,7 +3,7 @@
  * postgres.c
  *	  POSTGRES C Backend Interface
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include <time.h>
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -49,11 +50,13 @@
 #include "miscadmin.h"
 #include "nodes/print.h"
 #include "optimizer/planner.h"
+#include "pgstat.h"
+#include "pg_trace.h"
 #include "parser/analyze.h"
 #include "parser/parser.h"
 #include "postmaster/autovacuum.h"
 #include "rewrite/rewriteHandler.h"
-#include "storage/freespace.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/sinval.h"
@@ -65,9 +68,9 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/snapmgr.h"
 #include "mb/pg_wchar.h"
 
-#include "pgstat.h"
 
 extern int	optind;
 extern char *optarg;
@@ -76,7 +79,7 @@ extern char *optarg;
  *		global variables
  * ----------------
  */
-const char *debug_query_string; /* for pgmonitor and log_min_error_statement */
+const char *debug_query_string; /* client-supplied query string */
 
 /* Note: whereToSendOutput is initialized for the bootstrap/standalone case */
 CommandDest whereToSendOutput = DestDebug;
@@ -84,7 +87,7 @@ CommandDest whereToSendOutput = DestDebug;
 /* flag for logging end of session */
 bool		Log_disconnections = false;
 
-LogStmtLevel log_statement = LOGSTMT_NONE;
+int			log_statement = LOGSTMT_NONE;
 
 /* GUC variable for maximum stack depth (measured in kilobytes) */
 int			max_stack_depth = 100;
@@ -548,6 +551,8 @@ pg_parse_query(const char *query_string)
 {
 	List	   *raw_parsetree_list;
 
+	TRACE_POSTGRESQL_QUERY_PARSE_START(query_string);
+
 	if (log_parser_stats)
 		ResetUsage();
 
@@ -569,6 +574,8 @@ pg_parse_query(const char *query_string)
 	}
 #endif
 
+	TRACE_POSTGRESQL_QUERY_PARSE_DONE(query_string);
+
 	return raw_parsetree_list;
 }
 
@@ -588,6 +595,8 @@ pg_analyze_and_rewrite(Node *parsetree, const char *query_string,
 	Query	   *query;
 	List	   *querytree_list;
 
+	TRACE_POSTGRESQL_QUERY_REWRITE_START(query_string);
+
 	/*
 	 * (1) Perform parse analysis.
 	 */
@@ -604,6 +613,8 @@ pg_analyze_and_rewrite(Node *parsetree, const char *query_string,
 	 */
 	querytree_list = pg_rewrite_query(query);
 
+	TRACE_POSTGRESQL_QUERY_REWRITE_DONE(query_string);
+
 	return querytree_list;
 }
 
@@ -618,12 +629,12 @@ pg_rewrite_query(Query *query)
 {
 	List	   *querytree_list;
 
+	if (Debug_print_parse)
+		elog_node_display(LOG, "parse tree", query,
+						  Debug_pretty_print);
+
 	if (log_parser_stats)
 		ResetUsage();
-
-	if (Debug_print_parse)
-		elog_node_display(DEBUG1, "parse tree", query,
-						  Debug_pretty_print);
 
 	if (query->commandType == CMD_UTILITY)
 	{
@@ -654,7 +665,7 @@ pg_rewrite_query(Query *query)
 #endif
 
 	if (Debug_print_rewritten)
-		elog_node_display(DEBUG1, "rewritten parse tree", querytree_list,
+		elog_node_display(LOG, "rewritten parse tree", querytree_list,
 						  Debug_pretty_print);
 
 	return querytree_list;
@@ -675,7 +686,9 @@ pg_plan_query(Query *querytree, int cursorOptions, ParamListInfo boundParams)
 		return NULL;
 
 	/* Planner must have a snapshot in case it calls user-defined functions. */
-	Assert(ActiveSnapshot != NULL);
+	Assert(ActiveSnapshotSet());
+
+	TRACE_POSTGRESQL_QUERY_PLAN_START();
 
 	if (log_planner_stats)
 		ResetUsage();
@@ -709,7 +722,9 @@ pg_plan_query(Query *querytree, int cursorOptions, ParamListInfo boundParams)
 	 * Print plan if debugging.
 	 */
 	if (Debug_print_plan)
-		elog_node_display(DEBUG1, "plan", plan, Debug_pretty_print);
+		elog_node_display(LOG, "plan", plan, Debug_pretty_print);
+
+	TRACE_POSTGRESQL_QUERY_PLAN_DONE();
 
 	return plan;
 }
@@ -717,64 +732,32 @@ pg_plan_query(Query *querytree, int cursorOptions, ParamListInfo boundParams)
 /*
  * Generate plans for a list of already-rewritten queries.
  *
- * If needSnapshot is TRUE, we haven't yet set a snapshot for the current
- * query.  A snapshot must be set before invoking the planner, since it
- * might try to evaluate user-defined functions.  But we must not set a
- * snapshot if the list contains only utility statements, because some
- * utility statements depend on not having frozen the snapshot yet.
- * (We assume that such statements cannot appear together with plannable
- * statements in the rewriter's output.)
- *
  * Normal optimizable statements generate PlannedStmt entries in the result
  * list.  Utility statements are simply represented by their statement nodes.
  */
 List *
-pg_plan_queries(List *querytrees, int cursorOptions, ParamListInfo boundParams,
-				bool needSnapshot)
+pg_plan_queries(List *querytrees, int cursorOptions, ParamListInfo boundParams)
 {
-	List	   * volatile stmt_list = NIL;
-	Snapshot	saveActiveSnapshot = ActiveSnapshot;
+	List	   *stmt_list = NIL;
+	ListCell   *query_list;
 
-	/* PG_TRY to ensure previous ActiveSnapshot is restored on error */
-	PG_TRY();
+	foreach(query_list, querytrees)
 	{
-		Snapshot	mySnapshot = NULL;
-		ListCell   *query_list;
+		Query	   *query = (Query *) lfirst(query_list);
+		Node	   *stmt;
 
-		foreach(query_list, querytrees)
+		if (query->commandType == CMD_UTILITY)
 		{
-			Query	   *query = (Query *) lfirst(query_list);
-			Node	   *stmt;
-
-			if (query->commandType == CMD_UTILITY)
-			{
-				/* Utility commands have no plans. */
-				stmt = query->utilityStmt;
-			}
-			else
-			{
-				if (needSnapshot && mySnapshot == NULL)
-				{
-					mySnapshot = CopySnapshot(GetTransactionSnapshot());
-					ActiveSnapshot = mySnapshot;
-				}
-				stmt = (Node *) pg_plan_query(query, cursorOptions,
-											  boundParams);
-			}
-
-			stmt_list = lappend(stmt_list, stmt);
+			/* Utility commands have no plans. */
+			stmt = query->utilityStmt;
+		}
+		else
+		{
+			stmt = (Node *) pg_plan_query(query, cursorOptions, boundParams);
 		}
 
-		if (mySnapshot)
-			FreeSnapshot(mySnapshot);
+		stmt_list = lappend(stmt_list, stmt);
 	}
-	PG_CATCH();
-	{
-		ActiveSnapshot = saveActiveSnapshot;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	ActiveSnapshot = saveActiveSnapshot;
 
 	return stmt_list;
 }
@@ -797,12 +780,15 @@ exec_simple_query(const char *query_string)
 	bool		isTopLevel;
 	char		msec_str[32];
 
+
 	/*
 	 * Report query to various monitoring facilities.
 	 */
 	debug_query_string = query_string;
 
 	pgstat_report_activity(query_string);
+
+	TRACE_POSTGRESQL_QUERY_START(query_string);
 
 	/*
 	 * We use save_log_statement_stats so ShowUsage doesn't report incorrect
@@ -869,7 +855,7 @@ exec_simple_query(const char *query_string)
 	foreach(parsetree_item, parsetree_list)
 	{
 		Node	   *parsetree = (Node *) lfirst(parsetree_item);
-		Snapshot	mySnapshot = NULL;
+		bool		snapshot_set = false;
 		const char *commandTag;
 		char		completionTag[COMPLETION_TAG_BUFSIZE];
 		List	   *querytree_list,
@@ -916,8 +902,8 @@ exec_simple_query(const char *query_string)
 		 */
 		if (analyze_requires_snapshot(parsetree))
 		{
-			mySnapshot = CopySnapshot(GetTransactionSnapshot());
-			ActiveSnapshot = mySnapshot;
+			PushActiveSnapshot(GetTransactionSnapshot());
+			snapshot_set = true;
 		}
 
 		/*
@@ -931,12 +917,11 @@ exec_simple_query(const char *query_string)
 		querytree_list = pg_analyze_and_rewrite(parsetree, query_string,
 												NULL, 0);
 
-		plantree_list = pg_plan_queries(querytree_list, 0, NULL, false);
+		plantree_list = pg_plan_queries(querytree_list, 0, NULL);
 
 		/* Done with the snapshot used for parsing/planning */
-		ActiveSnapshot = NULL;
-		if (mySnapshot)
-			FreeSnapshot(mySnapshot);
+		if (snapshot_set)
+			PopActiveSnapshot();
 
 		/* If we got a cancel signal in analysis or planning, quit */
 		CHECK_FOR_INTERRUPTS();
@@ -991,7 +976,9 @@ exec_simple_query(const char *query_string)
 		/*
 		 * Now we can create the destination receiver object.
 		 */
-		receiver = CreateDestReceiver(dest, portal);
+		receiver = CreateDestReceiver(dest);
+		if (dest == DestRemote)
+			SetRemoteDestReceiverParams(receiver, portal);
 
 		/*
 		 * Switch back to transaction context for execution.
@@ -1084,6 +1071,8 @@ exec_simple_query(const char *query_string)
 
 	if (save_log_statement_stats)
 		ShowUsage("QUERY STATISTICS");
+
+	TRACE_POSTGRESQL_QUERY_DONE(query_string);
 
 	debug_query_string = NULL;
 }
@@ -1186,7 +1175,7 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	if (parsetree_list != NIL)
 	{
 		Query	   *query;
-		Snapshot	mySnapshot = NULL;
+		bool		snapshot_set = false;
 		int			i;
 
 		raw_parse_tree = (Node *) linitial(parsetree_list);
@@ -1216,8 +1205,8 @@ exec_parse_message(const char *query_string,	/* string to execute */
 		 */
 		if (analyze_requires_snapshot(raw_parse_tree))
 		{
-			mySnapshot = CopySnapshot(GetTransactionSnapshot());
-			ActiveSnapshot = mySnapshot;
+			PushActiveSnapshot(GetTransactionSnapshot());
+			snapshot_set = true;
 		}
 
 		/*
@@ -1267,14 +1256,13 @@ exec_parse_message(const char *query_string,	/* string to execute */
 		}
 		else
 		{
-			stmt_list = pg_plan_queries(querytree_list, 0, NULL, false);
+			stmt_list = pg_plan_queries(querytree_list, 0, NULL);
 			fully_planned = true;
 		}
 
 		/* Done with the snapshot used for parsing/planning */
-		ActiveSnapshot = NULL;
-		if (mySnapshot)
-			FreeSnapshot(mySnapshot);
+		if (snapshot_set)
+			PopActiveSnapshot();
 	}
 	else
 	{
@@ -1398,7 +1386,7 @@ exec_bind_message(StringInfo input_message)
 	List	   *plan_list;
 	MemoryContext oldContext;
 	bool		save_log_statement_stats = log_statement_stats;
-	Snapshot	mySnapshot = NULL;
+	bool		snapshot_set = false;
 	char		msec_str[32];
 
 	/* Get the fixed part of the message */
@@ -1431,9 +1419,9 @@ exec_bind_message(StringInfo input_message)
 	/*
 	 * Report query to various monitoring facilities.
 	 */
-	debug_query_string = psrc->query_string ? psrc->query_string : "<BIND>";
+	debug_query_string = psrc->query_string;
 
-	pgstat_report_activity(debug_query_string);
+	pgstat_report_activity(psrc->query_string);
 
 	set_ps_display("BIND", false);
 
@@ -1509,10 +1497,8 @@ exec_bind_message(StringInfo input_message)
 	 */
 	oldContext = MemoryContextSwitchTo(PortalGetHeapMemory(portal));
 
-	/* Copy the plan's query string, if available, into the portal */
-	query_string = psrc->query_string;
-	if (query_string)
-		query_string = pstrdup(query_string);
+	/* Copy the plan's query string into the portal */
+	query_string = pstrdup(psrc->query_string);
 
 	/* Likewise make a copy of the statement name, unless it's unnamed */
 	if (stmt_name[0])
@@ -1527,8 +1513,8 @@ exec_bind_message(StringInfo input_message)
 	 */
 	if (numParams > 0 || analyze_requires_snapshot(psrc->raw_parse_tree))
 	{
-		mySnapshot = CopySnapshot(GetTransactionSnapshot());
-		ActiveSnapshot = mySnapshot;
+		PushActiveSnapshot(GetTransactionSnapshot());
+		snapshot_set = true;
 	}
 
 	/*
@@ -1719,7 +1705,7 @@ exec_bind_message(StringInfo input_message)
 		 */
 		oldContext = MemoryContextSwitchTo(PortalGetHeapMemory(portal));
 		query_list = copyObject(cplan->stmt_list);
-		plan_list = pg_plan_queries(query_list, 0, params, false);
+		plan_list = pg_plan_queries(query_list, 0, params);
 		MemoryContextSwitchTo(oldContext);
 
 		/* We no longer need the cached plan refcount ... */
@@ -1742,9 +1728,8 @@ exec_bind_message(StringInfo input_message)
 					  cplan);
 
 	/* Done with the snapshot used for parameter I/O and parsing/planning */
-	ActiveSnapshot = NULL;
-	if (mySnapshot)
-		FreeSnapshot(mySnapshot);
+	if (snapshot_set)
+		PopActiveSnapshot();
 
 	/*
 	 * And we're ready to start portal execution.
@@ -1779,7 +1764,7 @@ exec_bind_message(StringInfo input_message)
 							*stmt_name ? stmt_name : "<unnamed>",
 							*portal_name ? "/" : "",
 							*portal_name ? portal_name : "",
-			psrc->query_string ? psrc->query_string : "<source not stored>"),
+							psrc->query_string),
 					 errhidestmt(true),
 					 errdetail_params(params)));
 			break;
@@ -1845,7 +1830,7 @@ exec_execute_message(const char *portal_name, long max_rows)
 	 */
 	if (is_xact_command)
 	{
-		sourceText = portal->sourceText ? pstrdup(portal->sourceText) : NULL;
+		sourceText = pstrdup(portal->sourceText);
 		if (portal->prepStmtName)
 			prepStmtName = pstrdup(portal->prepStmtName);
 		else
@@ -1870,9 +1855,9 @@ exec_execute_message(const char *portal_name, long max_rows)
 	/*
 	 * Report query to various monitoring facilities.
 	 */
-	debug_query_string = sourceText ? sourceText : "<EXECUTE>";
+	debug_query_string = sourceText;
 
-	pgstat_report_activity(debug_query_string);
+	pgstat_report_activity(sourceText);
 
 	set_ps_display(portal->commandTag, false);
 
@@ -1885,7 +1870,9 @@ exec_execute_message(const char *portal_name, long max_rows)
 	 * Create dest receiver in MessageContext (we don't want it in transaction
 	 * context, because that may get deleted if portal contains VACUUM).
 	 */
-	receiver = CreateDestReceiver(dest, portal);
+	receiver = CreateDestReceiver(dest);
+	if (dest == DestRemoteExecute)
+		SetRemoteDestReceiverParams(receiver, portal);
 
 	/*
 	 * Ensure we are in a transaction command (this should normally be the
@@ -1905,15 +1892,14 @@ exec_execute_message(const char *portal_name, long max_rows)
 	if (check_log_statement(portal->stmts))
 	{
 		ereport(LOG,
-				(errmsg("%s %s%s%s%s%s",
+				(errmsg("%s %s%s%s: %s",
 						execute_is_fetch ?
 						_("execute fetch from") :
 						_("execute"),
 						prepStmtName,
 						*portal_name ? "/" : "",
 						*portal_name ? portal_name : "",
-						sourceText ? ": " : "",
-						sourceText ? sourceText : ""),
+						sourceText),
 				 errhidestmt(true),
 				 errdetail_params(portalParams)));
 		was_logged = true;
@@ -1989,7 +1975,7 @@ exec_execute_message(const char *portal_name, long max_rows)
 			break;
 		case 2:
 			ereport(LOG,
-					(errmsg("duration: %s ms  %s %s%s%s%s%s",
+					(errmsg("duration: %s ms  %s %s%s%s: %s",
 							msec_str,
 							execute_is_fetch ?
 							_("execute fetch from") :
@@ -1997,8 +1983,7 @@ exec_execute_message(const char *portal_name, long max_rows)
 							prepStmtName,
 							*portal_name ? "/" : "",
 							*portal_name ? portal_name : "",
-							sourceText ? ": " : "",
-							sourceText ? sourceText : ""),
+							sourceText),
 					 errhidestmt(true),
 					 errdetail_params(portalParams)));
 			break;
@@ -2114,7 +2099,7 @@ errdetail_execute(List *raw_parsetree_list)
 			PreparedStatement *pstmt;
 
 			pstmt = FetchPreparedStatement(stmt->name, false);
-			if (pstmt && pstmt->plansource->query_string)
+			if (pstmt)
 			{
 				errdetail("prepare: %s", pstmt->plansource->query_string);
 				return 0;
@@ -2510,14 +2495,22 @@ quickdie(SIGNAL_ARGS)
 					 " database and repeat your command.")));
 
 	/*
-	 * DO NOT proc_exit() -- we're here because shared memory may be
-	 * corrupted, so we don't want to try to clean up our transaction. Just
-	 * nail the windows shut and get out of town.
-	 *
+	 * We DO NOT want to run proc_exit() callbacks -- we're here because
+	 * shared memory may be corrupted, so we don't want to try to clean up our
+	 * transaction.  Just nail the windows shut and get out of town.  Now that
+	 * there's an atexit callback to prevent third-party code from breaking
+	 * things by calling exit() directly, we have to reset the callbacks
+	 * explicitly to make this work as intended.
+	 */
+	on_exit_reset();
+
+	/*
 	 * Note we do exit(2) not exit(0).	This is to force the postmaster into a
 	 * system reset cycle if some idiot DBA sends a manual SIGQUIT to a random
 	 * backend.  This is necessary precisely because we don't clean up our
-	 * shared memory state.
+	 * shared memory state.  (The "dead man switch" mechanism in pmsignal.c
+	 * should ensure the postmaster sees this as a crash, too, but no harm in
+	 * being doubly sure.)
 	 */
 	exit(2);
 }
@@ -2569,7 +2562,7 @@ die(SIGNAL_ARGS)
 void
 authdie(SIGNAL_ARGS)
 {
-	exit(1);
+	proc_exit(1);
 }
 
 /*
@@ -3310,13 +3303,6 @@ PostgresMain(int argc, char *argv[], const char *username)
 		on_shmem_exit(ShutdownXLOG, 0);
 
 		/*
-		 * Read any existing FSM cache file, and register to write one out at
-		 * exit.
-		 */
-		LoadFreeSpaceMap();
-		on_shmem_exit(DumpFreeSpaceMap, 0);
-
-		/*
 		 * We have to build the flat file for pg_database, but not for the
 		 * user and group tables, since we won't try to do authentication.
 		 */
@@ -3490,9 +3476,6 @@ PostgresMain(int argc, char *argv[], const char *username)
 		 */
 		debug_query_string = NULL;
 
-		/* No active snapshot any more either */
-		ActiveSnapshot = NULL;
-
 		/*
 		 * Abort the current transaction in order to recover.
 		 */
@@ -3570,7 +3553,7 @@ PostgresMain(int argc, char *argv[], const char *username)
 			}
 			else
 			{
-				pgstat_report_tabstat(false);
+				pgstat_report_stat(false);
 
 				set_ps_display("idle", false);
 				pgstat_report_activity("<IDLE>");

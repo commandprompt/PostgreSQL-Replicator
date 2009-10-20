@@ -4,7 +4,7 @@
  *	  prototypes for tablecmds.c.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -15,12 +15,12 @@
 #define TABLECMDS_H
 
 #include "nodes/parsenodes.h"
-#include "utils/rel.h"
+#include "utils/relcache.h"
 
 
 extern Oid	DefineRelation(CreateStmt *stmt, char relkind);
 
-extern void RemoveRelation(const RangeVar *relation, DropBehavior behavior);
+extern void RemoveRelations(DropStmt *drop);
 
 extern void AlterTable(AlterTableStmt *stmt);
 
@@ -28,7 +28,8 @@ extern void ATExecChangeOwner(Oid relationOid, Oid newOwnerId, bool recursing);
 
 extern void AlterTableInternal(Oid relid, List *cmds, bool recurse);
 
-extern void AlterTableNamespace(RangeVar *relation, const char *newschema);
+extern void AlterTableNamespace(RangeVar *relation, const char *newschema,
+					ObjectType stmttype);
 
 extern void AlterRelationNamespaceInternal(Relation classRel, Oid relOid,
 							   Oid oldNspOid, Oid newNspOid,
@@ -44,9 +45,13 @@ extern void renameatt(Oid myrelid,
 		  bool recurse,
 		  bool recursing);
 
-extern void renamerel(Oid myrelid,
-		  const char *newrelname,
-		  ObjectType reltype);
+extern void RenameRelation(Oid myrelid,
+			   const char *newrelname,
+			   ObjectType reltype);
+
+extern void RenameRelationInternal(Oid myrelid,
+					   const char *newrelname,
+					   Oid namespaceId);
 
 extern void find_composite_type_dependencies(Oid typeOid,
 								 const char *origTblName,

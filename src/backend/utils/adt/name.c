@@ -9,7 +9,7 @@
  * always use NAMEDATALEN as the symbolic constant!   - jolly 8/21/95
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -181,65 +181,6 @@ namege(PG_FUNCTION_ARGS)
 }
 
 
-/*
- * comparison routines for LIKE indexing support
- */
-
-Datum
-name_pattern_eq(PG_FUNCTION_ARGS)
-{
-	Name		arg1 = PG_GETARG_NAME(0);
-	Name		arg2 = PG_GETARG_NAME(1);
-
-	PG_RETURN_BOOL(memcmp(NameStr(*arg1), NameStr(*arg2), NAMEDATALEN) == 0);
-}
-
-Datum
-name_pattern_ne(PG_FUNCTION_ARGS)
-{
-	Name		arg1 = PG_GETARG_NAME(0);
-	Name		arg2 = PG_GETARG_NAME(1);
-
-	PG_RETURN_BOOL(memcmp(NameStr(*arg1), NameStr(*arg2), NAMEDATALEN) != 0);
-}
-
-Datum
-name_pattern_lt(PG_FUNCTION_ARGS)
-{
-	Name		arg1 = PG_GETARG_NAME(0);
-	Name		arg2 = PG_GETARG_NAME(1);
-
-	PG_RETURN_BOOL(memcmp(NameStr(*arg1), NameStr(*arg2), NAMEDATALEN) < 0);
-}
-
-Datum
-name_pattern_le(PG_FUNCTION_ARGS)
-{
-	Name		arg1 = PG_GETARG_NAME(0);
-	Name		arg2 = PG_GETARG_NAME(1);
-
-	PG_RETURN_BOOL(memcmp(NameStr(*arg1), NameStr(*arg2), NAMEDATALEN) <= 0);
-}
-
-Datum
-name_pattern_gt(PG_FUNCTION_ARGS)
-{
-	Name		arg1 = PG_GETARG_NAME(0);
-	Name		arg2 = PG_GETARG_NAME(1);
-
-	PG_RETURN_BOOL(memcmp(NameStr(*arg1), NameStr(*arg2), NAMEDATALEN) > 0);
-}
-
-Datum
-name_pattern_ge(PG_FUNCTION_ARGS)
-{
-	Name		arg1 = PG_GETARG_NAME(0);
-	Name		arg2 = PG_GETARG_NAME(1);
-
-	PG_RETURN_BOOL(memcmp(NameStr(*arg1), NameStr(*arg2), NAMEDATALEN) >= 0);
-}
-
-
 /* (see char.c for comparison/operation routines) */
 
 int
@@ -374,7 +315,7 @@ current_schemas(PG_FUNCTION_ARGS)
 							NAMEOID,
 							NAMEDATALEN,		/* sizeof(Name) */
 							false,		/* Name is not by-val */
-							'i');		/* alignment of Name */
+							'c');		/* alignment of Name */
 
 	PG_RETURN_POINTER(array);
 }

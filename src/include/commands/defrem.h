@@ -4,7 +4,7 @@
  *	  POSTGRES define and remove utility definitions.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -34,7 +34,6 @@ extern void DefineIndex(RangeVar *heapRelation,
 			bool skip_build,
 			bool quiet,
 			bool concurrent);
-extern void RemoveIndex(RangeVar *relation, DropBehavior behavior);
 extern void ReindexIndex(RangeVar *indexRelation);
 extern void ReindexTable(RangeVar *relation);
 extern void ReindexDatabase(const char *databaseName,
@@ -46,7 +45,7 @@ extern char *ChooseRelationName(const char *name1, const char *name2,
 extern Oid	GetDefaultOpClass(Oid type_id, Oid am_id);
 
 /* commands/functioncmds.c */
-extern void CreateFunction(CreateFunctionStmt *stmt);
+extern void CreateFunction(CreateFunctionStmt *stmt, const char *queryString);
 extern void RemoveFunction(RemoveFuncStmt *stmt);
 extern void RemoveFunctionById(Oid funcOid);
 extern void SetFunctionReturnType(Oid funcOid, Oid newRetType);
@@ -94,34 +93,46 @@ extern void AlterOpFamilyOwner(List *name, const char *access_method, Oid newOwn
 /* commands/tsearchcmds.c */
 extern void DefineTSParser(List *names, List *parameters);
 extern void RenameTSParser(List *oldname, const char *newname);
-extern void RemoveTSParser(List *names, DropBehavior behavior,
-			   bool missing_ok);
+extern void RemoveTSParsers(DropStmt *drop);
 extern void RemoveTSParserById(Oid prsId);
 
 extern void DefineTSDictionary(List *names, List *parameters);
 extern void RenameTSDictionary(List *oldname, const char *newname);
-extern void RemoveTSDictionary(List *names, DropBehavior behavior,
-				   bool missing_ok);
+extern void RemoveTSDictionaries(DropStmt *drop);
 extern void RemoveTSDictionaryById(Oid dictId);
 extern void AlterTSDictionary(AlterTSDictionaryStmt *stmt);
 extern void AlterTSDictionaryOwner(List *name, Oid newOwnerId);
 
 extern void DefineTSTemplate(List *names, List *parameters);
 extern void RenameTSTemplate(List *oldname, const char *newname);
-extern void RemoveTSTemplate(List *names, DropBehavior behavior,
-				 bool missing_ok);
+extern void RemoveTSTemplates(DropStmt *stmt);
 extern void RemoveTSTemplateById(Oid tmplId);
 
 extern void DefineTSConfiguration(List *names, List *parameters);
 extern void RenameTSConfiguration(List *oldname, const char *newname);
-extern void RemoveTSConfiguration(List *names, DropBehavior behavior,
-					  bool missing_ok);
+extern void RemoveTSConfigurations(DropStmt *stmt);
 extern void RemoveTSConfigurationById(Oid cfgId);
 extern void AlterTSConfiguration(AlterTSConfigurationStmt *stmt);
 extern void AlterTSConfigurationOwner(List *name, Oid newOwnerId);
 
 extern text *serialize_deflist(List *deflist);
 extern List *deserialize_deflist(Datum txt);
+
+/* commands/foreigncmds.c */
+extern void AlterForeignServerOwner(const char *name, Oid newOwnerId);
+extern void AlterForeignDataWrapperOwner(const char *name, Oid newOwnerId);
+extern void CreateForeignDataWrapper(CreateFdwStmt *stmt);
+extern void AlterForeignDataWrapper(AlterFdwStmt *stmt);
+extern void RemoveForeignDataWrapper(DropFdwStmt *stmt);
+extern void RemoveForeignDataWrapperById(Oid fdwId);
+extern void CreateForeignServer(CreateForeignServerStmt *stmt);
+extern void AlterForeignServer(AlterForeignServerStmt *stmt);
+extern void RemoveForeignServer(DropForeignServerStmt *stmt);
+extern void RemoveForeignServerById(Oid srvId);
+extern void CreateUserMapping(CreateUserMappingStmt *stmt);
+extern void AlterUserMapping(AlterUserMappingStmt *stmt);
+extern void RemoveUserMapping(DropUserMappingStmt *stmt);
+extern void RemoveUserMappingById(Oid umId);
 
 /* support routines in commands/define.c */
 

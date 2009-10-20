@@ -4,7 +4,7 @@
  *	  POSTGRES buffer manager definitions.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -14,8 +14,11 @@
 #ifndef BUFMGR_H
 #define BUFMGR_H
 
+#include "storage/block.h"
 #include "storage/buf.h"
-#include "utils/rel.h"
+#include "storage/bufpage.h"
+#include "storage/relfilenode.h"
+#include "utils/relcache.h"
 
 typedef void *Block;
 
@@ -25,8 +28,18 @@ typedef enum BufferAccessStrategyType
 	BAS_NORMAL,					/* Normal random access */
 	BAS_BULKREAD,				/* Large read-only scan (hint bit updates are
 								 * ok) */
+	BAS_BULKWRITE,				/* Large multi-block write (e.g. COPY IN) */
 	BAS_VACUUM					/* VACUUM */
 } BufferAccessStrategyType;
+
+/* Possible modes for ReadBufferExtended() */
+typedef enum
+{
+	RBM_NORMAL,					/* Normal read */
+	RBM_ZERO,					/* Don't read from disk, caller will
+								 * initialize */
+	RBM_ZERO_ON_ERROR			/* Read, but return an all-zeros page on error */
+} ReadBufferMode;
 
 /* in globals.c ... this duplicates miscadmin.h */
 extern PGDLLIMPORT int NBuffers;
@@ -35,6 +48,7 @@ extern PGDLLIMPORT int NBuffers;
 extern bool zero_damaged_pages;
 extern int	bgwriter_lru_maxpages;
 extern double bgwriter_lru_multiplier;
+extern int	target_prefetch_pages;
 
 /* in buf_init.c */
 extern PGDLLIMPORT char *BufferBlocks;
@@ -115,12 +129,40 @@ extern PGDLLIMPORT int32 *LocalRefCount;
 )
 
 /*
+ * BufferGetPageSize
+ *		Returns the page size within a buffer.
+ *
+ * Notes:
+ *		Assumes buffer is valid.
+ *
+ *		The buffer can be a raw disk block and need not contain a valid
+ *		(formatted) disk page.
+ */
+/* XXX should dig out of buffer descriptor */
+#define BufferGetPageSize(buffer) \
+( \
+	AssertMacro(BufferIsValid(buffer)), \
+	(Size)BLCKSZ \
+)
+
+/*
+ * BufferGetPage
+ *		Returns the page associated with a buffer.
+ */
+#define BufferGetPage(buffer) ((Page)BufferGetBlock(buffer))
+
+/*
  * prototypes for functions in bufmgr.c
  */
+extern void PrefetchBuffer(Relation reln, ForkNumber forkNum,
+			   BlockNumber blockNum);
 extern Buffer ReadBuffer(Relation reln, BlockNumber blockNum);
-extern Buffer ReadBufferWithStrategy(Relation reln, BlockNumber blockNum,
-					   BufferAccessStrategy strategy);
-extern Buffer ReadOrZeroBuffer(Relation reln, BlockNumber blockNum);
+extern Buffer ReadBufferExtended(Relation reln, ForkNumber forkNum,
+				   BlockNumber blockNum, ReadBufferMode mode,
+				   BufferAccessStrategy strategy);
+extern Buffer ReadBufferWithoutRelcache(RelFileNode rnode, bool isTemp,
+						  ForkNumber forkNum, BlockNumber blockNum,
+						  ReadBufferMode mode, BufferAccessStrategy strategy);
 extern void ReleaseBuffer(Buffer buffer);
 extern void UnlockReleaseBuffer(Buffer buffer);
 extern void MarkBufferDirty(Buffer buffer);
@@ -138,18 +180,18 @@ extern void PrintBufferLeakWarning(Buffer buffer);
 extern void CheckPointBuffers(int flags);
 extern BlockNumber BufferGetBlockNumber(Buffer buffer);
 extern BlockNumber RelationGetNumberOfBlocks(Relation relation);
-extern void RelationTruncate(Relation rel, BlockNumber nblocks);
 extern void FlushRelationBuffers(Relation rel);
 extern void FlushDatabaseBuffers(Oid dbid);
-extern void DropRelFileNodeBuffers(RelFileNode rnode, bool istemp,
-					   BlockNumber firstDelBlock);
+extern void DropRelFileNodeBuffers(RelFileNode rnode, ForkNumber forkNum,
+					   bool istemp, BlockNumber firstDelBlock);
 extern void DropDatabaseBuffers(Oid dbid);
 
 #ifdef NOT_USED
 extern void PrintPinnedBufs(void);
 #endif
 extern Size BufferShmemSize(void);
-extern RelFileNode BufferGetFileNode(Buffer buffer);
+extern void BufferGetTag(Buffer buffer, RelFileNode *rnode,
+			 ForkNumber *forknum, BlockNumber *blknum);
 
 extern void SetBufferCommitInfoNeedsSave(Buffer buffer);
 

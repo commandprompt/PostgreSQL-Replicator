@@ -3,7 +3,7 @@
 * pthread-win32.c
 *	 partial pthread implementation for win32
 *
-* Copyright (c) 2004-2008, PostgreSQL Global Development Group
+* Copyright (c) 2004-2009, PostgreSQL Global Development Group
 * IDENTIFICATION
 *	$PostgreSQL$
 *
@@ -32,20 +32,30 @@ pthread_getspecific(pthread_key_t key)
 	return NULL;
 }
 
-void
+int
 pthread_mutex_init(pthread_mutex_t *mp, void *attr)
 {
-	*mp = CreateMutex(0, 0, 0);
+	*mp = (CRITICAL_SECTION *) malloc(sizeof(CRITICAL_SECTION));
+	if (!*mp)
+		return 1;
+	InitializeCriticalSection(*mp);
+	return 0;
 }
 
-void
+int
 pthread_mutex_lock(pthread_mutex_t *mp)
 {
-	WaitForSingleObject(*mp, INFINITE);
+	if (!*mp)
+		return 1;
+	EnterCriticalSection(*mp);
+	return 0;
 }
 
-void
+int
 pthread_mutex_unlock(pthread_mutex_t *mp)
 {
-	ReleaseMutex(*mp);
+	if (!*mp)
+		return 1;
+	LeaveCriticalSection(*mp);
+	return 0;
 }

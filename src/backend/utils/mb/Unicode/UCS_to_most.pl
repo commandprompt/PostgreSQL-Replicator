@@ -1,6 +1,6 @@
 #! /usr/bin/perl
 #
-# Copyright (c) 2001-2008, PostgreSQL Global Development Group
+# Copyright (c) 2001-2009, PostgreSQL Global Development Group
 #
 # $PostgreSQL$
 #
@@ -43,13 +43,14 @@ require "ucs2utf.pl";
 	'ISO8859_15' => '8859-15.TXT',
 	'ISO8859_16' => '8859-16.TXT',
 	'KOI8R' => 'KOI8-R.TXT',
+	'KOI8U' => 'KOI8-U.TXT',
 	'GBK' => 'CP936.TXT',
 	'UHC' => 'CP949.TXT',
 	'JOHAB' => 'JOHAB.TXT',
-	'BIG5' => 'BIG5.TXT',
 );
 
 @charsets = keys(filename);
+@charsets = @ARGV if scalar(@ARGV);
 foreach $charset (@charsets) {
 
 #

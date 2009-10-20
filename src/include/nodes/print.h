@@ -4,7 +4,7 @@
  *	  definitions for nodes/print.c
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -15,7 +15,7 @@
 #define PRINT_H
 
 #include "nodes/parsenodes.h"
-#include "nodes/execnodes.h"
+#include "executor/tuptable.h"
 
 
 #define nodeDisplay(x)		pprint(x)

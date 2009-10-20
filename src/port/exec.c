@@ -4,7 +4,7 @@
  *		Functions for finding and validating executable files
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -56,7 +56,7 @@ static int	resolve_symlinks(char *path);
 static char *pipe_read_line(char *cmd, char *line, int maxsize);
 
 #ifdef WIN32
-static BOOL GetUserSid(PSID * ppSidUser, HANDLE hToken);
+static BOOL GetUserSid(PSID *ppSidUser, HANDLE hToken);
 #endif
 
 /*
@@ -630,7 +630,7 @@ set_pglocale_pgservice(const char *argv0, const char *app)
 																 * PGLOCALEDIR */
 
 	/* don't set LC_ALL in the backend */
-	if (strcmp(app, "postgres") != 0)
+	if (strcmp(app, PG_TEXTDOMAIN("postgres")) != 0)
 		setlocale(LC_ALL, "");
 
 	if (find_my_exec(argv0, my_exec_path) < 0)
@@ -695,7 +695,6 @@ AddUserToDacl(HANDLE hProcess)
 	DWORD		dwNewAclSize;
 	DWORD		dwSize = 0;
 	DWORD		dwTokenInfoLength = 0;
-	DWORD		dwResult = 0;
 	HANDLE		hToken = NULL;
 	PACL		pacl = NULL;
 	PSID		psidUser = NULL;
@@ -707,7 +706,7 @@ AddUserToDacl(HANDLE hProcess)
 	/* Get the token for the process */
 	if (!OpenProcessToken(hProcess, TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &hToken))
 	{
-		log_error("could not open process token: %ui", GetLastError());
+		log_error("could not open process token: %lu", GetLastError());
 		goto cleanup;
 	}
 
@@ -719,68 +718,68 @@ AddUserToDacl(HANDLE hProcess)
 			ptdd = (TOKEN_DEFAULT_DACL *) LocalAlloc(LPTR, dwSize);
 			if (ptdd == NULL)
 			{
-				log_error("could not allocate %i bytes of memory", dwSize);
+				log_error("could not allocate %lu bytes of memory", dwSize);
 				goto cleanup;
 			}
 
 			if (!GetTokenInformation(hToken, tic, (LPVOID) ptdd, dwSize, &dwSize))
 			{
-				log_error("could not get token information: %ui", GetLastError());
+				log_error("could not get token information: %lu", GetLastError());
 				goto cleanup;
 			}
 		}
 		else
 		{
-			log_error("could not get token information buffer size: %ui", GetLastError());
+			log_error("could not get token information buffer size: %lu", GetLastError());
 			goto cleanup;
 		}
 	}
 
 	/* Get the ACL info */
-	if (!GetAclInformation(ptdd->DefaultDacl, (LPVOID) & asi,
+	if (!GetAclInformation(ptdd->DefaultDacl, (LPVOID) &asi,
 						   (DWORD) sizeof(ACL_SIZE_INFORMATION),
 						   AclSizeInformation))
 	{
-		log_error("could not get ACL information: %ui", GetLastError());
+		log_error("could not get ACL information: %lu", GetLastError());
 		goto cleanup;
 	}
 
 	/* Get the SID for the current user. We need to add this to the ACL. */
 	if (!GetUserSid(&psidUser, hToken))
 	{
-		log_error("could not get user SID: %ui", GetLastError());
+		log_error("could not get user SID: %lu", GetLastError());
 		goto cleanup;
 	}
 
 	/* Figure out the size of the new ACL */
-	dwNewAclSize = asi.AclBytesInUse + sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(psidUser) - sizeof(DWORD);
+	dwNewAclSize = asi.AclBytesInUse + sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(psidUser) -sizeof(DWORD);
 
 	/* Allocate the ACL buffer & initialize it */
 	pacl = (PACL) LocalAlloc(LPTR, dwNewAclSize);
 	if (pacl == NULL)
 	{
-		log_error("could not allocate %i bytes of memory", dwNewAclSize);
+		log_error("could not allocate %lu bytes of memory", dwNewAclSize);
 		goto cleanup;
 	}
 
 	if (!InitializeAcl(pacl, dwNewAclSize, ACL_REVISION))
 	{
-		log_error("could not initialize ACL: %ui", GetLastError());
+		log_error("could not initialize ACL: %lu", GetLastError());
 		goto cleanup;
 	}
 
 	/* Loop through the existing ACEs, and build the new ACL */
 	for (i = 0; i < (int) asi.AceCount; i++)
 	{
-		if (!GetAce(ptdd->DefaultDacl, i, (LPVOID *) & pace))
+		if (!GetAce(ptdd->DefaultDacl, i, (LPVOID *) &pace))
 		{
-			log_error("could not get ACE: %ui", GetLastError());
+			log_error("could not get ACE: %lu", GetLastError());
 			goto cleanup;
 		}
 
 		if (!AddAce(pacl, ACL_REVISION, MAXDWORD, pace, ((PACE_HEADER) pace)->AceSize))
 		{
-			log_error("could not add ACE: %ui", GetLastError());
+			log_error("could not add ACE: %lu", GetLastError());
 			goto cleanup;
 		}
 	}
@@ -788,16 +787,16 @@ AddUserToDacl(HANDLE hProcess)
 	/* Add the new ACE for the current user */
 	if (!AddAccessAllowedAce(pacl, ACL_REVISION, GENERIC_ALL, psidUser))
 	{
-		log_error("could not add access allowed ACE: %ui", GetLastError());
+		log_error("could not add access allowed ACE: %lu", GetLastError());
 		goto cleanup;
 	}
 
 	/* Set the new DACL in the token */
 	tddNew.DefaultDacl = pacl;
 
-	if (!SetTokenInformation(hToken, tic, (LPVOID) & tddNew, dwNewAclSize))
+	if (!SetTokenInformation(hToken, tic, (LPVOID) &tddNew, dwNewAclSize))
 	{
-		log_error("could not set token information: %ui", GetLastError());
+		log_error("could not set token information: %lu", GetLastError());
 		goto cleanup;
 	}
 
@@ -825,11 +824,9 @@ cleanup:
  * Get the SID for the current user
  */
 static BOOL
-GetUserSid(PSID * ppSidUser, HANDLE hToken)
+GetUserSid(PSID *ppSidUser, HANDLE hToken)
 {
 	DWORD		dwLength;
-	DWORD		cbName = 250;
-	DWORD		cbDomainName = 250;
 	PTOKEN_USER pTokenUser = NULL;
 
 
@@ -845,13 +842,13 @@ GetUserSid(PSID * ppSidUser, HANDLE hToken)
 
 			if (pTokenUser == NULL)
 			{
-				log_error("could not allocate %ui bytes of memory", dwLength);
+				log_error("could not allocate %lu bytes of memory", dwLength);
 				return FALSE;
 			}
 		}
 		else
 		{
-			log_error("could not get token information buffer size: %ui", GetLastError());
+			log_error("could not get token information buffer size: %lu", GetLastError());
 			return FALSE;
 		}
 	}
@@ -865,7 +862,7 @@ GetUserSid(PSID * ppSidUser, HANDLE hToken)
 		HeapFree(GetProcessHeap(), 0, pTokenUser);
 		pTokenUser = NULL;
 
-		log_error("could not get token information: %ui", GetLastError());
+		log_error("could not get token information: %lu", GetLastError());
 		return FALSE;
 	}
 

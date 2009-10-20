@@ -1,8 +1,8 @@
 # $PostgreSQL$
 CATALOG_NAME	:= postgres
-AVAIL_LANGUAGES	:= af cs de es fr hr hu it ko nb nl pl pt_BR ro ru sk sl sv tr zh_CN zh_TW
+AVAIL_LANGUAGES	:= de es fr ja pt_BR tr
 GETTEXT_FILES	:= + gettext-files
-GETTEXT_TRIGGERS:= _ errmsg errdetail errhint errcontext write_stderr yyerror
+GETTEXT_TRIGGERS:= _ errmsg errmsg_plural:1,2 errdetail errdetail_log errdetail_plural:1,2 errhint errcontext write_stderr yyerror
 
 gettext-files: distprep
 	find $(srcdir)/ $(srcdir)/../port/ -name '*.c' -print >$@

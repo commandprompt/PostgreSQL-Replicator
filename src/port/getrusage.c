@@ -3,7 +3,7 @@
  * getrusage.c
  *	  get information about resource utilisation
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -40,6 +40,13 @@ getrusage(int who, struct rusage * rusage)
 	FILETIME	kerneltime;
 	FILETIME	usertime;
 	ULARGE_INTEGER li;
+
+	if (who != RUSAGE_SELF)
+	{
+		/* Only RUSAGE_SELF is supported in this implementation for now */
+		errno = EINVAL;
+		return -1;
+	}
 
 	if (rusage == (struct rusage *) NULL)
 	{

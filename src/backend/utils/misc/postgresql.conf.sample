@@ -21,11 +21,14 @@
 # take effect.
 #
 # Any parameter can also be given as a command-line option to the server, e.g.,
-# "postgres -c log_connections=on".  Some paramters can be changed at run time
+# "postgres -c log_connections=on".  Some parameters can be changed at run time
 # with the "SET" SQL command.
 #
-# Memory units:  kB = kilobytes MB = megabytes GB = gigabytes
-# Time units:    ms = milliseconds s = seconds min = minutes h = hours d = days
+# Memory units:  kB = kilobytes        Time units:  ms  = milliseconds
+#                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                                                   h   = hours
+#                                                   d   = days
 
 
 #------------------------------------------------------------------------------
@@ -60,8 +63,7 @@
 #port = 5432				# (change requires restart)
 #max_connections = 100			# (change requires restart)
 # Note:  Increasing max_connections costs ~400 bytes of shared memory per 
-# connection slot, plus lock space (see max_locks_per_transaction).  You might
-# also need to raise shared_buffers to support more connections.
+# connection slot, plus lock space (see max_locks_per_transaction).
 #superuser_reserved_connections = 3	# (change requires restart)
 #unix_socket_directory = ''		# (change requires restart)
 #unix_socket_group = ''			# (change requires restart)
@@ -80,12 +82,9 @@
 #db_user_namespace = off
 
 # Kerberos and GSSAPI
-#krb_server_keyfile = ''		# (change requires restart)
-#krb_srvname = 'postgres'		# (change requires restart, Kerberos only)
-#krb_server_hostname = ''		# empty string matches any keytab entry
-					# (change requires restart, Kerberos only)
-#krb_caseins_users = off		# (change requires restart)
-#krb_realm = ''           		# (change requires restart)
+#krb_server_keyfile = ''
+#krb_srvname = 'postgres'		# (Kerberos only)
+#krb_caseins_users = off
 
 # - TCP Keepalives -
 # see "man 7 tcp" for details
@@ -104,23 +103,18 @@
 
 # - Memory -
 
-#shared_buffers = 32MB			# min 128kB or max_connections*16kB
+#shared_buffers = 32MB			# min 128kB
 					# (change requires restart)
 #temp_buffers = 8MB			# min 800kB
-#max_prepared_transactions = 5		# can be 0 or more
+#max_prepared_transactions = 0		# zero disables the feature
 					# (change requires restart)
 # Note:  Increasing max_prepared_transactions costs ~600 bytes of shared memory
 # per transaction slot, plus lock space (see max_locks_per_transaction).
+# It is not advisable to set max_prepared_transactions nonzero unless you
+# actively intend to use prepared transactions.
 #work_mem = 1MB				# min 64kB
 #maintenance_work_mem = 16MB		# min 1MB
 #max_stack_depth = 2MB			# min 100kB
-
-# - Free Space Map -
-
-#max_fsm_pages = 204800			# min max_fsm_relations*16, 6 bytes each
-					# (change requires restart)
-#max_fsm_relations = 1000		# min 100, ~70 bytes each
-					# (change requires restart)
 
 # - Kernel Resource Usage -
 
@@ -130,7 +124,7 @@
 
 # - Cost-Based Vacuum Delay -
 
-#vacuum_cost_delay = 0			# 0-1000 milliseconds
+#vacuum_cost_delay = 0ms		# 0-100 milliseconds
 #vacuum_cost_page_hit = 1		# 0-10000 credits
 #vacuum_cost_page_miss = 10		# 0-10000 credits
 #vacuum_cost_page_dirty = 20		# 0-10000 credits
@@ -141,6 +135,10 @@
 #bgwriter_delay = 200ms			# 10-10000ms between rounds
 #bgwriter_lru_maxpages = 100		# 0-1000 max buffers written/round
 #bgwriter_lru_multiplier = 2.0		# 0-10.0 multipler on buffers scanned/round
+
+# - Asynchronous Behavior -
+
+#effective_io_concurrency = 1		# 1-1000. 0 disables prefetching
 
 
 #------------------------------------------------------------------------------
@@ -171,7 +169,7 @@
 #checkpoint_segments = 3		# in logfile segments, min 1, 16MB each
 #checkpoint_timeout = 5min		# range 30s-1h
 #checkpoint_completion_target = 0.5	# checkpoint target duration, 0.0 - 1.0
-#checkpoint_warning = 30s		# 0 is off
+#checkpoint_warning = 30s		# 0 disables
 
 # - Archiving -
 
@@ -179,7 +177,7 @@
 				# (change requires restart)
 #archive_command = ''		# command to use to archive a logfile segment
 #archive_timeout = 0		# force a logfile segment switch after this
-				# time; 0 is off
+				# number of seconds; 0 disables
 
 
 #------------------------------------------------------------------------------
@@ -218,8 +216,9 @@
 
 # - Other Planner Options -
 
-#default_statistics_target = 10		# range 1-1000
-#constraint_exclusion = off
+#default_statistics_target = 100	# range 1-10000
+#constraint_exclusion = partition	# on, off, or partition
+#cursor_tuple_fraction = 0.1		# range 0.0-1.0
 #from_collapse_limit = 8
 #join_collapse_limit = 8		# 1 disables collapsing of explicit 
 					# JOIN clauses
@@ -256,14 +255,19 @@
 					# off, meaning append to existing files
 					# in all cases.
 #log_rotation_age = 1d			# Automatic rotation of logfiles will
-					# happen after that time.  0 to disable.
+					# happen after that time.  0 disables.
 #log_rotation_size = 10MB		# Automatic rotation of logfiles will 
 					# happen after that much log output.
-					# 0 to disable.
+					# 0 disables.
 
 # These are relevant when logging to syslog:
 #syslog_facility = 'LOCAL0'
 #syslog_ident = 'postgres'
+
+#silent_mode = off			# Run server silently.
+					# DO NOT USE without syslog or
+					# logging_collector
+					# (change requires restart)
 
 
 # - When to Log -
@@ -279,7 +283,7 @@
 					#   warning
 					#   error
 
-#log_min_messages = notice		# values in order of decreasing detail:
+#log_min_messages = warning		# values in order of decreasing detail:
 					#   debug5
 					#   debug4
 					#   debug3
@@ -311,18 +315,16 @@
 
 #log_min_duration_statement = -1	# -1 is disabled, 0 logs all statements
 					# and their durations, > 0 logs only
-					# statements running at least this time.
+					# statements running at least this number
+					# of milliseconds
 
-#silent_mode = off			# DO NOT USE without syslog or
-					# logging_collector
-					# (change requires restart)
 
 # - What to Log -
 
 #debug_print_parse = off
 #debug_print_rewritten = off
 #debug_print_plan = off
-#debug_pretty_print = off
+#debug_pretty_print = on
 #log_checkpoints = off
 #log_connections = off
 #log_disconnections = off
@@ -349,7 +351,7 @@
 #log_lock_waits = off			# log lock waits >= deadlock_timeout
 #log_statement = 'none'			# none, ddl, mod, all
 #log_temp_files = -1			# log temporary files equal or larger
-					# than specified size;
+					# than the specified size in kilobytes;
 					# -1 disables, 0 logs all temp files
 #log_timezone = unknown			# actually, defaults to TZ environment
 					# setting
@@ -363,7 +365,10 @@
 
 #track_activities = on
 #track_counts = on
+#track_functions = none			# none, pl, all
+#track_activity_query_size = 1024
 #update_process_title = on
+#stats_temp_directory = 'pg_stat_tmp'
 
 
 # - Statistics Monitoring -
@@ -382,7 +387,8 @@
 					# requires track_counts to also be on.
 #log_autovacuum_min_duration = -1	# -1 disables, 0 logs all actions and
 					# their durations, > 0 logs only
-					# actions running at least that time.
+					# actions running at least this number
+					# of milliseconds.
 #autovacuum_max_workers = 3		# max number of autovacuum subprocesses
 #autovacuum_naptime = 1min		# time between autovacuum runs
 #autovacuum_vacuum_threshold = 50	# min number of row updates before
@@ -393,9 +399,9 @@
 #autovacuum_analyze_scale_factor = 0.1	# fraction of table size before analyze
 #autovacuum_freeze_max_age = 200000000	# maximum XID age before forced vacuum
 					# (change requires restart)
-#autovacuum_vacuum_cost_delay = 20	# default vacuum cost delay for
-					# autovacuum, -1 means use
-					# vacuum_cost_delay
+#autovacuum_vacuum_cost_delay = 20ms	# default vacuum cost delay for
+					# autovacuum, in milliseconds;
+					# -1 means use vacuum_cost_delay
 #autovacuum_vacuum_cost_limit = -1	# default vacuum cost limit for
 					# autovacuum, -1 means use
 					# vacuum_cost_limit
@@ -415,14 +421,16 @@
 #default_transaction_isolation = 'read committed'
 #default_transaction_read_only = off
 #session_replication_role = 'origin'
-#statement_timeout = 0			# 0 is disabled
-#vacuum_freeze_min_age = 100000000
+#statement_timeout = 0			# in milliseconds, 0 is disabled
+#vacuum_freeze_min_age = 50000000
+#vacuum_freeze_table_age = 150000000
 #xmlbinary = 'base64'
 #xmloption = 'content'
 
 # - Locale and Formatting -
 
 #datestyle = 'iso, mdy'
+#intervalstyle = 'postgres'
 #timezone = unknown			# actually, defaults to TZ environment
 					# setting
 #timezone_abbreviations = 'Default'     # Select the set of available time zone
@@ -448,7 +456,6 @@
 
 # - Other Defaults -
 
-#explain_pretty_print = on
 #dynamic_library_path = '$libdir'
 #local_preload_libraries = ''
 

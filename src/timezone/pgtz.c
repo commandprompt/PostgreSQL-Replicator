@@ -3,7 +3,7 @@
  * pgtz.c
  *	  Timezone Library Integration Functions
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -287,7 +287,7 @@ score_timezone(const char *tzname, struct tztry * tt)
 	 * Load timezone directly. Don't use pg_tzset, because we don't want all
 	 * timezones loaded in the cache at startup.
 	 */
-	if (tzload(tzname, NULL, &tz.state) != 0)
+	if (tzload(tzname, NULL, &tz.state, TRUE) != 0)
 	{
 		if (tzname[0] == ':' || tzparse(tzname, &tz.state, FALSE) != 0)
 		{
@@ -387,15 +387,15 @@ identify_system_timezone(void)
 	 * enough to identify DST transition rules, since everybody switches on
 	 * Sundays.)  This is sufficient to cover most of the Unix time_t range,
 	 * and we don't want to look further than that since many systems won't
-	 * have sane TZ behavior further back anyway.  The further
-	 * back the zone matches, the better we score it.  This may seem like a
-	 * rather random way of doing things, but experience has shown that
-	 * system-supplied timezone definitions are likely to have DST behavior
-	 * that is right for the recent past and not so accurate further back.
-	 * Scoring in this way allows us to recognize zones that have some
-	 * commonality with the zic database, without insisting on exact match.
-	 * (Note: we probe Thursdays, not Sundays, to avoid triggering
-	 * DST-transition bugs in localtime itself.)
+	 * have sane TZ behavior further back anyway.  The further back the zone
+	 * matches, the better we score it.  This may seem like a rather random
+	 * way of doing things, but experience has shown that system-supplied
+	 * timezone definitions are likely to have DST behavior that is right for
+	 * the recent past and not so accurate further back. Scoring in this way
+	 * allows us to recognize zones that have some commonality with the zic
+	 * database, without insisting on exact match. (Note: we probe Thursdays,
+	 * not Sundays, to avoid triggering DST-transition bugs in localtime
+	 * itself.)
 	 */
 	tnow = time(NULL);
 	tm = localtime(&tnow);
@@ -404,6 +404,7 @@ identify_system_timezone(void)
 	thisyear = tm->tm_year + 1900;
 
 	t = build_time_t(thisyear, 1, 15);
+
 	/*
 	 * Round back to GMT midnight Thursday.  This depends on the knowledge
 	 * that the time_t origin is Thu Jan 01 1970.  (With a different origin
@@ -731,7 +732,7 @@ static const struct
 		"Central Standard Time (Mexico)", "Central Daylight Time (Mexico)",
 		"America/Mexico_City"
 	},							/* (GMT-06:00) Guadalajara, Mexico City,
-								   Monterrey - New */
+								 * Monterrey - New */
 	{
 		"China Standard Time", "China Daylight Time",
 		"Asia/Hong_Kong"
@@ -852,8 +853,8 @@ static const struct
 	{
 		"Mountain Standard Time (Mexico)", "Mountain Daylight Time (Mexico)",
 		"America/Chihuahua"
-	},							/* (GMT-07:00) Chihuahua, La Paz, 
-								   Mazatlan - New */
+	},							/* (GMT-07:00) Chihuahua, La Paz, Mazatlan -
+								 * New */
 	{
 		"Myanmar Standard Time", "Myanmar Daylight Time",
 		"Asia/Rangoon"
@@ -974,7 +975,7 @@ static const struct
 		"Australia/Perth"
 	},							/* (GMT+08:00) Perth */
 /*	{"W. Central Africa Standard Time", "W. Central Africa Daylight Time",
-	 *	 *	 *	 *	 *	 *	 *	""}, Could not find a match for this one. Excluded for now. *//* (
+	 *	 *	 *	 *	 *	 *	 *	 *	""}, Could not find a match for this one. Excluded for now. *//* (
 	 * G MT+01:00) West Central Africa */
 	{
 		"W. Europe Standard Time", "W. Europe Daylight Time",
@@ -1220,7 +1221,7 @@ pg_tzset(const char *name)
 		return &tzp->tz;
 	}
 
-	if (tzload(uppername, canonname, &tzstate) != 0)
+	if (tzload(uppername, canonname, &tzstate, TRUE) != 0)
 	{
 		if (uppername[0] == ':' || tzparse(uppername, &tzstate, FALSE) != 0)
 		{
@@ -1492,9 +1493,16 @@ pg_tzenumerate_next(pg_tzenum *dir)
 		 * Load this timezone using tzload() not pg_tzset(), so we don't fill
 		 * the cache
 		 */
-		if (tzload(fullname + dir->baselen, dir->tz.TZname, &dir->tz.state) != 0)
+		if (tzload(fullname + dir->baselen, dir->tz.TZname, &dir->tz.state,
+				   TRUE) != 0)
 		{
 			/* Zone could not be loaded, ignore it */
+			continue;
+		}
+
+		if (!tz_acceptable(&dir->tz))
+		{
+			/* Ignore leap-second zones */
 			continue;
 		}
 

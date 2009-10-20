@@ -3,7 +3,7 @@
  * schemacmds.c
  *	  schema creation/manipulation commands
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -87,8 +87,8 @@ CreateSchemaCommand(CreateSchemaStmt *stmt, const char *queryString)
 	 * temporarily set the current user so that the object(s) will be created
 	 * with the correct ownership.
 	 *
-	 * (The setting will be restored at the end of this routine, or in case
-	 * of error, transaction abort will clean things up.)
+	 * (The setting will be restored at the end of this routine, or in case of
+	 * error, transaction abort will clean things up.)
 	 */
 	if (saved_uid != owner_uid)
 		SetUserIdAndContext(owner_uid, true);
@@ -148,57 +148,76 @@ CreateSchemaCommand(CreateSchemaStmt *stmt, const char *queryString)
 
 
 /*
- *	RemoveSchema
- *		Removes a schema.
+ *	RemoveSchemas
+ *		Implements DROP SCHEMA.
  */
 void
-RemoveSchema(List *names, DropBehavior behavior, bool missing_ok)
+RemoveSchemas(DropStmt *drop)
 {
-	char	   *namespaceName;
-	Oid			namespaceId;
-	ObjectAddress object;
-
-	if (list_length(names) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("schema name cannot be qualified")));
-	namespaceName = strVal(linitial(names));
-
-	namespaceId = GetSysCacheOid(NAMESPACENAME,
-								 CStringGetDatum(namespaceName),
-								 0, 0, 0);
-	if (!OidIsValid(namespaceId))
-	{
-		if (!missing_ok)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_SCHEMA),
-					 errmsg("schema \"%s\" does not exist", namespaceName)));
-		}
-		else
-		{
-			ereport(NOTICE,
-					(errmsg("schema \"%s\" does not exist, skipping",
-							namespaceName)));
-		}
-
-		return;
-	}
-
-	/* Permission check */
-	if (!pg_namespace_ownercheck(namespaceId, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_NAMESPACE,
-					   namespaceName);
+	ObjectAddresses *objects;
+	ListCell   *cell;
 
 	/*
-	 * Do the deletion.  Objects contained in the schema are removed by means
-	 * of their dependency links to the schema.
+	 * First we identify all the schemas, then we delete them in a single
+	 * performMultipleDeletions() call.  This is to avoid unwanted DROP
+	 * RESTRICT errors if one of the schemas depends on another.
 	 */
-	object.classId = NamespaceRelationId;
-	object.objectId = namespaceId;
-	object.objectSubId = 0;
+	objects = new_object_addresses();
 
-	performDeletion(&object, behavior);
+	foreach(cell, drop->objects)
+	{
+		List	   *names = (List *) lfirst(cell);
+		char	   *namespaceName;
+		Oid			namespaceId;
+		ObjectAddress object;
+
+		if (list_length(names) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("schema name cannot be qualified")));
+		namespaceName = strVal(linitial(names));
+
+		namespaceId = GetSysCacheOid(NAMESPACENAME,
+									 CStringGetDatum(namespaceName),
+									 0, 0, 0);
+
+		if (!OidIsValid(namespaceId))
+		{
+			if (!drop->missing_ok)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_SCHEMA),
+						 errmsg("schema \"%s\" does not exist",
+								namespaceName)));
+			}
+			else
+			{
+				ereport(NOTICE,
+						(errmsg("schema \"%s\" does not exist, skipping",
+								namespaceName)));
+			}
+			continue;
+		}
+
+		/* Permission check */
+		if (!pg_namespace_ownercheck(namespaceId, GetUserId()))
+			aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_NAMESPACE,
+						   namespaceName);
+
+		object.classId = NamespaceRelationId;
+		object.objectId = namespaceId;
+		object.objectSubId = 0;
+
+		add_exact_object_address(&object, objects);
+	}
+
+	/*
+	 * Do the deletions.  Objects contained in the schema(s) are removed by
+	 * means of their dependency links to the schema.
+	 */
+	performMultipleDeletions(objects, drop->behavior);
+
+	free_object_addresses(objects);
 }
 
 
@@ -347,8 +366,8 @@ AlterSchemaOwner_internal(HeapTuple tup, Relation rel, Oid newOwnerId)
 	if (nspForm->nspowner != newOwnerId)
 	{
 		Datum		repl_val[Natts_pg_namespace];
-		char		repl_null[Natts_pg_namespace];
-		char		repl_repl[Natts_pg_namespace];
+		bool		repl_null[Natts_pg_namespace];
+		bool		repl_repl[Natts_pg_namespace];
 		Acl		   *newAcl;
 		Datum		aclDatum;
 		bool		isNull;
@@ -378,10 +397,10 @@ AlterSchemaOwner_internal(HeapTuple tup, Relation rel, Oid newOwnerId)
 			aclcheck_error(aclresult, ACL_KIND_DATABASE,
 						   get_database_name(MyDatabaseId));
 
-		memset(repl_null, ' ', sizeof(repl_null));
-		memset(repl_repl, ' ', sizeof(repl_repl));
+		memset(repl_null, false, sizeof(repl_null));
+		memset(repl_repl, false, sizeof(repl_repl));
 
-		repl_repl[Anum_pg_namespace_nspowner - 1] = 'r';
+		repl_repl[Anum_pg_namespace_nspowner - 1] = true;
 		repl_val[Anum_pg_namespace_nspowner - 1] = ObjectIdGetDatum(newOwnerId);
 
 		/*
@@ -395,11 +414,11 @@ AlterSchemaOwner_internal(HeapTuple tup, Relation rel, Oid newOwnerId)
 		{
 			newAcl = aclnewowner(DatumGetAclP(aclDatum),
 								 nspForm->nspowner, newOwnerId);
-			repl_repl[Anum_pg_namespace_nspacl - 1] = 'r';
+			repl_repl[Anum_pg_namespace_nspacl - 1] = true;
 			repl_val[Anum_pg_namespace_nspacl - 1] = PointerGetDatum(newAcl);
 		}
 
-		newtuple = heap_modifytuple(tup, RelationGetDescr(rel), repl_val, repl_null, repl_repl);
+		newtuple = heap_modify_tuple(tup, RelationGetDescr(rel), repl_val, repl_null, repl_repl);
 
 		simple_heap_update(rel, &newtuple->t_self, newtuple);
 		CatalogUpdateIndexes(rel, newtuple);

@@ -10,7 +10,7 @@
  *	  This information is needed by routines manipulating tuples
  *	  (getattribute, formtuple, etc.).
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -92,9 +92,9 @@
 #include "postgres.h"
 
 #include "funcapi.h"
-#include "access/heapam.h"
 #include "catalog/pg_type.h"
-#include "parser/parse_expr.h"
+#include "nodes/nodeFuncs.h"
+#include "storage/bufmgr.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
@@ -756,12 +756,39 @@ ExecFetchSlotMinimalTuple(TupleTableSlot *slot)
 
 	/*
 	 * Note: we may now have a situation where we have a local minimal tuple
-	 * attached to a virtual or non-local physical tuple.  There seems no
-	 * harm in that at the moment, but if any materializes, we should change
-	 * this function to force the slot into minimal-tuple-only state.
+	 * attached to a virtual or non-local physical tuple.  There seems no harm
+	 * in that at the moment, but if any materializes, we should change this
+	 * function to force the slot into minimal-tuple-only state.
 	 */
 
 	return slot->tts_mintuple;
+}
+
+/* --------------------------------
+ *		ExecFetchSlotTupleDatum
+ *			Fetch the slot's tuple as a composite-type Datum.
+ *
+ *		We convert the slot's contents to local physical-tuple form,
+ *		and fill in the Datum header fields.  Note that the result
+ *		always points to storage owned by the slot.
+ * --------------------------------
+ */
+Datum
+ExecFetchSlotTupleDatum(TupleTableSlot *slot)
+{
+	HeapTuple	tup;
+	HeapTupleHeader td;
+	TupleDesc	tupdesc;
+
+	/* Make sure we can scribble on the slot contents ... */
+	tup = ExecMaterializeSlot(slot);
+	/* ... and set up the composite-Datum header fields, in case not done */
+	td = tup->t_data;
+	tupdesc = slot->tts_tupleDescriptor;
+	HeapTupleHeaderSetDatumLength(td, tup->t_len);
+	HeapTupleHeaderSetTypeId(td, tupdesc->tdtypeid);
+	HeapTupleHeaderSetTypMod(td, tupdesc->tdtypmod);
+	return PointerGetDatum(td);
 }
 
 /* --------------------------------
@@ -816,9 +843,9 @@ ExecMaterializeSlot(TupleTableSlot *slot)
 	slot->tts_buffer = InvalidBuffer;
 
 	/*
-	 * Mark extracted state invalid.  This is important because the slot
-	 * is not supposed to depend any more on the previous external data;
-	 * we mustn't leave any dangling pass-by-reference datums in tts_values.
+	 * Mark extracted state invalid.  This is important because the slot is
+	 * not supposed to depend any more on the previous external data; we
+	 * mustn't leave any dangling pass-by-reference datums in tts_values.
 	 * However, we have not actually invalidated any such datums, if there
 	 * happen to be any previously fetched from the slot.  (Note in particular
 	 * that we have not pfree'd tts_mintuple, if there is one.)
@@ -827,9 +854,9 @@ ExecMaterializeSlot(TupleTableSlot *slot)
 
 	/*
 	 * On the same principle of not depending on previous remote storage,
-	 * forget the mintuple if it's not local storage.  (If it is local storage,
-	 * we must not pfree it now, since callers might have already fetched
-	 * datum pointers referencing it.)
+	 * forget the mintuple if it's not local storage.  (If it is local
+	 * storage, we must not pfree it now, since callers might have already
+	 * fetched datum pointers referencing it.)
 	 */
 	if (!slot->tts_shouldFreeMin)
 		slot->tts_mintuple = NULL;
@@ -1119,12 +1146,12 @@ BuildTupleFromCStrings(AttInMetadata *attinmeta, char **values)
 	TupleDesc	tupdesc = attinmeta->tupdesc;
 	int			natts = tupdesc->natts;
 	Datum	   *dvalues;
-	char	   *nulls;
+	bool	   *nulls;
 	int			i;
 	HeapTuple	tuple;
 
 	dvalues = (Datum *) palloc(natts * sizeof(Datum));
-	nulls = (char *) palloc(natts * sizeof(char));
+	nulls = (bool *) palloc(natts * sizeof(bool));
 
 	/* Call the "in" function for each non-dropped attribute */
 	for (i = 0; i < natts; i++)
@@ -1137,22 +1164,22 @@ BuildTupleFromCStrings(AttInMetadata *attinmeta, char **values)
 										   attinmeta->attioparams[i],
 										   attinmeta->atttypmods[i]);
 			if (values[i] != NULL)
-				nulls[i] = ' ';
+				nulls[i] = false;
 			else
-				nulls[i] = 'n';
+				nulls[i] = true;
 		}
 		else
 		{
 			/* Handle dropped attributes by setting to NULL */
 			dvalues[i] = (Datum) 0;
-			nulls[i] = 'n';
+			nulls[i] = true;
 		}
 	}
 
 	/*
 	 * Form a tuple
 	 */
-	tuple = heap_formtuple(tupdesc, dvalues, nulls);
+	tuple = heap_form_tuple(tupdesc, dvalues, nulls);
 
 	/*
 	 * Release locally palloc'd space.  XXX would probably be good to pfree

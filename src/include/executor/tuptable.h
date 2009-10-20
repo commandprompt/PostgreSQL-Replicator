@@ -4,7 +4,7 @@
  *	  tuple table support stuff
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -103,7 +103,7 @@
  * has only a minimal and not also a regular physical tuple, then tts_tuple
  * points at tts_minhdr and the fields of that struct are set correctly
  * for access to the minimal tuple; in particular, tts_minhdr.t_data points
- * MINIMAL_TUPLE_OFFSET bytes before tts_mintuple.  This allows column
+ * MINIMAL_TUPLE_OFFSET bytes before tts_mintuple.	This allows column
  * extraction to treat the case identically to regular physical tuples.
  *
  * tts_slow/tts_off are saved state for slot_deform_tuple, and should not
@@ -114,7 +114,7 @@ typedef struct TupleTableSlot
 {
 	NodeTag		type;			/* vestigial ... allows IsA tests */
 	bool		tts_isempty;	/* true = slot is empty */
-	bool		tts_shouldFree;	/* should pfree tts_tuple? */
+	bool		tts_shouldFree; /* should pfree tts_tuple? */
 	bool		tts_shouldFreeMin;		/* should pfree tts_mintuple? */
 	bool		tts_slow;		/* saved state for slot_deform_tuple */
 	HeapTuple	tts_tuple;		/* physical tuple, or NULL if virtual */
@@ -172,6 +172,7 @@ extern HeapTuple ExecCopySlotTuple(TupleTableSlot *slot);
 extern MinimalTuple ExecCopySlotMinimalTuple(TupleTableSlot *slot);
 extern HeapTuple ExecFetchSlotTuple(TupleTableSlot *slot);
 extern MinimalTuple ExecFetchSlotMinimalTuple(TupleTableSlot *slot);
+extern Datum ExecFetchSlotTupleDatum(TupleTableSlot *slot);
 extern HeapTuple ExecMaterializeSlot(TupleTableSlot *slot);
 extern TupleTableSlot *ExecCopySlot(TupleTableSlot *dstslot,
 			 TupleTableSlot *srcslot);

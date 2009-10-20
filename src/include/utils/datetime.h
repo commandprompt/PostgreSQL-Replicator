@@ -6,7 +6,7 @@
  *	   including abstime, reltime, date, and time.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -114,6 +114,11 @@
 /* generic fields to help with parsing */
 #define ISODATE 22
 #define ISOTIME 23
+/* these are only for parsing intervals */
+#define WEEK		24
+#define DECADE		25
+#define CENTURY		26
+#define MILLENNIUM	27
 /* reserved for unrecognized string values */
 #define UNKNOWN_FIELD	31
 
@@ -289,18 +294,20 @@ extern int DecodeDateTime(char **field, int *ftype,
 extern int DecodeTimeOnly(char **field, int *ftype,
 			   int nf, int *dtype,
 			   struct pg_tm * tm, fsec_t *fsec, int *tzp);
-extern int DecodeInterval(char **field, int *ftype,
-			   int nf, int *dtype,
-			   struct pg_tm * tm, fsec_t *fsec);
+extern int DecodeInterval(char **field, int *ftype, int nf, int range,
+			   int *dtype, struct pg_tm * tm, fsec_t *fsec);
+extern int DecodeISO8601Interval(char *str,
+					  int *dtype, struct pg_tm * tm, fsec_t *fsec);
+
 extern void DateTimeParseError(int dterr, const char *str,
 				   const char *datatype);
 
 extern int	DetermineTimeZoneOffset(struct pg_tm * tm, pg_tz *tzp);
 
-extern int	EncodeDateOnly(struct pg_tm * tm, int style, char *str);
-extern int	EncodeTimeOnly(struct pg_tm * tm, fsec_t fsec, int *tzp, int style, char *str);
-extern int	EncodeDateTime(struct pg_tm * tm, fsec_t fsec, int *tzp, char **tzn, int style, char *str);
-extern int	EncodeInterval(struct pg_tm * tm, fsec_t fsec, int style, char *str);
+extern void EncodeDateOnly(struct pg_tm * tm, int style, char *str);
+extern void EncodeTimeOnly(struct pg_tm * tm, fsec_t fsec, int *tzp, int style, char *str);
+extern void EncodeDateTime(struct pg_tm * tm, fsec_t fsec, int *tzp, char **tzn, int style, char *str);
+extern void EncodeInterval(struct pg_tm * tm, fsec_t fsec, int style, char *str);
 
 extern int	DecodeSpecial(int field, char *lowtoken, int *val);
 extern int	DecodeUnits(int field, char *lowtoken, int *val);

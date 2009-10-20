@@ -6,7 +6,7 @@
  * Since pg4_dump is long-dead code, there is no longer any useful distinction
  * between this file and pg_dump.c.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,14 +15,13 @@
  *
  *-------------------------------------------------------------------------
  */
-
 #include "postgres_fe.h"
-#include "pg_backup_archiver.h"
-
-#include "postgres.h"
-#include "catalog/pg_class.h"
 
 #include <ctype.h>
+
+#include "catalog/pg_class.h"
+
+#include "pg_backup_archiver.h"
 
 
 /*
@@ -63,8 +62,7 @@ static DumpableObject **oprinfoindex;
 
 static void flagInhTables(TableInfo *tbinfo, int numTables,
 			  InhInfo *inhinfo, int numInherits);
-static void flagInhAttrs(TableInfo *tbinfo, int numTables,
-			 InhInfo *inhinfo, int numInherits);
+static void flagInhAttrs(TableInfo *tblinfo, int numTables);
 static DumpableObject **buildIndexArray(void *objArray, int numObjs,
 				Size objSize);
 static int	DOCatalogIdCompare(const void *p1, const void *p2);
@@ -93,6 +91,8 @@ getSchemaData(int *numTablesPtr)
 	TSTemplateInfo *tmplinfo;
 	TSDictInfo *dictinfo;
 	TSConfigInfo *cfginfo;
+	FdwInfo    *fdwinfo;
+	ForeignServerInfo *srvinfo;
 	int			numNamespaces;
 	int			numAggregates;
 	int			numInherits;
@@ -106,6 +106,8 @@ getSchemaData(int *numTablesPtr)
 	int			numTSTemplates;
 	int			numTSDicts;
 	int			numTSConfigs;
+	int			numForeignDataWrappers;
+	int			numForeignServers;
 
 	if (g_verbose)
 		write_msg(NULL, "reading schemas\n");
@@ -157,6 +159,14 @@ getSchemaData(int *numTablesPtr)
 	cfginfo = getTSConfigurations(&numTSConfigs);
 
 	if (g_verbose)
+		write_msg(NULL, "reading user-defined foreign-data wrappers\n");
+	fdwinfo = getForeignDataWrappers(&numForeignDataWrappers);
+
+	if (g_verbose)
+		write_msg(NULL, "reading user-defined foreign servers\n");
+	srvinfo = getForeignServers(&numForeignServers);
+
+	if (g_verbose)
 		write_msg(NULL, "reading user-defined operator families\n");
 	opfinfo = getOpfamilies(&numOpfamilies);
 
@@ -192,7 +202,7 @@ getSchemaData(int *numTablesPtr)
 
 	if (g_verbose)
 		write_msg(NULL, "flagging inherited columns in subtables\n");
-	flagInhAttrs(tblinfo, numTables, inhinfo, numInherits);
+	flagInhAttrs(tblinfo, numTables);
 
 	if (g_verbose)
 		write_msg(NULL, "reading indexes\n");
@@ -258,8 +268,7 @@ flagInhTables(TableInfo *tblinfo, int numTables,
  * modifies tblinfo
  */
 static void
-flagInhAttrs(TableInfo *tblinfo, int numTables,
-			 InhInfo *inhinfo, int numInherits)
+flagInhAttrs(TableInfo *tblinfo, int numTables)
 {
 	int			i,
 				j,
@@ -413,43 +422,6 @@ flagInhAttrs(TableInfo *tblinfo, int numTables,
 				/* Clear it if attr has local definition */
 				if (tbinfo->attislocal[j])
 					tbinfo->inhAttrs[j] = false;
-			}
-		}
-
-		/*
-		 * Check for inherited CHECK constraints.  We assume a constraint is
-		 * inherited if its name matches the name of any constraint in the
-		 * parent.	Originally this code tried to compare the expression
-		 * texts, but that can fail if the parent and child tables are in
-		 * different schemas, because reverse-listing of function calls may
-		 * produce different text (schema-qualified or not) depending on
-		 * search path.  We really need a more bulletproof way of detecting
-		 * inherited constraints --- pg_constraint should record this
-		 * explicitly!
-		 */
-		for (j = 0; j < tbinfo->ncheck; j++)
-		{
-			ConstraintInfo *constr;
-
-			constr = &(tbinfo->checkexprs[j]);
-
-			for (k = 0; k < numParents; k++)
-			{
-				int			l;
-
-				parent = parents[k];
-				for (l = 0; l < parent->ncheck; l++)
-				{
-					ConstraintInfo *pconstr = &(parent->checkexprs[l]);
-
-					if (strcmp(pconstr->dobj.name, constr->dobj.name) == 0)
-					{
-						constr->coninherited = true;
-						break;
-					}
-				}
-				if (constr->coninherited)
-					break;
 			}
 		}
 	}

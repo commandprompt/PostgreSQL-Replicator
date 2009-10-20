@@ -4,7 +4,7 @@
  *	  prototypes for functions in backend/catalog/catalog.c
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -14,10 +14,15 @@
 #ifndef CATALOG_H
 #define CATALOG_H
 
-#include "utils/rel.h"
+#include "catalog/pg_class.h"
+#include "storage/relfilenode.h"
+#include "utils/relcache.h"
 
 
-extern char *relpath(RelFileNode rnode);
+extern const char *forkNames[];
+extern ForkNumber forkname_to_number(char *forkName);
+
+extern char *relpath(RelFileNode rnode, ForkNumber forknum);
 extern char *GetDatabasePath(Oid dbNode, Oid spcNode);
 
 extern bool IsSystemRelation(Relation relation);
@@ -34,7 +39,8 @@ extern bool IsReservedName(const char *name);
 extern bool IsSharedRelation(Oid relationId);
 
 extern Oid	GetNewOid(Relation relation);
-extern Oid	GetNewOidWithIndex(Relation relation, Relation indexrel);
+extern Oid GetNewOidWithIndex(Relation relation, Oid indexId,
+				   AttrNumber oidcolumn);
 extern Oid GetNewRelFileNode(Oid reltablespace, bool relisshared,
 				  Relation pg_class);
 

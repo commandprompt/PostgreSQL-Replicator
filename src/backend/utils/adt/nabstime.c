@@ -5,7 +5,7 @@
  *	  Functions for the built-in type "RelativeTime".
  *	  Functions for the built-in type "TimeInterval".
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -29,12 +29,6 @@
 
 #define MIN_DAYNUM (-24856)		/* December 13, 1901 */
 #define MAX_DAYNUM 24854		/* January 18, 2038 */
-
-#define INVALID_RELTIME_STR		"Undefined RelTime"
-#define INVALID_RELTIME_STR_LEN (sizeof(INVALID_RELTIME_STR)-1)
-#define RELTIME_LABEL			'@'
-#define RELTIME_PAST			"ago"
-#define DIRMAXLEN				(sizeof(RELTIME_PAST)-1)
 
 /*
  * Unix epoch is Jan  1 00:00:00 1970.
@@ -86,6 +80,8 @@ static void parsetinterval(char *i_string,
  * GetCurrentAbsoluteTime()
  *
  * Get the current system time (relative to Unix epoch).
+ *
+ * NB: this will overflow in 2038; it should be gone long before that.
  */
 AbsoluteTime
 GetCurrentAbsoluteTime(void)
@@ -630,7 +626,14 @@ reltimein(PG_FUNCTION_ARGS)
 	dterr = ParseDateTime(str, workbuf, sizeof(workbuf),
 						  field, ftype, MAXDATEFIELDS, &nf);
 	if (dterr == 0)
-		dterr = DecodeInterval(field, ftype, nf, &dtype, tm, &fsec);
+		dterr = DecodeInterval(field, ftype, nf, INTERVAL_FULL_RANGE,
+							   &dtype, tm, &fsec);
+
+	/* if those functions think it's a bad format, try ISO8601 style */
+	if (dterr == DTERR_BAD_FORMAT)
+		dterr = DecodeISO8601Interval(str,
+									  &dtype, tm, &fsec);
+
 	if (dterr != 0)
 	{
 		if (dterr == DTERR_FIELD_OVERFLOW)
@@ -668,7 +671,7 @@ reltimeout(PG_FUNCTION_ARGS)
 	char		buf[MAXDATELEN + 1];
 
 	reltime2tm(time, tm);
-	EncodeInterval(tm, 0, DateStyle, buf);
+	EncodeInterval(tm, 0, IntervalStyle, buf);
 
 	result = pstrdup(buf);
 	PG_RETURN_CSTRING(result);
@@ -829,12 +832,7 @@ interval_reltime(PG_FUNCTION_ARGS)
 	int			year,
 				month,
 				day;
-
-#ifdef HAVE_INT64_TIMESTAMP
-	int64		span;
-#else
-	double		span;
-#endif
+	TimeOffset	span;
 
 	year = interval->month / MONTHS_PER_YEAR;
 	month = interval->month % MONTHS_PER_YEAR;
@@ -1029,12 +1027,7 @@ tintervalrel(PG_FUNCTION_ARGS)
 Datum
 timenow(PG_FUNCTION_ARGS)
 {
-	time_t		sec;
-
-	if (time(&sec) < 0)
-		PG_RETURN_ABSOLUTETIME(INVALID_ABSTIME);
-
-	PG_RETURN_ABSOLUTETIME((AbsoluteTime) sec);
+	PG_RETURN_ABSOLUTETIME(GetCurrentAbsoluteTime());
 }
 
 /*
@@ -1584,8 +1577,6 @@ timeofday(PG_FUNCTION_ARGS)
 	struct timeval tp;
 	char		templ[128];
 	char		buf[128];
-	text	   *result;
-	int			len;
 	pg_time_t	tt;
 
 	gettimeofday(&tp, NULL);
@@ -1594,9 +1585,5 @@ timeofday(PG_FUNCTION_ARGS)
 				pg_localtime(&tt, session_timezone));
 	snprintf(buf, sizeof(buf), templ, tp.tv_usec);
 
-	len = VARHDRSZ + strlen(buf);
-	result = (text *) palloc(len);
-	SET_VARSIZE(result, len);
-	memcpy(VARDATA(result), buf, len - VARHDRSZ);
-	PG_RETURN_TEXT_P(result);
+	PG_RETURN_TEXT_P(cstring_to_text(buf));
 }

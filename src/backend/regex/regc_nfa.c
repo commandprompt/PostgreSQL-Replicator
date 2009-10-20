@@ -93,7 +93,7 @@ newnfa(struct vars * v,
  * TooManyStates - checks if the max states exceeds the compile-time value
  */
 static int
-TooManyStates(struct nfa *nfa)
+TooManyStates(struct nfa * nfa)
 {
 	struct nfa *parent = nfa->parent;
 	size_t		sz = nfa->size;
@@ -112,7 +112,7 @@ TooManyStates(struct nfa *nfa)
  * IncrementSize - increases the tracked size of the NFA and its parents.
  */
 static void
-IncrementSize(struct nfa *nfa)
+IncrementSize(struct nfa * nfa)
 {
 	struct nfa *parent = nfa->parent;
 
@@ -128,7 +128,7 @@ IncrementSize(struct nfa *nfa)
  * DecrementSize - decreases the tracked size of the NFA and its parents.
  */
 static void
-DecrementSize(struct nfa *nfa)
+DecrementSize(struct nfa * nfa)
 {
 	struct nfa *parent = nfa->parent;
 
@@ -349,8 +349,6 @@ newarc(struct nfa * nfa,
 
 	if (COLORED(a) && nfa->parent == NULL)
 		colorchain(nfa->cm, a);
-
-	return;
 }
 
 /*
@@ -361,8 +359,6 @@ allocarc(struct nfa * nfa,
 		 struct state * s)
 {
 	struct arc *a;
-	struct arcbatch *new;
-	int			i;
 
 	/* shortcut */
 	if (s->free == NULL && s->noas < ABSIZE)
@@ -375,22 +371,25 @@ allocarc(struct nfa * nfa,
 	/* if none at hand, get more */
 	if (s->free == NULL)
 	{
-		new = (struct arcbatch *) MALLOC(sizeof(struct arcbatch));
-		if (new == NULL)
+		struct arcbatch *newAb;
+		int			i;
+
+		newAb = (struct arcbatch *) MALLOC(sizeof(struct arcbatch));
+		if (newAb == NULL)
 		{
 			NERR(REG_ESPACE);
 			return NULL;
 		}
-		new->next = s->oas.next;
-		s->oas.next = new;
+		newAb->next = s->oas.next;
+		s->oas.next = newAb;
 
 		for (i = 0; i < ABSIZE; i++)
 		{
-			new->a[i].type = 0;
-			new->a[i].freechain = &new->a[i + 1];
+			newAb->a[i].type = 0;
+			newAb->a[i].freechain = &newAb->a[i + 1];
 		}
-		new->a[ABSIZE - 1].freechain = NULL;
-		s->free = &new->a[0];
+		newAb->a[ABSIZE - 1].freechain = NULL;
+		s->free = &newAb->a[0];
 	}
 	assert(s->free != NULL);
 
@@ -495,20 +494,20 @@ cparc(struct nfa * nfa,
  */
 static void
 moveins(struct nfa * nfa,
-		struct state * old,
-		struct state * new)
+		struct state * oldState,
+		struct state * newState)
 {
 	struct arc *a;
 
-	assert(old != new);
+	assert(oldState != newState);
 
-	while ((a = old->ins) != NULL)
+	while ((a = oldState->ins) != NULL)
 	{
-		cparc(nfa, a, a->from, new);
+		cparc(nfa, a, a->from, newState);
 		freearc(nfa, a);
 	}
-	assert(old->nins == 0);
-	assert(old->ins == NULL);
+	assert(oldState->nins == 0);
+	assert(oldState->ins == NULL);
 }
 
 /*
@@ -516,15 +515,15 @@ moveins(struct nfa * nfa,
  */
 static void
 copyins(struct nfa * nfa,
-		struct state * old,
-		struct state * new)
+		struct state * oldState,
+		struct state * newState)
 {
 	struct arc *a;
 
-	assert(old != new);
+	assert(oldState != newState);
 
-	for (a = old->ins; a != NULL; a = a->inchain)
-		cparc(nfa, a, a->from, new);
+	for (a = oldState->ins; a != NULL; a = a->inchain)
+		cparc(nfa, a, a->from, newState);
 }
 
 /*
@@ -532,16 +531,16 @@ copyins(struct nfa * nfa,
  */
 static void
 moveouts(struct nfa * nfa,
-		 struct state * old,
-		 struct state * new)
+		 struct state * oldState,
+		 struct state * newState)
 {
 	struct arc *a;
 
-	assert(old != new);
+	assert(oldState != newState);
 
-	while ((a = old->outs) != NULL)
+	while ((a = oldState->outs) != NULL)
 	{
-		cparc(nfa, a, new, a->to);
+		cparc(nfa, a, newState, a->to);
 		freearc(nfa, a);
 	}
 }
@@ -551,15 +550,15 @@ moveouts(struct nfa * nfa,
  */
 static void
 copyouts(struct nfa * nfa,
-		 struct state * old,
-		 struct state * new)
+		 struct state * oldState,
+		 struct state * newState)
 {
 	struct arc *a;
 
-	assert(old != new);
+	assert(oldState != newState);
 
-	for (a = old->outs; a != NULL; a = a->outchain)
-		cparc(nfa, a, new, a->to);
+	for (a = oldState->outs; a != NULL; a = a->outchain)
+		cparc(nfa, a, newState, a->to);
 }
 
 /*
@@ -857,7 +856,8 @@ pull(struct nfa * nfa,
 
 	/*
 	 * DGP 2007-11-15: Cloning a state with a circular constraint on its list
-	 * of outs can lead to trouble [Tcl Bug 1810038], so get rid of them first.
+	 * of outs can lead to trouble [Tcl Bug 1810038], so get rid of them
+	 * first.
 	 */
 	for (a = from->outs; a != NULL; a = nexta)
 	{
@@ -999,12 +999,12 @@ push(struct nfa * nfa,
 	}
 
 	/*
-	 * DGP 2007-11-15: Here we duplicate the same protections as appear
-	 * in pull() above to avoid troubles with cloning a state with a
-	 * circular constraint on its list of ins.  It is not clear whether
-	 * this is necessary, or is protecting against a "can't happen".
-	 * Any test case that actually leads to a freearc() call here would
-	 * be a welcome addition to the test suite.
+	 * DGP 2007-11-15: Here we duplicate the same protections as appear in
+	 * pull() above to avoid troubles with cloning a state with a circular
+	 * constraint on its list of ins.  It is not clear whether this is
+	 * necessary, or is protecting against a "can't happen". Any test case
+	 * that actually leads to a freearc() call here would be a welcome
+	 * addition to the test suite.
 	 */
 	for (a = to->ins; a != NULL; a = nexta)
 	{
@@ -1144,7 +1144,7 @@ fixempties(struct nfa * nfa,
 	{
 		progress = 0;
 		for (s = nfa->states; s != NULL && !NISERR() &&
-				 s->no != FREESTATE; s = nexts)
+			 s->no != FREESTATE; s = nexts)
 		{
 			nexts = s->next;
 			for (a = s->outs; a != NULL && !NISERR(); a = nexta)

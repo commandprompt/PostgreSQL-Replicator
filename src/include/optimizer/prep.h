@@ -4,7 +4,7 @@
  *	  prototypes for files in optimizer/prep/
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -21,11 +21,13 @@
 /*
  * prototypes for prepjointree.c
  */
-extern Node *pull_up_IN_clauses(PlannerInfo *root, Node *node);
+extern void pull_up_sublinks(PlannerInfo *root);
+extern void inline_set_returning_functions(PlannerInfo *root);
 extern Node *pull_up_subqueries(PlannerInfo *root, Node *jtnode,
-				   bool below_outer_join, bool append_rel_member);
+				   JoinExpr *lowest_outer_join,
+				   AppendRelInfo *containing_appendrel);
 extern void reduce_outer_joins(PlannerInfo *root);
-extern Relids get_relids_in_jointree(Node *jtnode);
+extern Relids get_relids_in_jointree(Node *jtnode, bool include_joins);
 extern Relids get_relids_for_join(PlannerInfo *root, int joinrelid);
 
 /*
@@ -43,8 +45,6 @@ extern List *preprocess_targetlist(PlannerInfo *root, List *tlist);
  */
 extern Plan *plan_set_operations(PlannerInfo *root, double tuple_fraction,
 					List **sortClauses);
-
-extern List *find_all_inheritors(Oid parentrel);
 
 extern void expand_inherited_tables(PlannerInfo *root);
 

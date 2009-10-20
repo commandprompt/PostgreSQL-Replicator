@@ -3,7 +3,7 @@
  * port.h
  *	  Header for src/port/ compatibility functions.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -42,6 +42,7 @@ extern void get_lib_path(const char *my_exec_path, char *ret_path);
 extern void get_pkglib_path(const char *my_exec_path, char *ret_path);
 extern void get_locale_path(const char *my_exec_path, char *ret_path);
 extern void get_doc_path(const char *my_exec_path, char *ret_path);
+extern void get_html_path(const char *my_exec_path, char *ret_path);
 extern void get_man_path(const char *my_exec_path, char *ret_path);
 extern bool get_home_path(char *ret_path);
 extern void get_parent_directory(char *path);
@@ -280,7 +281,7 @@ extern void copydir(char *fromdir, char *todir, bool recurse);
 
 extern bool rmtree(const char *path, bool rmtopdir);
 
-/* 
+/*
  * stat() is not guaranteed to set the st_size field on win32, so we
  * redefine it to our own implementation that is.
  *
@@ -292,7 +293,8 @@ extern bool rmtree(const char *path, bool rmtopdir);
  */
 #if defined(WIN32) && !defined(__CYGWIN__) && !defined(UNSAFE_STAT_OK)
 #include <sys/stat.h>
-extern int	pgwin32_safestat(const char *path, struct stat *buf);
+extern int	pgwin32_safestat(const char *path, struct stat * buf);
+
 #define stat(a,b) pgwin32_safestat(a,b)
 #endif
 
@@ -340,9 +342,13 @@ extern int	gettimeofday(struct timeval * tp, struct timezone * tzp);
 extern char *crypt(const char *key, const char *setting);
 #endif
 
+/* WIN32 handled in port/win32.h */
+#ifndef WIN32
+#define pgoff_t off_t
 #if defined(bsdi) || defined(netbsd)
 extern int	fseeko(FILE *stream, off_t offset, int whence);
 extern off_t ftello(FILE *stream);
+#endif
 #endif
 
 #ifndef HAVE_FSEEKO

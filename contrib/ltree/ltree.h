@@ -4,16 +4,16 @@
 #define __LTREE_H__
 
 #include "postgres.h"
-
-#include "utils/builtins.h"
+#include "fmgr.h"
+#include "tsearch/ts_locale.h"
 
 typedef struct
 {
-	uint8		len;
+	uint16		len;
 	char		name[1];
-}	ltree_level;
+} ltree_level;
 
-#define LEVEL_HDRSIZE	(sizeof(uint8))
+#define LEVEL_HDRSIZE	(offsetof(ltree_level,name))
 #define LEVEL_NEXT(x)	( (ltree_level*)( ((char*)(x)) + MAXALIGN(((ltree_level*)(x))->len + LEVEL_HDRSIZE) ) )
 
 typedef struct
@@ -21,9 +21,9 @@ typedef struct
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	uint16		numlevel;
 	char		data[1];
-}	ltree;
+} ltree;
 
-#define LTREE_HDRSIZE	MAXALIGN(VARHDRSZ + sizeof(uint16))
+#define LTREE_HDRSIZE	MAXALIGN( offsetof(ltree, data) )
 #define LTREE_FIRST(x)	( (ltree_level*)( ((char*)(x))+LTREE_HDRSIZE ) )
 
 
@@ -32,12 +32,12 @@ typedef struct
 typedef struct
 {
 	int4		val;
-	uint8		len;
+	uint16		len;
 	uint8		flag;
 	char		name[1];
-}	lquery_variant;
+} lquery_variant;
 
-#define LVAR_HDRSIZE   MAXALIGN(sizeof(uint8)*2 + sizeof(int4))
+#define LVAR_HDRSIZE   MAXALIGN(offsetof(lquery_variant, name))
 #define LVAR_NEXT(x)	( (lquery_variant*)( ((char*)(x)) + MAXALIGN(((lquery_variant*)(x))->len) + LVAR_HDRSIZE ) )
 
 #define LVAR_ANYEND 0x01
@@ -52,9 +52,9 @@ typedef struct
 	uint16		low;
 	uint16		high;
 	char		variants[1];
-}	lquery_level;
+} lquery_level;
 
-#define LQL_HDRSIZE MAXALIGN( sizeof(uint16)*5 )
+#define LQL_HDRSIZE MAXALIGN( offsetof(lquery_level,variants) )
 #define LQL_NEXT(x) ( (lquery_level*)( ((char*)(x)) + MAXALIGN(((lquery_level*)(x))->totallen) ) )
 #define LQL_FIRST(x)	( (lquery_variant*)( ((char*)(x))+LQL_HDRSIZE ) )
 
@@ -73,14 +73,14 @@ typedef struct
 	uint16		firstgood;
 	uint16		flag;
 	char		data[1];
-}	lquery;
+} lquery;
 
-#define LQUERY_HDRSIZE	 MAXALIGN(VARHDRSZ + 3*sizeof(uint16))
+#define LQUERY_HDRSIZE	 MAXALIGN( offsetof(lquery, data) )
 #define LQUERY_FIRST(x)   ( (lquery_level*)( ((char*)(x))+LQUERY_HDRSIZE ) )
 
 #define LQUERY_HASNOT		0x01
 
-#define ISALNUM(x)	( isalnum((unsigned char)(x)) || (x) == '_' )
+#define ISALNUM(x)	( t_isalpha(x) || t_isdigit(x)	|| ( pg_mblen(x) == 1 && t_iseq((x), '_') ) )
 
 /* full text query */
 
@@ -97,7 +97,7 @@ typedef struct ITEM
 	/* user-friendly value */
 	uint8		length;
 	uint16		distance;
-}	ITEM;
+} ITEM;
 
 /*
  *Storage:
@@ -108,7 +108,7 @@ typedef struct
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	int4		size;
 	char		data[1];
-}	ltxtquery;
+} ltxtquery;
 
 #define HDRSIZEQT		MAXALIGN(VARHDRSZ + sizeof(int4))
 #define COMPUTESIZE(size,lenofoperand)	( HDRSIZEQT + (size) * sizeof(ITEM) + (lenofoperand) )
@@ -153,14 +153,15 @@ Datum		ltree_textadd(PG_FUNCTION_ARGS);
 /* Util function */
 Datum		ltree_in(PG_FUNCTION_ARGS);
 
-bool ltree_execute(ITEM * curitem, void *checkval,
-			  bool calcnot, bool (*chkcond) (void *checkval, ITEM * val));
+bool ltree_execute(ITEM *curitem, void *checkval,
+			  bool calcnot, bool (*chkcond) (void *checkval, ITEM *val));
 
-int			ltree_compare(const ltree * a, const ltree * b);
-bool		inner_isparent(const ltree * c, const ltree * p);
-bool compare_subnode(ltree_level * t, char *q, int len,
+int			ltree_compare(const ltree *a, const ltree *b);
+bool		inner_isparent(const ltree *c, const ltree *p);
+bool compare_subnode(ltree_level *t, char *q, int len,
 			int (*cmpptr) (const char *, const char *, size_t), bool anyend);
-ltree	   *lca_inner(ltree ** a, int len);
+ltree	   *lca_inner(ltree **a, int len);
+int			ltree_strncasecmp(const char *a, const char *b, size_t s);
 
 #define PG_GETARG_LTREE(x)	((ltree*)DatumGetPointer(PG_DETOAST_DATUM(PG_GETARG_DATUM(x))))
 #define PG_GETARG_LTREE_COPY(x) ((ltree*)DatumGetPointer(PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(x))))
@@ -206,7 +207,7 @@ typedef struct
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	uint32		flag;
 	char		data[1];
-}	ltree_gist;
+} ltree_gist;
 
 #define LTG_ONENODE 0x01
 #define LTG_ALLTRUE 0x02

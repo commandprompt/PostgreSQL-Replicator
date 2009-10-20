@@ -3,7 +3,7 @@
  * bufpage.c
  *	  POSTGRES standard buffer page code.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -254,31 +254,59 @@ PageAddItem(Page page,
 
 /*
  * PageGetTempPage
- *		Get a temporary page in local memory for special processing
+ *		Get a temporary page in local memory for special processing.
+ *		The returned page is not initialized at all; caller must do that.
  */
 Page
-PageGetTempPage(Page page, Size specialSize)
+PageGetTempPage(Page page)
 {
 	Size		pageSize;
-	Size		size;
 	Page		temp;
-	PageHeader	thdr;
 
 	pageSize = PageGetPageSize(page);
 	temp = (Page) palloc(pageSize);
-	thdr = (PageHeader) temp;
 
-	/* copy old page in */
+	return temp;
+}
+
+/*
+ * PageGetTempPageCopy
+ *		Get a temporary page in local memory for special processing.
+ *		The page is initialized by copying the contents of the given page.
+ */
+Page
+PageGetTempPageCopy(Page page)
+{
+	Size		pageSize;
+	Page		temp;
+
+	pageSize = PageGetPageSize(page);
+	temp = (Page) palloc(pageSize);
+
 	memcpy(temp, page, pageSize);
 
-	/* clear out the middle */
-	size = pageSize - SizeOfPageHeaderData;
-	size -= MAXALIGN(specialSize);
-	MemSet(PageGetContents(thdr), 0, size);
+	return temp;
+}
 
-	/* set high, low water marks */
-	thdr->pd_lower = SizeOfPageHeaderData;
-	thdr->pd_upper = pageSize - MAXALIGN(specialSize);
+/*
+ * PageGetTempPageCopySpecial
+ *		Get a temporary page in local memory for special processing.
+ *		The page is PageInit'd with the same special-space size as the
+ *		given page, and the special space is copied from the given page.
+ */
+Page
+PageGetTempPageCopySpecial(Page page)
+{
+	Size		pageSize;
+	Page		temp;
+
+	pageSize = PageGetPageSize(page);
+	temp = (Page) palloc(pageSize);
+
+	PageInit(temp, pageSize, PageGetSpecialSize(page));
+	memcpy(PageGetSpecialPointer(temp),
+		   PageGetSpecialPointer(page),
+		   PageGetSpecialSize(page));
 
 	return temp;
 }
@@ -533,7 +561,7 @@ PageGetHeapFreeSpace(Page page)
 				 * Since this is just a hint, we must confirm that there is
 				 * indeed a free line pointer
 				 */
-				for (offnum = FirstOffsetNumber; offnum <= nline; offnum++)
+				for (offnum = FirstOffsetNumber; offnum <= nline; offnum = OffsetNumberNext(offnum))
 				{
 					ItemId		lp = PageGetItemId(page, offnum);
 
@@ -736,7 +764,7 @@ PageIndexMultiDelete(Page page, OffsetNumber *itemnos, int nitems)
 	totallen = 0;
 	nused = 0;
 	nextitm = 0;
-	for (offnum = 1; offnum <= nline; offnum++)
+	for (offnum = FirstOffsetNumber; offnum <= nline; offnum = OffsetNumberNext(offnum))
 	{
 		lp = PageGetItemId(page, offnum);
 		Assert(ItemIdHasStorage(lp));

@@ -4,7 +4,7 @@
  *	  PostgreSQL type definitions for ISNs (ISBN, ISMN, ISSN, EAN13, UPC)
  *
  * Copyright (c) 2004-2006, Germán Méndez Bravo (Kronuz)
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -27,8 +27,8 @@ typedef uint64 ean13;
 
 #define EAN13_FORMAT UINT64_FORMAT
 
-#define PG_GETARG_EAN13(n) PG_GETARG_INT64((int64)n)
-#define PG_RETURN_EAN13(x) PG_RETURN_INT64((int64)x)
+#define PG_GETARG_EAN13(n) PG_GETARG_INT64(n)
+#define PG_RETURN_EAN13(x) PG_RETURN_INT64(x)
 
 extern Datum isn_out(PG_FUNCTION_ARGS);
 extern Datum ean13_out(PG_FUNCTION_ARGS);

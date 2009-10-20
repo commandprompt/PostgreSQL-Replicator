@@ -5,7 +5,7 @@
  * $PostgreSQL$
  *
  *
- *	 Portions Copyright (c) 1999-2008, PostgreSQL Global Development Group
+ *	 Portions Copyright (c) 1999-2009, PostgreSQL Global Development Group
  *
  *	 The PostgreSQL routines for a DateTime/int/float/numeric formatting,
  *	 inspire with Oracle TO_CHAR() / TO_DATE() / TO_NUMBER() routines.
@@ -20,6 +20,10 @@
 
 #include "fmgr.h"
 
+
+extern char *str_tolower(const char *buff, size_t nbytes);
+extern char *str_toupper(const char *buff, size_t nbytes);
+extern char *str_initcap(const char *buff, size_t nbytes);
 
 extern Datum timestamp_to_char(PG_FUNCTION_ARGS);
 extern Datum timestamptz_to_char(PG_FUNCTION_ARGS);

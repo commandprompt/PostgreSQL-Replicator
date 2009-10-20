@@ -2,7 +2,7 @@
  *
  * pg_ctl --- start/stops/restarts the PostgreSQL server
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
@@ -33,6 +33,7 @@
 
 #include "libpq/pqsignal.h"
 #include "getopt_long.h"
+#include "miscadmin.h"
 
 #if defined(__CYGWIN__)
 #include <sys/cygwin.h>
@@ -41,16 +42,8 @@
 #undef WIN32
 #endif
 
-#ifndef HAVE_INT_OPTRESET
-int			optreset;
-#endif
-
 /* PID can be negative for standalone backend */
 typedef long pgpid_t;
-
-
-/* postgres version ident string */
-#define PM_VERSIONSTR "postgres (PostgreSQL) " PG_VERSION "\n"
 
 
 typedef enum
@@ -124,7 +117,7 @@ static void pgwin32_SetServiceStatus(DWORD);
 static void WINAPI pgwin32_ServiceHandler(DWORD);
 static void WINAPI pgwin32_ServiceMain(DWORD, LPTSTR *);
 static void pgwin32_doRunAsService(void);
-static int	CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION * processInfo, bool as_service);
+static int	CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_service);
 
 static SERVICE_STATUS status;
 static SERVICE_STATUS_HANDLE hStatus = (SERVICE_STATUS_HANDLE) 0;
@@ -143,10 +136,10 @@ static void read_post_opts(void);
 static bool test_postmaster_connection(bool);
 static bool postmaster_is_alive(pid_t pid);
 
-static char def_postopts_file[MAXPGPATH];
 static char postopts_file[MAXPGPATH];
 static char pid_file[MAXPGPATH];
 static char conf_file[MAXPGPATH];
+static char backup_file[MAXPGPATH];
 
 #if defined(HAVE_GETRLIMIT) && defined(RLIMIT_CORE)
 static void unlimit_core_size(void);
@@ -364,13 +357,12 @@ start_postmaster(void)
 	 * everything to a shell to process them.
 	 */
 	if (log_file != NULL)
-		snprintf(cmd, MAXPGPATH, "%s\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1 &%s",
-				 SYSTEMQUOTE, postgres_path, pgdata_opt, post_opts,
-				 DEVNULL, log_file, SYSTEMQUOTE);
+		snprintf(cmd, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1 &" SYSTEMQUOTE,
+				 postgres_path, pgdata_opt, post_opts,
+				 DEVNULL, log_file);
 	else
-		snprintf(cmd, MAXPGPATH, "%s\"%s\" %s%s < \"%s\" 2>&1 &%s",
-				 SYSTEMQUOTE, postgres_path, pgdata_opt, post_opts,
-				 DEVNULL, SYSTEMQUOTE);
+		snprintf(cmd, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s < \"%s\" 2>&1 &" SYSTEMQUOTE,
+				 postgres_path, pgdata_opt, post_opts, DEVNULL);
 
 	return system(cmd);
 #else							/* WIN32 */
@@ -383,13 +375,11 @@ start_postmaster(void)
 	PROCESS_INFORMATION pi;
 
 	if (log_file != NULL)
-		snprintf(cmd, MAXPGPATH, "CMD /C %s\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1%s",
-				 SYSTEMQUOTE, postgres_path, pgdata_opt, post_opts,
-				 DEVNULL, log_file, SYSTEMQUOTE);
+		snprintf(cmd, MAXPGPATH, "CMD /C " SYSTEMQUOTE "\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1" SYSTEMQUOTE,
+				 postgres_path, pgdata_opt, post_opts, DEVNULL, log_file);
 	else
-		snprintf(cmd, MAXPGPATH, "CMD /C %s\"%s\" %s%s < \"%s\" 2>&1%s",
-				 SYSTEMQUOTE, postgres_path, pgdata_opt, post_opts,
-				 DEVNULL, SYSTEMQUOTE);
+		snprintf(cmd, MAXPGPATH, "CMD /C " SYSTEMQUOTE "\"%s\" %s%s < \"%s\" 2>&1" SYSTEMQUOTE,
+				 postgres_path, pgdata_opt, post_opts, DEVNULL);
 
 	if (!CreateRestrictedProcess(cmd, &pi, false))
 		return GetLastError();
@@ -422,10 +412,10 @@ test_postmaster_connection(bool do_checkpoint)
 	/*
 	 * Look in post_opts for a -p switch.
 	 *
-	 * This parsing code is not amazingly bright; it could for instance
-	 * get fooled if ' -p' occurs within a quoted argument value.  Given
-	 * that few people pass complicated settings in post_opts, it's
-	 * probably good enough.
+	 * This parsing code is not amazingly bright; it could for instance get
+	 * fooled if ' -p' occurs within a quoted argument value.  Given that few
+	 * people pass complicated settings in post_opts, it's probably good
+	 * enough.
 	 */
 	for (p = post_opts; *p;)
 	{
@@ -457,8 +447,8 @@ test_postmaster_connection(bool do_checkpoint)
 	/*
 	 * Search config file for a 'port' option.
 	 *
-	 * This parsing code isn't amazingly bright either, but it should be
-	 * okay for valid port settings.
+	 * This parsing code isn't amazingly bright either, but it should be okay
+	 * for valid port settings.
 	 */
 	if (!*portstr)
 	{
@@ -538,7 +528,7 @@ test_postmaster_connection(bool do_checkpoint)
 				 */
 				status.dwWaitHint += 6000;
 				status.dwCheckPoint++;
-				SetServiceStatus(hStatus, (LPSERVICE_STATUS) & status);
+				SetServiceStatus(hStatus, (LPSERVICE_STATUS) &status);
 			}
 
 			else
@@ -577,60 +567,49 @@ unlimit_core_size(void)
 static void
 read_post_opts(void)
 {
-	char	   *optline = NULL;
-
 	if (post_opts == NULL)
 	{
-		char	  **optlines;
-		int			len;
-
-		optlines = readfile(ctl_command == RESTART_COMMAND ?
-							postopts_file : def_postopts_file);
-		if (optlines == NULL)
+		post_opts = "";			/* default */
+		if (ctl_command == RESTART_COMMAND)
 		{
-			if (ctl_command == START_COMMAND || ctl_command == RUN_AS_SERVICE_COMMAND)
-				post_opts = "";
-			else
+			char	  **optlines;
+
+			optlines = readfile(postopts_file);
+			if (optlines == NULL)
 			{
 				write_stderr(_("%s: could not read file \"%s\"\n"), progname, postopts_file);
 				exit(1);
 			}
-		}
-		else if (optlines[0] == NULL || optlines[1] != NULL)
-		{
-			write_stderr(_("%s: option file \"%s\" must have exactly one line\n"),
-						 progname, ctl_command == RESTART_COMMAND ?
-						 postopts_file : def_postopts_file);
-			exit(1);
-		}
-		else
-		{
-			optline = optlines[0];
-			len = strcspn(optline, "\r\n");
-			optline[len] = '\0';
-
-			if (ctl_command == RESTART_COMMAND)
+			else if (optlines[0] == NULL || optlines[1] != NULL)
 			{
+				write_stderr(_("%s: option file \"%s\" must have exactly one line\n"),
+							 progname, postopts_file);
+				exit(1);
+			}
+			else
+			{
+				int			len;
+				char	   *optline;
 				char	   *arg1;
+
+				optline = optlines[0];
+				/* trim off line endings */
+				len = strcspn(optline, "\r\n");
+				optline[len] = '\0';
 
 				/*
 				 * Are we at the first option, as defined by space and
 				 * double-quote?
 				 */
-				if ((arg1 = strstr(optline, " \"")) != NULL ||
-					/* check in case this is an older server */
-				    (arg1 = strstr(optline, " -")) != NULL)
+				if ((arg1 = strstr(optline, " \"")) != NULL)
 				{
-					*arg1 = '\0';	/* terminate so we get only program name */
-					post_opts = arg1 + 1; /* point past whitespace */
+					*arg1 = '\0';		/* terminate so we get only program
+										 * name */
+					post_opts = arg1 + 1;		/* point past whitespace */
 				}
-				else
-					post_opts = "";
 				if (postgres_path == NULL)
 					postgres_path = optline;
 			}
-			else
-				post_opts = optline;
 		}
 	}
 }
@@ -664,7 +643,7 @@ do_start(void)
 
 		postmaster_path = pg_malloc(MAXPGPATH);
 
-		if ((ret = find_other_exec(argv0, "postgres", PM_VERSIONSTR,
+		if ((ret = find_other_exec(argv0, "postgres", PG_BACKEND_VERSIONSTR,
 								   postmaster_path)) < 0)
 		{
 			char		full_path[MAXPGPATH];
@@ -739,6 +718,7 @@ do_stop(void)
 {
 	int			cnt;
 	pgpid_t		pid;
+	struct stat statbuf;
 
 	pid = get_pgpid();
 
@@ -771,6 +751,12 @@ do_stop(void)
 	}
 	else
 	{
+		if ((shutdown_mode == SMART_MODE) && (stat(backup_file, &statbuf) == 0))
+		{
+			print_msg(_("WARNING: online backup mode is active\n"
+						"Shutdown will not complete until pg_stop_backup() is called.\n\n"));
+		}
+
 		print_msg(_("waiting for server to shut down..."));
 
 		for (cnt = 0; cnt < wait_seconds; cnt++)
@@ -807,6 +793,7 @@ do_restart(void)
 {
 	int			cnt;
 	pgpid_t		pid;
+	struct stat statbuf;
 
 	pid = get_pgpid();
 
@@ -839,6 +826,12 @@ do_restart(void)
 			write_stderr(_("%s: could not send stop signal (PID: %ld): %s\n"), progname, pid,
 						 strerror(errno));
 			exit(1);
+		}
+
+		if ((shutdown_mode == SMART_MODE) && (stat(backup_file, &statbuf) == 0))
+		{
+			print_msg(_("WARNING: online backup mode is active\n"
+						"Shutdown will not complete until pg_stop_backup() is called.\n\n"));
 		}
 
 		print_msg(_("waiting for server to shut down..."));
@@ -1025,7 +1018,8 @@ pgwin32_CommandLine(bool registration)
 	}
 	else
 	{
-		ret = find_other_exec(argv0, "postgres", PM_VERSIONSTR, cmdLine);
+		ret = find_other_exec(argv0, "postgres", PG_BACKEND_VERSIONSTR,
+							  cmdLine);
 		if (ret != 0)
 		{
 			write_stderr(_("%s: could not find postgres program executable\n"), progname);
@@ -1149,7 +1143,7 @@ static void
 pgwin32_SetServiceStatus(DWORD currentState)
 {
 	status.dwCurrentState = currentState;
-	SetServiceStatus(hStatus, (LPSERVICE_STATUS) & status);
+	SetServiceStatus(hStatus, (LPSERVICE_STATUS) &status);
 }
 
 static void WINAPI
@@ -1185,7 +1179,7 @@ pgwin32_ServiceHandler(DWORD request)
 }
 
 static void WINAPI
-pgwin32_ServiceMain(DWORD argc, LPTSTR * argv)
+pgwin32_ServiceMain(DWORD argc, LPTSTR *argv)
 {
 	PROCESS_INFORMATION pi;
 	DWORD		ret;
@@ -1293,12 +1287,12 @@ pgwin32_doRunAsService(void)
  * also load the couple of functions that *do* exist in minwg headers but not
  * on NT4. That way, we don't break on NT4.
  */
-typedef		BOOL(WINAPI * __CreateRestrictedToken) (HANDLE, DWORD, DWORD, PSID_AND_ATTRIBUTES, DWORD, PLUID_AND_ATTRIBUTES, DWORD, PSID_AND_ATTRIBUTES, PHANDLE);
-typedef		BOOL(WINAPI * __IsProcessInJob) (HANDLE, HANDLE, PBOOL);
-typedef		HANDLE(WINAPI * __CreateJobObject) (LPSECURITY_ATTRIBUTES, LPCTSTR);
-typedef		BOOL(WINAPI * __SetInformationJobObject) (HANDLE, JOBOBJECTINFOCLASS, LPVOID, DWORD);
-typedef		BOOL(WINAPI * __AssignProcessToJobObject) (HANDLE, HANDLE);
-typedef		BOOL(WINAPI * __QueryInformationJobObject) (HANDLE, JOBOBJECTINFOCLASS, LPVOID, DWORD, LPDWORD);
+typedef BOOL (WINAPI * __CreateRestrictedToken) (HANDLE, DWORD, DWORD, PSID_AND_ATTRIBUTES, DWORD, PLUID_AND_ATTRIBUTES, DWORD, PSID_AND_ATTRIBUTES, PHANDLE);
+typedef BOOL (WINAPI * __IsProcessInJob) (HANDLE, HANDLE, PBOOL);
+typedef HANDLE (WINAPI * __CreateJobObject) (LPSECURITY_ATTRIBUTES, LPCTSTR);
+typedef BOOL (WINAPI * __SetInformationJobObject) (HANDLE, JOBOBJECTINFOCLASS, LPVOID, DWORD);
+typedef BOOL (WINAPI * __AssignProcessToJobObject) (HANDLE, HANDLE);
+typedef BOOL (WINAPI * __QueryInformationJobObject) (HANDLE, JOBOBJECTINFOCLASS, LPVOID, DWORD, LPDWORD);
 
 /* Windows API define missing from MingW headers */
 #define DISABLE_MAX_PRIVILEGE	0x1
@@ -1316,7 +1310,7 @@ typedef		BOOL(WINAPI * __QueryInformationJobObject) (HANDLE, JOBOBJECTINFOCLASS,
  * automatically destroyed when pg_ctl exits.
  */
 static int
-CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION * processInfo, bool as_service)
+CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_service)
 {
 	int			r;
 	BOOL		b;
@@ -1471,11 +1465,13 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION * processInfo, bool as_se
 						osv.dwOSVersionInfoSize = sizeof(osv);
 						if (!GetVersionEx(&osv) ||
 							osv.dwMajorVersion < 6 ||
-							(osv.dwMajorVersion == 6 && osv.dwMinorVersion == 0))
+						(osv.dwMajorVersion == 6 && osv.dwMinorVersion == 0))
 						{
 							/*
-							 * On Windows 7 (and presumably later), JOB_OBJECT_UILIMIT_HANDLES prevents us from
-							 * starting as a service. So we only enable it on Vista and earlier (version <= 6.0)
+							 * On Windows 7 (and presumably later),
+							 * JOB_OBJECT_UILIMIT_HANDLES prevents us from
+							 * starting as a service. So we only enable it on
+							 * Vista and earlier (version <= 6.0)
 							 */
 							uiRestrictions.UIRestrictionsClass |= JOB_OBJECT_UILIMIT_HANDLES;
 						}
@@ -1493,9 +1489,9 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION * processInfo, bool as_se
 	}
 
 #ifndef __CYGWIN__
-    AddUserToDacl(processInfo->hProcess);
+	AddUserToDacl(processInfo->hProcess);
 #endif
-    
+
 	CloseHandle(restrictedToken);
 
 	ResumeThread(processInfo->hThread);
@@ -1527,7 +1523,7 @@ do_help(void)
 	printf(_("  %s start   [-w] [-t SECS] [-D DATADIR] [-s] [-l FILENAME] [-o \"OPTIONS\"]\n"), progname);
 	printf(_("  %s stop    [-W] [-t SECS] [-D DATADIR] [-s] [-m SHUTDOWN-MODE]\n"), progname);
 	printf(_("  %s restart [-w] [-t SECS] [-D DATADIR] [-s] [-m SHUTDOWN-MODE]\n"
-		 "                 [-o \"OPTIONS\"]\n"), progname);
+			 "                 [-o \"OPTIONS\"]\n"), progname);
 	printf(_("  %s reload  [-D DATADIR] [-s]\n"), progname);
 	printf(_("  %s status  [-D DATADIR]\n"), progname);
 	printf(_("  %s kill    SIGNALNAME PID\n"), progname);
@@ -1549,15 +1545,15 @@ do_help(void)
 	printf(_("If the -D option is omitted, the environment variable PGDATA is used.\n"));
 
 	printf(_("\nOptions for start or restart:\n"));
-	printf(_("  -l, --log FILENAME     write (or append) server log to FILENAME\n"));
-	printf(_("  -o OPTIONS             command line options to pass to postgres\n"
-			 "                         (PostgreSQL server executable)\n"));
-	printf(_("  -p PATH-TO-POSTGRES    normally not necessary\n"));
 #if defined(HAVE_GETRLIMIT) && defined(RLIMIT_CORE)
 	printf(_("  -c, --core-files       allow postgres to produce core files\n"));
 #else
 	printf(_("  -c, --core-files       not applicable on this platform\n"));
 #endif
+	printf(_("  -l, --log FILENAME     write (or append) server log to FILENAME\n"));
+	printf(_("  -o OPTIONS             command line options to pass to postgres\n"
+			 "                         (PostgreSQL server executable)\n"));
+	printf(_("  -p PATH-TO-POSTGRES    normally not necessary\n"));
 	printf(_("\nOptions for stop or restart:\n"));
 	printf(_("  -m SHUTDOWN-MODE   can be \"smart\", \"fast\", or \"immediate\"\n"));
 
@@ -1667,7 +1663,7 @@ main(int argc, char **argv)
 #endif
 
 	progname = get_progname(argv[0]);
-	set_pglocale_pgservice(argv[0], "pg_ctl");
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_ctl"));
 
 	/*
 	 * save argv[0] so do_start() can look for the postmaster if necessary. we
@@ -1902,10 +1898,10 @@ main(int argc, char **argv)
 
 	if (pg_data)
 	{
-		snprintf(def_postopts_file, MAXPGPATH, "%s/postmaster.opts.default", pg_data);
 		snprintf(postopts_file, MAXPGPATH, "%s/postmaster.opts", pg_data);
 		snprintf(pid_file, MAXPGPATH, "%s/postmaster.pid", pg_data);
 		snprintf(conf_file, MAXPGPATH, "%s/postgresql.conf", pg_data);
+		snprintf(backup_file, MAXPGPATH, "%s/backup_label", pg_data);
 	}
 
 	switch (ctl_command)

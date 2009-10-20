@@ -9,7 +9,7 @@
  * shorn of features like subselects, inheritance, aggregates, grouping,
  * and so on.  (Those are the things planner.c deals with.)
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -23,6 +23,7 @@
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/placeholder.h"
 #include "optimizer/planmain.h"
 #include "optimizer/tlist.h"
 #include "utils/selfuncs.h"
@@ -66,9 +67,9 @@
  * PlannerInfo field and not a passed parameter is that the low-level routines
  * in indxpath.c need to see it.)
  *
- * Note: the PlannerInfo node also includes group_pathkeys and sort_pathkeys,
- * which like query_pathkeys need to be canonicalized once the info is
- * available.
+ * Note: the PlannerInfo node also includes group_pathkeys, window_pathkeys,
+ * distinct_pathkeys, and sort_pathkeys, which like query_pathkeys need to be
+ * canonicalized once the info is available.
  *
  * tuple_fraction is interpreted as follows:
  *	  0: expect all tuples to be retrieved (normal case)
@@ -120,6 +121,10 @@ query_planner(PlannerInfo *root, List *tlist,
 													 root->query_pathkeys);
 		root->group_pathkeys = canonicalize_pathkeys(root,
 													 root->group_pathkeys);
+		root->window_pathkeys = canonicalize_pathkeys(root,
+													  root->window_pathkeys);
+		root->distinct_pathkeys = canonicalize_pathkeys(root,
+													root->distinct_pathkeys);
 		root->sort_pathkeys = canonicalize_pathkeys(root,
 													root->sort_pathkeys);
 		return;
@@ -129,8 +134,8 @@ query_planner(PlannerInfo *root, List *tlist,
 	 * Init planner lists to empty, and set up the array to hold RelOptInfos
 	 * for "simple" rels.
 	 *
-	 * NOTE: in_info_list and append_rel_list were set up by subquery_planner,
-	 * do not touch here; eq_classes may contain data already, too.
+	 * NOTE: append_rel_list was set up by subquery_planner, so do not touch
+	 * here; eq_classes may contain data already, too.
 	 */
 	root->simple_rel_array_size = list_length(parse->rtable) + 1;
 	root->simple_rel_array = (RelOptInfo **)
@@ -141,7 +146,8 @@ query_planner(PlannerInfo *root, List *tlist,
 	root->left_join_clauses = NIL;
 	root->right_join_clauses = NIL;
 	root->full_join_clauses = NIL;
-	root->oj_info_list = NIL;
+	root->join_info_list = NIL;
+	root->placeholder_list = NIL;
 	root->initial_rels = NIL;
 
 	/*
@@ -202,23 +208,10 @@ query_planner(PlannerInfo *root, List *tlist,
 	 * added to appropriate lists belonging to the mentioned relations.  We
 	 * also build EquivalenceClasses for provably equivalent expressions, and
 	 * form a target joinlist for make_one_rel() to work from.
-	 *
-	 * Note: all subplan nodes will have "flat" (var-only) tlists. This
-	 * implies that all expression evaluations are done at the root of the
-	 * plan tree. Once upon a time there was code to try to push expensive
-	 * function calls down to lower plan nodes, but that's dead code and has
-	 * been for a long time...
 	 */
 	build_base_rel_tlists(root, tlist);
 
 	joinlist = deconstruct_jointree(root);
-
-	/*
-	 * Vars mentioned in InClauseInfo items also have to be added to baserel
-	 * targetlists.  Nearly always, they'd have got there from the original
-	 * WHERE qual, but in corner cases maybe not.
-	 */
-	add_IN_vars_to_tlists(root);
 
 	/*
 	 * Reconsider any postponed outer-join quals now that we have built up
@@ -237,11 +230,21 @@ query_planner(PlannerInfo *root, List *tlist,
 	/*
 	 * We have completed merging equivalence sets, so it's now possible to
 	 * convert the requested query_pathkeys to canonical form.	Also
-	 * canonicalize the groupClause and sortClause pathkeys for use later.
+	 * canonicalize the groupClause, windowClause, distinctClause and
+	 * sortClause pathkeys for use later.
 	 */
 	root->query_pathkeys = canonicalize_pathkeys(root, root->query_pathkeys);
 	root->group_pathkeys = canonicalize_pathkeys(root, root->group_pathkeys);
+	root->window_pathkeys = canonicalize_pathkeys(root, root->window_pathkeys);
+	root->distinct_pathkeys = canonicalize_pathkeys(root, root->distinct_pathkeys);
 	root->sort_pathkeys = canonicalize_pathkeys(root, root->sort_pathkeys);
+
+	/*
+	 * Examine any "placeholder" expressions generated during subquery pullup.
+	 * Make sure that we know what level to evaluate them at, and that the
+	 * Vars they need are marked as needed.
+	 */
+	fix_placeholder_eval_levels(root);
 
 	/*
 	 * Ready to do the primary planning.
@@ -286,10 +289,13 @@ query_planner(PlannerInfo *root, List *tlist,
 		/*
 		 * If both GROUP BY and ORDER BY are specified, we will need two
 		 * levels of sort --- and, therefore, certainly need to read all the
-		 * tuples --- unless ORDER BY is a subset of GROUP BY.
+		 * tuples --- unless ORDER BY is a subset of GROUP BY.	Likewise if we
+		 * have both DISTINCT and GROUP BY, or if we have a window
+		 * specification not compatible with the GROUP BY.
 		 */
-		if (parse->groupClause && parse->sortClause &&
-			!pathkeys_contained_in(root->sort_pathkeys, root->group_pathkeys))
+		if (!pathkeys_contained_in(root->sort_pathkeys, root->group_pathkeys) ||
+			!pathkeys_contained_in(root->distinct_pathkeys, root->group_pathkeys) ||
+		 !pathkeys_contained_in(root->window_pathkeys, root->group_pathkeys))
 			tuple_fraction = 0.0;
 	}
 	else if (parse->hasAggs || root->hasHavingQual)

@@ -3,7 +3,7 @@
  * ts_utils.c
  *		various support functions
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -151,14 +151,4 @@ searchstoplist(StopList *s, char *key)
 	return (s->stop && s->len > 0 &&
 			bsearch(&key, s->stop, s->len,
 					sizeof(char *), comparestr)) ? true : false;
-}
-
-char *
-pnstrdup(const char *in, int len)
-{
-	char	   *out = palloc(len + 1);
-
-	memcpy(out, in, len);
-	out[len] = '\0';
-	return out;
 }

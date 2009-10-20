@@ -4,7 +4,7 @@
  *	  prototypes for planner.c.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -29,8 +29,12 @@ extern PlannedStmt *planner(Query *parse, int cursorOptions,
 		ParamListInfo boundParams);
 extern PlannedStmt *standard_planner(Query *parse, int cursorOptions,
 				 ParamListInfo boundParams);
+
 extern Plan *subquery_planner(PlannerGlobal *glob, Query *parse,
-				 Index level, double tuple_fraction,
+				 PlannerInfo *parent_root,
+				 bool hasRecursion, double tuple_fraction,
 				 PlannerInfo **subroot);
+
+extern Expr *expression_planner(Expr *expr);
 
 #endif   /* PLANNER_H */

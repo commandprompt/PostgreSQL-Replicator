@@ -170,7 +170,7 @@ CLOSE foo12;
 
 -- record this in the system view as well (don't query the time field there
 -- however)
-SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors;
+SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors ORDER BY 1;
 
 END;
 
@@ -295,7 +295,7 @@ drop function count_tt1_s();
 BEGIN;
 SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors;
 DECLARE bc BINARY CURSOR FOR SELECT * FROM tenk1;
-SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors;
+SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors ORDER BY 1;
 ROLLBACK;
 
 -- We should not see the portal that is created internally to
@@ -393,7 +393,7 @@ INSERT INTO ucchild values(100, 'hundred');
 SELECT * FROM uctest;
 
 BEGIN;
-DECLARE c1 CURSOR FOR SELECT * FROM uctest;
+DECLARE c1 CURSOR FOR SELECT * FROM uctest FOR UPDATE;
 FETCH 1 FROM c1;
 UPDATE uctest SET f1 = f1 + 10 WHERE CURRENT OF c1;
 FETCH 1 FROM c1;
@@ -404,6 +404,24 @@ FETCH 1 FROM c1;
 COMMIT;
 SELECT * FROM uctest;
 
+-- Can update from a self-join, but only if FOR UPDATE says which to use
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT * FROM uctest a, uctest b WHERE a.f1 = b.f1 + 5;
+FETCH 1 FROM c1;
+UPDATE uctest SET f1 = f1 + 10 WHERE CURRENT OF c1;  -- fail
+ROLLBACK;
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT * FROM uctest a, uctest b WHERE a.f1 = b.f1 + 5 FOR UPDATE;
+FETCH 1 FROM c1;
+UPDATE uctest SET f1 = f1 + 10 WHERE CURRENT OF c1;  -- fail
+ROLLBACK;
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT * FROM uctest a, uctest b WHERE a.f1 = b.f1 + 5 FOR SHARE OF a;
+FETCH 1 FROM c1;
+UPDATE uctest SET f1 = f1 + 10 WHERE CURRENT OF c1;
+SELECT * FROM uctest;
+ROLLBACK;
+
 -- Check various error cases
 
 DELETE FROM uctest WHERE CURRENT OF c1;  -- fail, no such cursor
@@ -411,6 +429,10 @@ DECLARE cx CURSOR WITH HOLD FOR SELECT * FROM uctest;
 DELETE FROM uctest WHERE CURRENT OF cx;  -- fail, can't use held cursor
 BEGIN;
 DECLARE c CURSOR FOR SELECT * FROM tenk2;
+DELETE FROM uctest WHERE CURRENT OF c;  -- fail, cursor on wrong table
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM tenk2 FOR SHARE;
 DELETE FROM uctest WHERE CURRENT OF c;  -- fail, cursor on wrong table
 ROLLBACK;
 BEGIN;
@@ -436,3 +458,15 @@ DECLARE c1 CURSOR FOR SELECT * FROM ucview;
 FETCH FROM c1;
 DELETE FROM ucview WHERE CURRENT OF c1; -- fail, views not supported
 ROLLBACK;
+
+-- Make sure snapshot management works okay, per bug report in
+-- 235395b90909301035v7228ce63q392931f15aa74b31@mail.gmail.com
+BEGIN; 
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; 
+CREATE TABLE cursor (a int); 
+INSERT INTO cursor VALUES (1); 
+DECLARE c1 NO SCROLL CURSOR FOR SELECT * FROM cursor FOR UPDATE; 
+UPDATE cursor SET a = 2; 
+FETCH ALL FROM c1; 
+COMMIT; 
+DROP TABLE cursor;

@@ -4,7 +4,7 @@
  *	  Public interface to various tsearch modules, such as
  *	  parsers and dictionaries.
  *
- * Copyright (c) 1998-2008, PostgreSQL Global Development Group
+ * Copyright (c) 1998-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
@@ -53,8 +53,10 @@ typedef struct
 	int4		curwords;
 	char	   *startsel;
 	char	   *stopsel;
+	char	   *fragdelim;
 	int2		startsellen;
 	int2		stopsellen;
+	int2		fragdelimlen;
 } HeadlineParsedText;
 
 /*
@@ -62,8 +64,6 @@ typedef struct
  */
 extern char *get_tsearch_config_filename(const char *basename,
 							const char *extension);
-
-extern char *pnstrdup(const char *in, int len);
 
 /*
  * Often useful stopword list management
@@ -100,6 +100,7 @@ typedef struct
 } TSLexeme;
 
 #define TSL_ADDPOS		0x01
+#define TSL_PREFIX		0x02
 
 /*
  * Struct for supporting complex dictionaries like thesaurus.

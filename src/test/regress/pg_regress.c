@@ -8,7 +8,7 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -47,6 +47,10 @@ typedef struct _resultmap
  * out where "make install" will put stuff under the temp_install directory.
  * In non-temp_install mode, the only thing we need is the location of psql,
  * which we expect to find in psqldir, or in the PATH if psqldir isn't given.
+ *
+ * XXX Because pg_regress is not installed in bindir, we can't support
+ * this for relocatable trees as it is.  --psqldir would need to be
+ * specified in those cases.
  */
 char	   *bindir = PGBINDIR;
 char	   *libdir = LIBDIR;
@@ -70,7 +74,7 @@ _stringlist *dblist = NULL;
 bool		debug = false;
 char	   *inputdir = ".";
 char	   *outputdir = ".";
-char	   *psqldir = NULL;
+char	   *psqldir = PGBINDIR;
 static _stringlist *loadlanguage = NULL;
 static int	max_connections = 0;
 static char *encoding = NULL;
@@ -79,12 +83,12 @@ static _stringlist *extra_tests = NULL;
 static char *temp_install = NULL;
 static char *temp_config = NULL;
 static char *top_builddir = NULL;
-static int	temp_port = 65432;
 static bool nolocale = false;
 static char *hostname = NULL;
 static int	port = -1;
+static bool port_specified_by_user = false;
+static char *dlpath = PKGLIBDIR;
 static char *user = NULL;
-static char *srcdir = NULL;
 static _stringlist *extraroles = NULL;
 
 /* internal variables */
@@ -122,7 +126,7 @@ psql_command(const char *database, const char *query,...)
 __attribute__((format(printf, 2, 3)));
 
 #ifdef WIN32
-typedef		BOOL(WINAPI * __CreateRestrictedToken) (HANDLE, DWORD, DWORD, PSID_AND_ATTRIBUTES, DWORD, PLUID_AND_ATTRIBUTES, DWORD, PSID_AND_ATTRIBUTES, PHANDLE);
+typedef BOOL (WINAPI * __CreateRestrictedToken) (HANDLE, DWORD, DWORD, PSID_AND_ATTRIBUTES, DWORD, PLUID_AND_ATTRIBUTES, DWORD, PSID_AND_ATTRIBUTES, PHANDLE);
 
 /* Windows API define missing from MingW headers */
 #define DISABLE_MAX_PRIVILEGE	0x1
@@ -141,7 +145,7 @@ unlimit_core_size(void)
 	if (lim.rlim_max == 0)
 	{
 		fprintf(stderr,
-				_("%s: cannot set core size,: disallowed by hard limit.\n"),
+				_("%s: could not set core size: disallowed by hard limit\n"),
 				progname);
 		return;
 	}
@@ -267,6 +271,7 @@ stop_postmaster(void)
 	{
 		/* We use pg_ctl to issue the kill and wait for stop */
 		char		buf[MAXPGPATH * 2];
+		int			r;
 
 		/* On Windows, system() seems not to force fflush, so... */
 		fflush(stdout);
@@ -275,7 +280,14 @@ stop_postmaster(void)
 		snprintf(buf, sizeof(buf),
 				 SYSTEMQUOTE "\"%s/pg_ctl\" stop -D \"%s/data\" -s -m fast" SYSTEMQUOTE,
 				 bindir, temp_install);
-		system(buf);			/* ignore exit status */
+		r = system(buf);
+		if (r != 0)
+		{
+			fprintf(stderr, _("\n%s: could not stop postmaster: exit code was %d\n"),
+					progname, r);
+			exit(2);			/* not exit_nicely(), that would be recursive */
+		}
+
 		postmaster_running = false;
 	}
 }
@@ -391,47 +403,25 @@ replace_string(char *string, char *replace, char *replacement)
  * the given suffix.
  */
 static void
-convert_sourcefiles_in(char *source, char *dest, char *suffix)
+convert_sourcefiles_in(char *source_subdir, char *dest_subdir, char *suffix)
 {
-	char		abs_srcdir[MAXPGPATH];
-	char		abs_builddir[MAXPGPATH];
 	char		testtablespace[MAXPGPATH];
 	char		indir[MAXPGPATH];
-	struct stat	st;
+	struct stat st;
 	int			ret;
 	char	  **name;
 	char	  **names;
 	int			count = 0;
 
-#ifdef WIN32
-	char	   *c;
-#endif
-
-	if (!getcwd(abs_builddir, sizeof(abs_builddir)))
-	{
-		fprintf(stderr, _("%s: could not get current directory: %s\n"),
-				progname, strerror(errno));
-		exit_nicely(2);
-	}
-
-	/*
-	 * in a VPATH build, use the provided source directory; otherwise, use the
-	 * current directory.
-	 */
-	if (srcdir)
-		strlcpy(abs_srcdir, srcdir, MAXPGPATH);
-	else
-		strlcpy(abs_srcdir, abs_builddir, MAXPGPATH);
-
-	snprintf(indir, MAXPGPATH, "%s/%s", abs_srcdir, source);
+	snprintf(indir, MAXPGPATH, "%s/%s", inputdir, source_subdir);
 
 	/* Check that indir actually exists and is a directory */
 	ret = stat(indir, &st);
 	if (ret != 0 || !S_ISDIR(st.st_mode))
 	{
 		/*
-		 * No warning, to avoid noise in tests that do not have
-		 * these directories; for example, ecpg, contrib and src/pl.
+		 * No warning, to avoid noise in tests that do not have these
+		 * directories; for example, ecpg, contrib and src/pl.
 		 */
 		return;
 	}
@@ -441,24 +431,15 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 		/* Error logged in pgfnames */
 		exit_nicely(2);
 
-#ifdef WIN32
-	/* in Win32, replace backslashes with forward slashes */
-	for (c = abs_builddir; *c; c++)
-		if (*c == '\\')
-			*c = '/';
-	for (c = abs_srcdir; *c; c++)
-		if (*c == '\\')
-			*c = '/';
-#endif
-
-	snprintf(testtablespace, MAXPGPATH, "%s/testtablespace", abs_builddir);
+	snprintf(testtablespace, MAXPGPATH, "%s/testtablespace", outputdir);
 
 #ifdef WIN32
+
 	/*
 	 * On Windows only, clean out the test tablespace dir, or create it if it
-	 * doesn't exist.  On other platforms we expect the Makefile to take
-	 * care of that.  (We don't migrate that functionality in here because
-	 * it'd be harder to cope with platform-specific issues such as SELinux.)
+	 * doesn't exist.  On other platforms we expect the Makefile to take care
+	 * of that.  (We don't migrate that functionality in here because it'd be
+	 * harder to cope with platform-specific issues such as SELinux.)
 	 *
 	 * XXX it would be better if pg_regress.c had nothing at all to do with
 	 * testtablespace, and this were handled by a .BAT file or similar on
@@ -490,7 +471,7 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 		/* build the full actual paths to open */
 		snprintf(prefix, strlen(*name) - 6, "%s", *name);
 		snprintf(srcfile, MAXPGPATH, "%s/%s", indir, *name);
-		snprintf(destfile, MAXPGPATH, "%s/%s.%s", dest, prefix, suffix);
+		snprintf(destfile, MAXPGPATH, "%s/%s.%s", dest_subdir, prefix, suffix);
 
 		infile = fopen(srcfile, "r");
 		if (!infile)
@@ -508,9 +489,10 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 		}
 		while (fgets(line, sizeof(line), infile))
 		{
-			replace_string(line, "@abs_srcdir@", abs_srcdir);
-			replace_string(line, "@abs_builddir@", abs_builddir);
+			replace_string(line, "@abs_srcdir@", inputdir);
+			replace_string(line, "@abs_builddir@", outputdir);
 			replace_string(line, "@testtablespace@", testtablespace);
+			replace_string(line, "@libdir@", dlpath);
 			replace_string(line, "@DLSUFFIX@", DLSUFFIX);
 			fputs(line, outfile);
 		}
@@ -520,11 +502,11 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 
 	/*
 	 * If we didn't process any files, complain because it probably means
-	 * somebody neglected to pass the needed --srcdir argument.
+	 * somebody neglected to pass the needed --inputdir argument.
 	 */
 	if (count <= 0)
 	{
-		fprintf(stderr, _("%s: no *.source files found in %s\n"),
+		fprintf(stderr, _("%s: no *.source files found in \"%s\"\n"),
 				progname, indir);
 		exit_nicely(2);
 	}
@@ -705,22 +687,32 @@ initialize_environment(void)
 {
 	char	   *tmp;
 
-	/*
-	 * Clear out any non-C locale settings
-	 */
-	unsetenv("LC_COLLATE");
-	unsetenv("LC_CTYPE");
-	unsetenv("LC_MONETARY");
-	unsetenv("LC_MESSAGES");
-	unsetenv("LC_NUMERIC");
-	unsetenv("LC_TIME");
-	unsetenv("LC_ALL");
-	unsetenv("LANG");
-	unsetenv("LANGUAGE");
-	/* On Windows the default locale cannot be English, so force it */
+	if (nolocale)
+	{
+		/*
+		 * Clear out any non-C locale settings
+		 */
+		unsetenv("LC_COLLATE");
+		unsetenv("LC_CTYPE");
+		unsetenv("LC_MONETARY");
+		unsetenv("LC_NUMERIC");
+		unsetenv("LC_TIME");
+		unsetenv("LANG");
+		/* On Windows the default locale cannot be English, so force it */
 #if defined(WIN32) || defined(__CYGWIN__)
-	putenv("LANG=en");
+		putenv("LANG=en");
 #endif
+	}
+
+	/*
+	 * Set translation-related settings to English; otherwise psql will
+	 * produce translated messages and produce diffs.  (XXX If we ever support
+	 * translation of pg_regress, this needs to be moved elsewhere, where psql
+	 * is actually called.)
+	 */
+	unsetenv("LANGUAGE");
+	unsetenv("LC_ALL");
+	putenv("LC_MESSAGES=C");
 
 	/*
 	 * Set multibyte as requested
@@ -735,6 +727,23 @@ initialize_environment(void)
 	 */
 	putenv("PGTZ=PST8PDT");
 	putenv("PGDATESTYLE=Postgres, MDY");
+
+	/*
+	 * Likewise set intervalstyle to ensure consistent results.  This is a bit
+	 * more painful because we must use PGOPTIONS, and we want to preserve the
+	 * user's ability to set other variables through that.
+	 */
+	{
+		const char *my_pgoptions = "-c intervalstyle=postgres_verbose";
+		const char *old_pgoptions = getenv("PGOPTIONS");
+		char	   *new_pgoptions;
+
+		if (!old_pgoptions)
+			old_pgoptions = "";
+		new_pgoptions = malloc(strlen(old_pgoptions) + strlen(my_pgoptions) + 12);
+		sprintf(new_pgoptions, "PGOPTIONS=%s %s", old_pgoptions, my_pgoptions);
+		putenv(new_pgoptions);
+	}
 
 	if (temp_install)
 	{
@@ -965,14 +974,16 @@ spawn_process(const char *cmdline)
 	{
 		if (Advapi32Handle != NULL)
 			FreeLibrary(Advapi32Handle);
-		fprintf(stderr, "ERROR: cannot create restricted tokens on this platform\n");
+		fprintf(stderr, _("%s: cannot create restricted tokens on this platform\n"),
+				progname);
 		exit_nicely(2);
 	}
 
 	/* Open the current token to use as base for the restricted one */
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &origToken))
 	{
-		fprintf(stderr, "could not open process token: %lu\n", GetLastError());
+		fprintf(stderr, _("could not open process token: %lu\n"),
+				GetLastError());
 		exit_nicely(2);
 	}
 
@@ -983,7 +994,7 @@ spawn_process(const char *cmdline)
 		!AllocateAndInitializeSid(&NtAuthority, 2,
 								  SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_POWER_USERS, 0, 0, 0, 0, 0, 0, &dropSids[1].Sid))
 	{
-		fprintf(stderr, "could not allocate SIDs: %lu\n", GetLastError());
+		fprintf(stderr, _("could not allocate SIDs: %lu\n"), GetLastError());
 		exit_nicely(2);
 	}
 
@@ -1002,7 +1013,8 @@ spawn_process(const char *cmdline)
 
 	if (!b)
 	{
-		fprintf(stderr, "could not create restricted token: %lu\n", GetLastError());
+		fprintf(stderr, _("could not create restricted token: %lu\n"),
+				GetLastError());
 		exit_nicely(2);
 	}
 
@@ -1010,16 +1022,16 @@ spawn_process(const char *cmdline)
 	sprintf(cmdline2, "cmd /c %s", cmdline);
 
 	if (!CreateProcessAsUser(restrictedToken,
-						NULL,
-						cmdline2,
-						NULL,
-						NULL,
-						TRUE,
-						CREATE_SUSPENDED,
-						NULL,
-						NULL,
-						&si,
-						&pi))
+							 NULL,
+							 cmdline2,
+							 NULL,
+							 NULL,
+							 TRUE,
+							 CREATE_SUSPENDED,
+							 NULL,
+							 NULL,
+							 &si,
+							 &pi))
 	{
 		fprintf(stderr, _("could not start process for \"%s\": %lu\n"),
 				cmdline2, GetLastError());
@@ -1032,7 +1044,7 @@ spawn_process(const char *cmdline)
 
 	free(cmdline2);
 
-    ResumeThread(pi.hThread);
+	ResumeThread(pi.hThread);
 	CloseHandle(pi.hThread);
 	return pi.hProcess;
 #endif
@@ -1084,7 +1096,7 @@ file_line_count(const char *file)
 	return l;
 }
 
-static bool
+bool
 file_exists(const char *file)
 {
 	FILE	   *f = fopen(file, "r");
@@ -1133,7 +1145,11 @@ get_alternative_expectfile(const char *expectfile, int i)
 	strcpy(tmp, expectfile);
 	last_dot = strrchr(tmp, '.');
 	if (!last_dot)
+	{
+		free(tmp);
+		free(s);
 		return NULL;
+	}
 	*last_dot = '\0';
 	snprintf(s, ssize, "%s_%d.%s", tmp, i, last_dot + 1);
 	free(tmp);
@@ -1305,14 +1321,15 @@ results_differ(const char *testname, const char *resultsfile, const char *defaul
 }
 
 /*
- * Wait for specified subprocesses to finish
+ * Wait for specified subprocesses to finish, and return their exit
+ * statuses into statuses[]
  *
- * If names isn't NULL, report each subprocess as it finishes
+ * If names isn't NULL, print each subprocess's name as it finishes
  *
  * Note: it's OK to scribble on the pids array, but not on the names array
  */
 static void
-wait_for_tests(PID_TYPE * pids, char **names, int num_tests)
+wait_for_tests(PID_TYPE * pids, int *statuses, char **names, int num_tests)
 {
 	int			tests_left;
 	int			i;
@@ -1329,7 +1346,9 @@ wait_for_tests(PID_TYPE * pids, char **names, int num_tests)
 		PID_TYPE	p;
 
 #ifndef WIN32
-		p = wait(NULL);
+		int			exit_status;
+
+		p = wait(&exit_status);
 
 		if (p == INVALID_PID)
 		{
@@ -1338,6 +1357,7 @@ wait_for_tests(PID_TYPE * pids, char **names, int num_tests)
 			exit_nicely(2);
 		}
 #else
+		DWORD		exit_status;
 		int			r;
 
 		r = WaitForMultipleObjects(tests_left, active_pids, FALSE, INFINITE);
@@ -1357,9 +1377,11 @@ wait_for_tests(PID_TYPE * pids, char **names, int num_tests)
 			if (p == pids[i])
 			{
 #ifdef WIN32
+				GetExitCodeProcess(pids[i], &exit_status);
 				CloseHandle(pids[i]);
 #endif
 				pids[i] = INVALID_PID;
+				statuses[i] = (int) exit_status;
 				if (names)
 					status(" %s", names[i]);
 				tests_left--;
@@ -1374,6 +1396,35 @@ wait_for_tests(PID_TYPE * pids, char **names, int num_tests)
 }
 
 /*
+ * report nonzero exit code from a test process
+ */
+static void
+log_child_failure(int exitstatus)
+{
+	if (WIFEXITED(exitstatus))
+		status(_(" (test process exited with exit code %d)"),
+			   WEXITSTATUS(exitstatus));
+	else if (WIFSIGNALED(exitstatus))
+	{
+#if defined(WIN32)
+		status(_(" (test process was terminated by exception 0x%X)"),
+			   WTERMSIG(exitstatus));
+#elif defined(HAVE_DECL_SYS_SIGLIST) && HAVE_DECL_SYS_SIGLIST
+		status(_(" (test process was terminated by signal %d: %s)"),
+			   WTERMSIG(exitstatus),
+			   WTERMSIG(exitstatus) < NSIG ?
+			   sys_siglist[WTERMSIG(exitstatus)] : "(unknown))");
+#else
+		status(_(" (test process was terminated by signal %d)"),
+			   WTERMSIG(exitstatus));
+#endif
+	}
+	else
+		status(_(" (test process exited with unrecognized status %d)"),
+			   exitstatus);
+}
+
+/*
  * Run all the tests specified in one schedule file
  */
 static void
@@ -1385,6 +1436,7 @@ run_schedule(const char *schedule, test_function tfunc)
 	_stringlist *expectfiles[MAX_PARALLEL_TESTS];
 	_stringlist *tags[MAX_PARALLEL_TESTS];
 	PID_TYPE	pids[MAX_PARALLEL_TESTS];
+	int			statuses[MAX_PARALLEL_TESTS];
 	_stringlist *ignorelist = NULL;
 	char		scbuf[1024];
 	FILE	   *scf;
@@ -1486,7 +1538,7 @@ run_schedule(const char *schedule, test_function tfunc)
 		{
 			status(_("test %-20s ... "), tests[0]);
 			pids[0] = (tfunc) (tests[0], &resultfiles[0], &expectfiles[0], &tags[0]);
-			wait_for_tests(pids, NULL, 1);
+			wait_for_tests(pids, statuses, NULL, 1);
 			/* status line is finished below */
 		}
 		else if (max_connections > 0 && max_connections < num_tests)
@@ -1499,12 +1551,14 @@ run_schedule(const char *schedule, test_function tfunc)
 			{
 				if (i - oldest >= max_connections)
 				{
-					wait_for_tests(pids + oldest, tests + oldest, i - oldest);
+					wait_for_tests(pids + oldest, statuses + oldest,
+								   tests + oldest, i - oldest);
 					oldest = i;
 				}
 				pids[i] = (tfunc) (tests[i], &resultfiles[i], &expectfiles[i], &tags[i]);
 			}
-			wait_for_tests(pids + oldest, tests + oldest, i - oldest);
+			wait_for_tests(pids + oldest, statuses + oldest,
+						   tests + oldest, i - oldest);
 			status_end();
 		}
 		else
@@ -1514,7 +1568,7 @@ run_schedule(const char *schedule, test_function tfunc)
 			{
 				pids[i] = (tfunc) (tests[i], &resultfiles[i], &expectfiles[i], &tags[i]);
 			}
-			wait_for_tests(pids, tests, num_tests);
+			wait_for_tests(pids, statuses, tests, num_tests);
 			status_end();
 		}
 
@@ -1543,7 +1597,7 @@ run_schedule(const char *schedule, test_function tfunc)
 				bool		newdiff;
 
 				if (tl)
-					tl = tl->next;		/* tl has the same lengt has rl and el
+					tl = tl->next;		/* tl has the same length as rl and el
 										 * if it exists */
 
 				newdiff = results_differ(tests[i], rl->str, el->str);
@@ -1584,6 +1638,9 @@ run_schedule(const char *schedule, test_function tfunc)
 				success_count++;
 			}
 
+			if (statuses[i] != 0)
+				log_child_failure(statuses[i]);
+
 			status_end();
 		}
 	}
@@ -1598,6 +1655,7 @@ static void
 run_single_test(const char *test, test_function tfunc)
 {
 	PID_TYPE	pid;
+	int			exit_status;
 	_stringlist *resultfiles = NULL;
 	_stringlist *expectfiles = NULL;
 	_stringlist *tags = NULL;
@@ -1608,7 +1666,7 @@ run_single_test(const char *test, test_function tfunc)
 
 	status(_("test %-20s ... "), test);
 	pid = (tfunc) (test, &resultfiles, &expectfiles, &tags);
-	wait_for_tests(&pid, NULL, 1);
+	wait_for_tests(&pid, &exit_status, NULL, 1);
 
 	/*
 	 * Advance over all three lists simultaneously.
@@ -1624,7 +1682,7 @@ run_single_test(const char *test, test_function tfunc)
 		bool		newdiff;
 
 		if (tl)
-			tl = tl->next;		/* tl has the same lengt has rl and el if it
+			tl = tl->next;		/* tl has the same length as rl and el if it
 								 * exists */
 
 		newdiff = results_differ(test, rl->str, el->str);
@@ -1645,6 +1703,10 @@ run_single_test(const char *test, test_function tfunc)
 		status(_("ok"));
 		success_count++;
 	}
+
+	if (exit_status != 0)
+		log_child_failure(exit_status);
+
 	status_end();
 }
 
@@ -1745,6 +1807,34 @@ create_role(const char *rolename, const _stringlist * granted_dbs)
 	}
 }
 
+static char *
+make_absolute_path(const char *in)
+{
+	char	   *result;
+
+	if (is_absolute_path(in))
+		result = strdup(in);
+	else
+	{
+		static char cwdbuf[MAXPGPATH];
+
+		if (!cwdbuf[0])
+		{
+			if (!getcwd(cwdbuf, sizeof(cwdbuf)))
+			{
+				fprintf(stderr, _("could not get current working directory: %s\n"), strerror(errno));
+				exit_nicely(2);
+			}
+		}
+
+		result = malloc(strlen(cwdbuf) + strlen(in) + 2);
+		sprintf(result, "%s/%s", cwdbuf, in);
+	}
+
+	canonicalize_path(result);
+	return result;
+}
+
 static void
 help(void)
 {
@@ -1765,13 +1855,13 @@ help(void)
 	printf(_("  --outputdir=DIR           place output files in DIR (default \".\")\n"));
 	printf(_("  --schedule=FILE           use test ordering schedule from FILE\n"));
 	printf(_("                            (can be used multiple times to concatenate)\n"));
-	printf(_("  --srcdir=DIR              absolute path to source directory (for VPATH builds)\n"));
+	printf(_("  --dlpath=DIR              look for dynamic libraries in DIR\n"));
 	printf(_("  --temp-install=DIR        create a temporary installation in DIR\n"));
 	printf(_("\n"));
 	printf(_("Options for \"temp-install\" mode:\n"));
 	printf(_("  --no-locale               use C locale\n"));
 	printf(_("  --top-builddir=DIR        (relative) path to top level build directory\n"));
-	printf(_("  --temp-port=PORT          port number to start temp postmaster on\n"));
+	printf(_("  --port=PORT               start postmaster on PORT\n"));
 	printf(_("  --temp-config=PATH        append contents of PATH to temporary config\n"));
 	printf(_("\n"));
 	printf(_("Options for using an existing installation:\n"));
@@ -1794,6 +1884,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 	int			i;
 	int			option_index;
 	char		buf[MAXPGPATH * 4];
+	char		buf2[MAXPGPATH * 4];
 
 	static struct option long_options[] = {
 		{"help", no_argument, NULL, 'h'},
@@ -1809,19 +1900,18 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		{"temp-install", required_argument, NULL, 9},
 		{"no-locale", no_argument, NULL, 10},
 		{"top-builddir", required_argument, NULL, 11},
-		{"temp-port", required_argument, NULL, 12},
 		{"host", required_argument, NULL, 13},
 		{"port", required_argument, NULL, 14},
 		{"user", required_argument, NULL, 15},
 		{"psqldir", required_argument, NULL, 16},
-		{"srcdir", required_argument, NULL, 17},
+		{"dlpath", required_argument, NULL, 17},
 		{"create-role", required_argument, NULL, 18},
 		{"temp-config", required_argument, NULL, 19},
 		{NULL, 0, NULL, 0}
 	};
 
 	progname = get_progname(argv[0]);
-	set_pglocale_pgservice(argv[0], "pg_regress");
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_regress"));
 
 #ifndef HAVE_UNIX_SOCKETS
 	/* no unix domain sockets available, so change default */
@@ -1842,7 +1932,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 				help();
 				exit_nicely(0);
 			case 'V':
-				printf("pg_regress (PostgreSQL %s)\n", PG_VERSION);
+				puts("pg_regress (PostgreSQL) " PG_VERSION);
 				exit_nicely(0);
 			case 1:
 
@@ -1875,22 +1965,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 				add_stringlist_item(&schedulelist, optarg);
 				break;
 			case 9:
-				/* temp_install must be absolute path */
-				if (is_absolute_path(optarg))
-					temp_install = strdup(optarg);
-				else
-				{
-					char		cwdbuf[MAXPGPATH];
-
-					if (!getcwd(cwdbuf, sizeof(cwdbuf)))
-					{
-						fprintf(stderr, _("could not get current working directory: %s\n"), strerror(errno));
-						exit_nicely(2);
-					}
-					temp_install = malloc(strlen(cwdbuf) + strlen(optarg) + 2);
-					sprintf(temp_install, "%s/%s", cwdbuf, optarg);
-				}
-				canonicalize_path(temp_install);
+				temp_install = make_absolute_path(optarg);
 				break;
 			case 10:
 				nolocale = true;
@@ -1898,20 +1973,12 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 			case 11:
 				top_builddir = strdup(optarg);
 				break;
-			case 12:
-				{
-					int			p = atoi(optarg);
-
-					/* Since Makefile isn't very bright, check port range */
-					if (p >= 1024 && p <= 65535)
-						temp_port = p;
-				}
-				break;
 			case 13:
 				hostname = strdup(optarg);
 				break;
 			case 14:
 				port = atoi(optarg);
+				port_specified_by_user = true;
 				break;
 			case 15:
 				user = strdup(optarg);
@@ -1922,7 +1989,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 					psqldir = strdup(optarg);
 				break;
 			case 17:
-				srcdir = strdup(optarg);
+				dlpath = strdup(optarg);
 				break;
 			case 18:
 				split_to_stringlist(strdup(optarg), ", ", &extraroles);
@@ -1947,8 +2014,18 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		optind++;
 	}
 
-	if (temp_install)
-		port = temp_port;
+	if (temp_install && !port_specified_by_user)
+
+		/*
+		 * To reduce chances of interference with parallel installations, use
+		 * a port number starting in the private range (49152-65535)
+		 * calculated from the version number.
+		 */
+		port = 0xC000 | (PG_VERSION_NUM & 0x3FFF);
+
+	inputdir = make_absolute_path(inputdir);
+	outputdir = make_absolute_path(outputdir);
+	dlpath = make_absolute_path(dlpath);
 
 	/*
 	 * Initialization
@@ -1963,6 +2040,8 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 
 	if (temp_install)
 	{
+		FILE	   *pg_conf;
+
 		/*
 		 * Prepare the temp installation
 		 */
@@ -2018,30 +2097,71 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 			exit_nicely(2);
 		}
 
-		/* add any extra config specified to the postgresql.conf */
+		/*
+		 * Adjust the default postgresql.conf as needed for regression
+		 * testing. The user can specify a file to be appended; in any case we
+		 * set max_prepared_transactions to enable testing of prepared xacts.
+		 * (Note: to reduce the probability of unexpected shmmax failures,
+		 * don't set max_prepared_transactions any higher than actually needed
+		 * by the prepared_xacts regression test.)
+		 */
+		snprintf(buf, sizeof(buf), "%s/data/postgresql.conf", temp_install);
+		pg_conf = fopen(buf, "a");
+		if (pg_conf == NULL)
+		{
+			fprintf(stderr, _("\n%s: could not open \"%s\" for adding extra config: %s\n"), progname, buf, strerror(errno));
+			exit_nicely(2);
+		}
+		fputs("\n# Configuration added by pg_regress\n\n", pg_conf);
+		fputs("max_prepared_transactions = 2\n", pg_conf);
+
 		if (temp_config != NULL)
 		{
 			FILE	   *extra_conf;
-			FILE	   *pg_conf;
 			char		line_buf[1024];
 
-			snprintf(buf, sizeof(buf), "%s/data/postgresql.conf", temp_install);
-			pg_conf = fopen(buf, "a");
-			if (pg_conf == NULL)
-			{
-				fprintf(stderr, _("\n%s: could not open %s for adding extra config:\nError was %s\n"), progname, buf, strerror(errno));
-				exit_nicely(2);
-			}
 			extra_conf = fopen(temp_config, "r");
 			if (extra_conf == NULL)
 			{
-				fprintf(stderr, _("\n%s: could not open %s to read extra config:\nError was %s\n"), progname, temp_config, strerror(errno));
+				fprintf(stderr, _("\n%s: could not open \"%s\" to read extra config: %s\n"), progname, temp_config, strerror(errno));
 				exit_nicely(2);
 			}
 			while (fgets(line_buf, sizeof(line_buf), extra_conf) != NULL)
 				fputs(line_buf, pg_conf);
 			fclose(extra_conf);
-			fclose(pg_conf);
+		}
+
+		fclose(pg_conf);
+
+		/*
+		 * Check if there is a postmaster running already.
+		 */
+		snprintf(buf2, sizeof(buf2),
+				 SYSTEMQUOTE "\"%s/psql\" -X postgres <%s 2>%s" SYSTEMQUOTE,
+				 bindir, DEVNULL, DEVNULL);
+
+		for (i = 0; i < 16; i++)
+		{
+			if (system(buf2) == 0)
+			{
+				char		s[16];
+
+				if (port_specified_by_user || i == 15)
+				{
+					fprintf(stderr, _("port %d apparently in use\n"), port);
+					if (!port_specified_by_user)
+						fprintf(stderr, _("%s: could not determine an available port\n"), progname);
+					fprintf(stderr, _("Specify an unused port using the --port option or shut down any conflicting PostgreSQL servers.\n"));
+					exit_nicely(2);
+				}
+
+				fprintf(stderr, _("port %d apparently in use, trying %d\n"), port, port + 1);
+				port++;
+				sprintf(s, "%d", port);
+				doputenv("PGPORT", s);
+			}
+			else
+				break;
 		}
 
 		/*
@@ -2067,13 +2187,10 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		 * second or so, but Cygwin is reportedly *much* slower).  Don't wait
 		 * forever, however.
 		 */
-		snprintf(buf, sizeof(buf),
-				 SYSTEMQUOTE "\"%s/psql\" -X postgres <%s 2>%s" SYSTEMQUOTE,
-				 bindir, DEVNULL, DEVNULL);
 		for (i = 0; i < 60; i++)
 		{
 			/* Done if psql succeeds */
-			if (system(buf) == 0)
+			if (system(buf2) == 0)
 				break;
 
 			/*
@@ -2118,7 +2235,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		postmaster_running = true;
 
 		printf(_("running on port %d with pid %lu\n"),
-			   temp_port, (unsigned long) postmaster_pid);
+			   port, (unsigned long) postmaster_pid);
 	}
 	else
 	{

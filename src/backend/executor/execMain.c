@@ -21,7 +21,7 @@
  *	ExecutorRun accepts direction and count arguments that specify whether
  *	the plan is to be executed forwards, backwards, and for how many tuples.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -34,6 +34,7 @@
 
 #include "access/heapam.h"
 #include "access/reloptions.h"
+#include "access/sysattr.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/heap.h"
@@ -45,16 +46,25 @@
 #include "executor/instrument.h"
 #include "executor/nodeSubplan.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "parser/parse_clause.h"
-#include "parser/parse_expr.h"
 #include "parser/parsetree.h"
+#include "storage/bufmgr.h"
+#include "storage/lmgr.h"
 #include "storage/smgr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/snapmgr.h"
+#include "utils/tqual.h"
 
+
+/* Hooks for plugins to get control in ExecutorStart/Run/End() */
+ExecutorStart_hook_type ExecutorStart_hook = NULL;
+ExecutorRun_hook_type ExecutorRun_hook = NULL;
+ExecutorEnd_hook_type ExecutorEnd_hook = NULL;
 
 typedef struct evalPlanQual
 {
@@ -67,14 +77,9 @@ typedef struct evalPlanQual
 
 /* decls for local routines only used within this module */
 static void InitPlan(QueryDesc *queryDesc, int eflags);
-static void initResultRelInfo(ResultRelInfo *resultRelInfo,
-				  Relation resultRelationDesc,
-				  Index resultRelationIndex,
-				  CmdType operation,
-				  bool doInstrument);
 static void ExecCheckPlanOutput(Relation resultRel, List *targetList);
 static void ExecEndPlan(PlanState *planstate, EState *estate);
-static TupleTableSlot *ExecutePlan(EState *estate, PlanState *planstate,
+static void ExecutePlan(EState *estate, PlanState *planstate,
 			CmdType operation,
 			long numberTuples,
 			ScanDirection direction,
@@ -118,10 +123,24 @@ static void intorel_destroy(DestReceiver *self);
  *
  * NB: the CurrentMemoryContext when this is called will become the parent
  * of the per-query context used for this Executor invocation.
+ *
+ * We provide a function hook variable that lets loadable plugins
+ * get control when ExecutorStart is called.  Such a plugin would
+ * normally call standard_ExecutorStart().
+ *
  * ----------------------------------------------------------------
  */
 void
 ExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	if (ExecutorStart_hook)
+		(*ExecutorStart_hook) (queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+}
+
+void
+standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	EState	   *estate;
 	MemoryContext oldcontext;
@@ -181,8 +200,8 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 	/*
 	 * Copy other important information into the EState
 	 */
-	estate->es_snapshot = queryDesc->snapshot;
-	estate->es_crosscheck_snapshot = queryDesc->crosscheck_snapshot;
+	estate->es_snapshot = RegisterSnapshot(queryDesc->snapshot);
+	estate->es_crosscheck_snapshot = RegisterSnapshot(queryDesc->crosscheck_snapshot);
 	estate->es_instrument = queryDesc->doInstrument;
 
 	/*
@@ -209,17 +228,35 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
  *		Note: count = 0 is interpreted as no portal limit, i.e., run to
  *		completion.
  *
+ *		There is no return value, but output tuples (if any) are sent to
+ *		the destination receiver specified in the QueryDesc; and the number
+ *		of tuples processed at the top level can be found in
+ *		estate->es_processed.
+ *
+ *		We provide a function hook variable that lets loadable plugins
+ *		get control when ExecutorRun is called.  Such a plugin would
+ *		normally call standard_ExecutorRun().
+ *
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
+void
 ExecutorRun(QueryDesc *queryDesc,
 			ScanDirection direction, long count)
+{
+	if (ExecutorRun_hook)
+		(*ExecutorRun_hook) (queryDesc, direction, count);
+	else
+		standard_ExecutorRun(queryDesc, direction, count);
+}
+
+void
+standard_ExecutorRun(QueryDesc *queryDesc,
+					 ScanDirection direction, long count)
 {
 	EState	   *estate;
 	CmdType		operation;
 	DestReceiver *dest;
 	bool		sendTuples;
-	TupleTableSlot *result;
 	MemoryContext oldcontext;
 
 	/* sanity checks */
@@ -233,6 +270,10 @@ ExecutorRun(QueryDesc *queryDesc,
 	 * Switch into per-query memory context
 	 */
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	/* Allow instrumentation of ExecutorRun overall runtime */
+	if (queryDesc->totaltime)
+		InstrStartNode(queryDesc->totaltime);
 
 	/*
 	 * extract information from the query descriptor and the query feature.
@@ -255,15 +296,13 @@ ExecutorRun(QueryDesc *queryDesc,
 	/*
 	 * run plan
 	 */
-	if (ScanDirectionIsNoMovement(direction))
-		result = NULL;
-	else
-		result = ExecutePlan(estate,
-							 queryDesc->planstate,
-							 operation,
-							 count,
-							 direction,
-							 dest);
+	if (!ScanDirectionIsNoMovement(direction))
+		ExecutePlan(estate,
+					queryDesc->planstate,
+					operation,
+					count,
+					direction,
+					dest);
 
 	/*
 	 * shutdown tuple receiver, if we started it
@@ -271,9 +310,10 @@ ExecutorRun(QueryDesc *queryDesc,
 	if (sendTuples)
 		(*dest->rShutdown) (dest);
 
-	MemoryContextSwitchTo(oldcontext);
+	if (queryDesc->totaltime)
+		InstrStopNode(queryDesc->totaltime, estate->es_processed);
 
-	return result;
+	MemoryContextSwitchTo(oldcontext);
 }
 
 /* ----------------------------------------------------------------
@@ -281,10 +321,24 @@ ExecutorRun(QueryDesc *queryDesc,
  *
  *		This routine must be called at the end of execution of any
  *		query plan
+ *
+ *		We provide a function hook variable that lets loadable plugins
+ *		get control when ExecutorEnd is called.  Such a plugin would
+ *		normally call standard_ExecutorEnd().
+ *
  * ----------------------------------------------------------------
  */
 void
 ExecutorEnd(QueryDesc *queryDesc)
+{
+	if (ExecutorEnd_hook)
+		(*ExecutorEnd_hook) (queryDesc);
+	else
+		standard_ExecutorEnd(queryDesc);
+}
+
+void
+standard_ExecutorEnd(QueryDesc *queryDesc)
 {
 	EState	   *estate;
 	MemoryContext oldcontext;
@@ -309,6 +363,10 @@ ExecutorEnd(QueryDesc *queryDesc)
 	if (estate->es_select_into)
 		CloseIntoRel(queryDesc);
 
+	/* do away with our snapshots */
+	UnregisterSnapshot(estate->es_snapshot);
+	UnregisterSnapshot(estate->es_crosscheck_snapshot);
+
 	/*
 	 * Must switch out of context before destroying it
 	 */
@@ -324,6 +382,7 @@ ExecutorEnd(QueryDesc *queryDesc)
 	queryDesc->tupDesc = NULL;
 	queryDesc->estate = NULL;
 	queryDesc->planstate = NULL;
+	queryDesc->totaltime = NULL;
 }
 
 /* ----------------------------------------------------------------
@@ -386,8 +445,12 @@ static void
 ExecCheckRTEPerms(RangeTblEntry *rte)
 {
 	AclMode		requiredPerms;
+	AclMode		relPerms;
+	AclMode		remainingPerms;
 	Oid			relOid;
 	Oid			userid;
+	Bitmapset  *tmpset;
+	int			col;
 
 	/*
 	 * Only plain-relation RTEs need to be checked here.  Function RTEs are
@@ -417,12 +480,110 @@ ExecCheckRTEPerms(RangeTblEntry *rte)
 	userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
 
 	/*
-	 * We must have *all* the requiredPerms bits, so use aclmask not aclcheck.
+	 * We must have *all* the requiredPerms bits, but some of the bits can be
+	 * satisfied from column-level rather than relation-level permissions.
+	 * First, remove any bits that are satisfied by relation permissions.
 	 */
-	if (pg_class_aclmask(relOid, userid, requiredPerms, ACLMASK_ALL)
-		!= requiredPerms)
-		aclcheck_error(ACLCHECK_NO_PRIV, ACL_KIND_CLASS,
-					   get_rel_name(relOid));
+	relPerms = pg_class_aclmask(relOid, userid, requiredPerms, ACLMASK_ALL);
+	remainingPerms = requiredPerms & ~relPerms;
+	if (remainingPerms != 0)
+	{
+		/*
+		 * If we lack any permissions that exist only as relation permissions,
+		 * we can fail straight away.
+		 */
+		if (remainingPerms & ~(ACL_SELECT | ACL_INSERT | ACL_UPDATE))
+			aclcheck_error(ACLCHECK_NO_PRIV, ACL_KIND_CLASS,
+						   get_rel_name(relOid));
+
+		/*
+		 * Check to see if we have the needed privileges at column level.
+		 *
+		 * Note: failures just report a table-level error; it would be nicer
+		 * to report a column-level error if we have some but not all of the
+		 * column privileges.
+		 */
+		if (remainingPerms & ACL_SELECT)
+		{
+			/*
+			 * When the query doesn't explicitly reference any columns (for
+			 * example, SELECT COUNT(*) FROM table), allow the query if we
+			 * have SELECT on any column of the rel, as per SQL spec.
+			 */
+			if (bms_is_empty(rte->selectedCols))
+			{
+				if (pg_attribute_aclcheck_all(relOid, userid, ACL_SELECT,
+											  ACLMASK_ANY) != ACLCHECK_OK)
+					aclcheck_error(ACLCHECK_NO_PRIV, ACL_KIND_CLASS,
+								   get_rel_name(relOid));
+			}
+
+			tmpset = bms_copy(rte->selectedCols);
+			while ((col = bms_first_member(tmpset)) >= 0)
+			{
+				/* remove the column number offset */
+				col += FirstLowInvalidHeapAttributeNumber;
+				if (col == InvalidAttrNumber)
+				{
+					/* Whole-row reference, must have priv on all cols */
+					if (pg_attribute_aclcheck_all(relOid, userid, ACL_SELECT,
+												  ACLMASK_ALL) != ACLCHECK_OK)
+						aclcheck_error(ACLCHECK_NO_PRIV, ACL_KIND_CLASS,
+									   get_rel_name(relOid));
+				}
+				else
+				{
+					if (pg_attribute_aclcheck(relOid, col, userid, ACL_SELECT)
+						!= ACLCHECK_OK)
+						aclcheck_error(ACLCHECK_NO_PRIV, ACL_KIND_CLASS,
+									   get_rel_name(relOid));
+				}
+			}
+			bms_free(tmpset);
+		}
+
+		/*
+		 * Basically the same for the mod columns, with either INSERT or
+		 * UPDATE privilege as specified by remainingPerms.
+		 */
+		remainingPerms &= ~ACL_SELECT;
+		if (remainingPerms != 0)
+		{
+			/*
+			 * When the query doesn't explicitly change any columns, allow the
+			 * query if we have permission on any column of the rel.  This is
+			 * to handle SELECT FOR UPDATE as well as possible corner cases in
+			 * INSERT and UPDATE.
+			 */
+			if (bms_is_empty(rte->modifiedCols))
+			{
+				if (pg_attribute_aclcheck_all(relOid, userid, remainingPerms,
+											  ACLMASK_ANY) != ACLCHECK_OK)
+					aclcheck_error(ACLCHECK_NO_PRIV, ACL_KIND_CLASS,
+								   get_rel_name(relOid));
+			}
+
+			tmpset = bms_copy(rte->modifiedCols);
+			while ((col = bms_first_member(tmpset)) >= 0)
+			{
+				/* remove the column number offset */
+				col += FirstLowInvalidHeapAttributeNumber;
+				if (col == InvalidAttrNumber)
+				{
+					/* whole-row reference can't happen here */
+					elog(ERROR, "whole-row update is not implemented");
+				}
+				else
+				{
+					if (pg_attribute_aclcheck(relOid, col, userid, remainingPerms)
+						!= ACLCHECK_OK)
+						aclcheck_error(ACLCHECK_NO_PRIV, ACL_KIND_CLASS,
+									   get_rel_name(relOid));
+				}
+			}
+			bms_free(tmpset);
+		}
+	}
 }
 
 /*
@@ -518,7 +679,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 
 			resultRelationOid = getrelid(resultRelationIndex, rangeTable);
 			resultRelation = heap_open(resultRelationOid, RowExclusiveLock);
-			initResultRelInfo(resultRelInfo,
+			InitResultRelInfo(resultRelInfo,
 							  resultRelation,
 							  resultRelationIndex,
 							  operation,
@@ -561,18 +722,26 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	foreach(l, plannedstmt->rowMarks)
 	{
 		RowMarkClause *rc = (RowMarkClause *) lfirst(l);
-		Oid			relid = getrelid(rc->rti, rangeTable);
+		Oid			relid;
 		Relation	relation;
 		ExecRowMark *erm;
 
+		/* ignore "parent" rowmarks; they are irrelevant at runtime */
+		if (rc->isParent)
+			continue;
+
+		relid = getrelid(rc->rti, rangeTable);
 		relation = heap_open(relid, RowShareLock);
 		erm = (ExecRowMark *) palloc(sizeof(ExecRowMark));
 		erm->relation = relation;
 		erm->rti = rc->rti;
+		erm->prti = rc->prti;
 		erm->forUpdate = rc->forUpdate;
 		erm->noWait = rc->noWait;
-		/* We'll set up ctidAttno below */
+		/* We'll locate the junk attrs below */
 		erm->ctidAttNo = InvalidAttrNumber;
+		erm->toidAttNo = InvalidAttrNumber;
+		ItemPointerSetInvalid(&(erm->curCtid));
 		estate->es_rowMarks = lappend(estate->es_rowMarks, erm);
 	}
 
@@ -665,11 +834,9 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 
 	/*
 	 * Initialize the junk filter if needed.  SELECT and INSERT queries need a
-	 * filter if there are any junk attrs in the tlist.  INSERT and SELECT
-	 * INTO also need a filter if the plan may return raw disk tuples (else
-	 * heap_insert will be scribbling on the source relation!). UPDATE and
-	 * DELETE always need a filter, since there's always a junk 'ctid'
-	 * attribute present --- no need to look first.
+	 * filter if there are any junk attrs in the tlist.  UPDATE and DELETE
+	 * always need a filter, since there's always a junk 'ctid' attribute
+	 * present --- no need to look first.
 	 *
 	 * This section of code is also a convenient place to verify that the
 	 * output of an INSERT or UPDATE matches the target table(s).
@@ -692,10 +859,6 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 						break;
 					}
 				}
-				if (!junk_filter_needed &&
-					(operation == CMD_INSERT || estate->es_select_into) &&
-					ExecMayReturnRawTuples(planstate))
-					junk_filter_needed = true;
 				break;
 			case CMD_UPDATE:
 			case CMD_DELETE:
@@ -799,17 +962,29 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 						elog(ERROR, "could not find junk ctid column");
 				}
 
-				/* For SELECT FOR UPDATE/SHARE, find the ctid attrs now */
+				/* For SELECT FOR UPDATE/SHARE, find the junk attrs now */
 				foreach(l, estate->es_rowMarks)
 				{
 					ExecRowMark *erm = (ExecRowMark *) lfirst(l);
 					char		resname[32];
 
-					snprintf(resname, sizeof(resname), "ctid%u", erm->rti);
+					/* always need the ctid */
+					snprintf(resname, sizeof(resname), "ctid%u",
+							 erm->prti);
 					erm->ctidAttNo = ExecFindJunkAttribute(j, resname);
 					if (!AttributeNumberIsValid(erm->ctidAttNo))
 						elog(ERROR, "could not find junk \"%s\" column",
 							 resname);
+					/* if child relation, need tableoid too */
+					if (erm->rti != erm->prti)
+					{
+						snprintf(resname, sizeof(resname), "tableoid%u",
+								 erm->prti);
+						erm->toidAttNo = ExecFindJunkAttribute(j, resname);
+						if (!AttributeNumberIsValid(erm->toidAttNo))
+							elog(ERROR, "could not find junk \"%s\" column",
+								 resname);
+					}
 				}
 			}
 		}
@@ -883,8 +1058,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 /*
  * Initialize ResultRelInfo data for one result relation
  */
-static void
-initResultRelInfo(ResultRelInfo *resultRelInfo,
+void
+InitResultRelInfo(ResultRelInfo *resultRelInfo,
 				  Relation resultRelationDesc,
 				  Index resultRelationIndex,
 				  CmdType operation,
@@ -1010,7 +1185,7 @@ ExecCheckPlanOutput(Relation resultRel, List *targetList)
 						 errdetail("Table has type %s at ordinal position %d, but query expects %s.",
 								   format_type_be(attr->atttypid),
 								   attno,
-								   format_type_be(exprType((Node *) tle->expr)))));
+							 format_type_be(exprType((Node *) tle->expr)))));
 		}
 		else
 		{
@@ -1031,7 +1206,7 @@ ExecCheckPlanOutput(Relation resultRel, List *targetList)
 	if (attno != resultDesc->natts)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("table row type and query-specified row type do not match"),
+		  errmsg("table row type and query-specified row type do not match"),
 				 errdetail("Query has too few columns.")));
 }
 
@@ -1089,11 +1264,11 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
 	/*
 	 * Make the new entry in the right context.  Currently, we don't need any
 	 * index information in ResultRelInfos used only for triggers, so tell
-	 * initResultRelInfo it's a DELETE.
+	 * InitResultRelInfo it's a DELETE.
 	 */
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 	rInfo = makeNode(ResultRelInfo);
-	initResultRelInfo(rInfo,
+	InitResultRelInfo(rInfo,
 					  rel,
 					  0,		/* dummy rangetable index */
 					  CMD_DELETE,
@@ -1245,19 +1420,16 @@ ExecEndPlan(PlanState *planstate, EState *estate)
 /* ----------------------------------------------------------------
  *		ExecutePlan
  *
- *		processes the query plan to retrieve 'numberTuples' tuples in the
- *		direction specified.
+ *		Processes the query plan until we have processed 'numberTuples' tuples,
+ *		moving in the specified direction.
  *
- *		Retrieves all tuples if numberTuples is 0
- *
- *		result is either a slot containing the last tuple in the case
- *		of a SELECT or NULL otherwise.
+ *		Runs to completion if numberTuples is 0
  *
  * Note: the ctid attribute is a 'junk' attribute that is removed before the
  * user can see it
  * ----------------------------------------------------------------
  */
-static TupleTableSlot *
+static void
 ExecutePlan(EState *estate,
 			PlanState *planstate,
 			CmdType operation,
@@ -1271,13 +1443,11 @@ ExecutePlan(EState *estate,
 	ItemPointer tupleid = NULL;
 	ItemPointerData tuple_ctid;
 	long		current_tuple_count;
-	TupleTableSlot *result;
 
 	/*
 	 * initialize local variables
 	 */
 	current_tuple_count = 0;
-	result = NULL;
 
 	/*
 	 * Set the direction.
@@ -1306,7 +1476,6 @@ ExecutePlan(EState *estate,
 	/*
 	 * Loop until we've processed the proper number of tuples from the plan.
 	 */
-
 	for (;;)
 	{
 		/* Reset the per-output-tuple exprcontext */
@@ -1327,13 +1496,10 @@ lnext:	;
 
 		/*
 		 * if the tuple is null, then we assume there is nothing more to
-		 * process so we just return null...
+		 * process so we just end the loop...
 		 */
 		if (TupIsNull(planSlot))
-		{
-			result = NULL;
 			break;
-		}
 		slot = planSlot;
 
 		/*
@@ -1369,13 +1535,34 @@ lnext:	;
 					LockTupleMode lockmode;
 					HTSU_Result test;
 
+					/* if child rel, must check whether it produced this row */
+					if (erm->rti != erm->prti)
+					{
+						Oid			tableoid;
+
+						datum = ExecGetJunkAttribute(slot,
+													 erm->toidAttNo,
+													 &isNull);
+						/* shouldn't ever get a null result... */
+						if (isNull)
+							elog(ERROR, "tableoid is NULL");
+						tableoid = DatumGetObjectId(datum);
+
+						if (tableoid != RelationGetRelid(erm->relation))
+						{
+							/* this child is inactive right now */
+							ItemPointerSetInvalid(&(erm->curCtid));
+							continue;
+						}
+					}
+
+					/* okay, fetch the tuple by ctid */
 					datum = ExecGetJunkAttribute(slot,
 												 erm->ctidAttNo,
 												 &isNull);
 					/* shouldn't ever get a null result... */
 					if (isNull)
 						elog(ERROR, "ctid is NULL");
-
 					tuple.t_self = *((ItemPointer) DatumGetPointer(datum));
 
 					if (erm->forUpdate)
@@ -1427,8 +1614,10 @@ lnext:	;
 						default:
 							elog(ERROR, "unrecognized heap_lock_tuple status: %u",
 								 test);
-							return NULL;
 					}
+
+					/* Remember tuple TID for WHERE CURRENT OF */
+					erm->curCtid = tuple.t_self;
 				}
 			}
 
@@ -1462,35 +1651,30 @@ lnext:	;
 
 		/*
 		 * now that we have a tuple, do the appropriate thing with it.. either
-		 * return it to the user, add it to a relation someplace, delete it
-		 * from a relation, or modify some of its attributes.
+		 * send it to the output destination, add it to a relation someplace,
+		 * delete it from a relation, or modify some of its attributes.
 		 */
 		switch (operation)
 		{
 			case CMD_SELECT:
 				ExecSelect(slot, dest, estate);
-				result = slot;
 				break;
 
 			case CMD_INSERT:
 				ExecInsert(slot, tupleid, planSlot, dest, estate);
-				result = NULL;
 				break;
 
 			case CMD_DELETE:
 				ExecDelete(tupleid, planSlot, dest, estate);
-				result = NULL;
 				break;
 
 			case CMD_UPDATE:
 				ExecUpdate(slot, tupleid, planSlot, dest, estate);
-				result = NULL;
 				break;
 
 			default:
 				elog(ERROR, "unrecognized operation code: %d",
 					 (int) operation);
-				result = NULL;
 				break;
 		}
 
@@ -1522,12 +1706,6 @@ lnext:	;
 			/* do nothing */
 			break;
 	}
-
-	/*
-	 * here, result is either a slot containing a tuple in the case of a
-	 * SELECT or NULL otherwise.
-	 */
-	return result;
 }
 
 /* ----------------------------------------------------------------
@@ -1579,6 +1757,21 @@ ExecInsert(TupleTableSlot *slot,
 	resultRelInfo = estate->es_result_relation_info;
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 
+	/*
+	 * If the result relation has OIDs, force the tuple's OID to zero so that
+	 * heap_insert will assign a fresh OID.  Usually the OID already will be
+	 * zero at this point, but there are corner cases where the plan tree can
+	 * return a tuple extracted literally from some table with the same
+	 * rowtype.
+	 *
+	 * XXX if we ever wanted to allow users to assign their own OIDs to new
+	 * rows, this'd be the place to do it.  For the moment, we make a point of
+	 * doing this before calling triggers, so that a user-supplied trigger
+	 * could hack the OID if desired.
+	 */
+	if (resultRelationDesc->rd_rel->relhasoids)
+		HeapTupleSetOid(tuple, InvalidOid);
+
 	/* BEFORE ROW INSERT Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->n_before_row[TRIGGER_EVENT_INSERT] > 0)
@@ -1621,8 +1814,7 @@ ExecInsert(TupleTableSlot *slot,
 	 * t_self field.
 	 */
 	newId = heap_insert(resultRelationDesc, tuple,
-						estate->es_output_cid,
-						true, true);
+						estate->es_output_cid, 0, NULL);
 
 	IncrAppended();
 	(estate->es_processed)++;
@@ -2121,9 +2313,11 @@ EvalPlanQual(EState *estate, Index rti,
 		relation = NULL;
 		foreach(l, estate->es_rowMarks)
 		{
-			if (((ExecRowMark *) lfirst(l))->rti == rti)
+			ExecRowMark *erm = lfirst(l);
+
+			if (erm->rti == rti)
 			{
-				relation = ((ExecRowMark *) lfirst(l))->relation;
+				relation = erm->relation;
 				break;
 			}
 		}
@@ -2479,8 +2673,6 @@ EvalPlanQualStart(evalPlanQual *epq, EState *estate, evalPlanQual *priorepq)
 	epqstate->es_result_relation_info = estate->es_result_relation_info;
 	epqstate->es_junkFilter = estate->es_junkFilter;
 	/* es_trig_target_relations must NOT be copied */
-	epqstate->es_into_relation_descriptor = estate->es_into_relation_descriptor;
-	epqstate->es_into_relation_use_wal = estate->es_into_relation_use_wal;
 	epqstate->es_param_list_info = estate->es_param_list_info;
 	if (estate->es_plannedstmt->nParamExec > 0)
 		epqstate->es_param_exec_vals = (ParamExecData *)
@@ -2614,15 +2806,15 @@ ExecGetActivePlanTree(QueryDesc *queryDesc)
  *
  * We implement SELECT INTO by diverting SELECT's normal output with
  * a specialized DestReceiver type.
- *
- * TODO: remove some of the INTO-specific cruft from EState, and keep
- * it in the DestReceiver instead.
  */
 
 typedef struct
 {
 	DestReceiver pub;			/* publicly-known function pointers */
 	EState	   *estate;			/* EState we are working with */
+	Relation	rel;			/* Relation to write to */
+	int			hi_options;		/* heap_insert performance options */
+	BulkInsertState bistate;	/* bulk insert state */
 } DR_intorel;
 
 /*
@@ -2646,6 +2838,7 @@ OpenIntoRel(QueryDesc *queryDesc)
 	Oid			intoRelationId;
 	TupleDesc	tupdesc;
 	DR_intorel *myState;
+	static char *validnsps[] = HEAP_RELOPT_NAMESPACES;
 
 	Assert(into);
 
@@ -2704,11 +2897,13 @@ OpenIntoRel(QueryDesc *queryDesc)
 	/* Parse and validate any reloptions */
 	reloptions = transformRelOptions((Datum) 0,
 									 into->options,
+									 NULL,
+									 validnsps,
 									 true,
 									 false);
 	(void) heap_reloptions(RELKIND_RELATION, reloptions, true);
 
-	/* have to copy the actual tupdesc to get rid of any constraints */
+	/* Copy the tupdesc because heap_create_with_catalog modifies it */
 	tupdesc = CreateTupleDescCopy(queryDesc->tupDesc);
 
 	/* Now we can actually create the new relation */
@@ -2718,6 +2913,7 @@ OpenIntoRel(QueryDesc *queryDesc)
 											  InvalidOid,
 											  GetUserId(),
 											  tupdesc,
+											  NIL,
 											  RELKIND_RELATION,
 											  false,
 											  true,
@@ -2739,29 +2935,41 @@ OpenIntoRel(QueryDesc *queryDesc)
 	 * AlterTableCreateToastTable ends with CommandCounterIncrement(), so that
 	 * the TOAST table will be visible for insertion.
 	 */
-	AlterTableCreateToastTable(intoRelationId);
+	reloptions = transformRelOptions((Datum) 0,
+									 into->options,
+									 "toast",
+									 validnsps,
+									 true,
+									 false);
+
+	(void) heap_reloptions(RELKIND_TOASTVALUE, reloptions, true);
+
+	AlterTableCreateToastTable(intoRelationId, InvalidOid, reloptions, false);
 
 	/*
 	 * And open the constructed table for writing.
 	 */
 	intoRelationDesc = heap_open(intoRelationId, AccessExclusiveLock);
 
-	/* use_wal off requires rd_targblock be initially invalid */
-	Assert(intoRelationDesc->rd_targblock == InvalidBlockNumber);
-
-	/*
-	 * We can skip WAL-logging the insertions, unless PITR is in use.
-	 */
-	estate->es_into_relation_use_wal = XLogArchivingActive();
-	estate->es_into_relation_descriptor = intoRelationDesc;
-
 	/*
 	 * Now replace the query's DestReceiver with one for SELECT INTO
 	 */
-	queryDesc->dest = CreateDestReceiver(DestIntoRel, NULL);
+	queryDesc->dest = CreateDestReceiver(DestIntoRel);
 	myState = (DR_intorel *) queryDesc->dest;
 	Assert(myState->pub.mydest == DestIntoRel);
 	myState->estate = estate;
+	myState->rel = intoRelationDesc;
+
+	/*
+	 * We can skip WAL-logging the insertions, unless PITR is in use.  We can
+	 * skip the FSM in any case.
+	 */
+	myState->hi_options = HEAP_INSERT_SKIP_FSM |
+		(XLogArchivingActive() ? 0 : HEAP_INSERT_SKIP_WAL);
+	myState->bistate = GetBulkInsertState();
+
+	/* Not using WAL requires rd_targblock be initially invalid */
+	Assert(intoRelationDesc->rd_targblock == InvalidBlockNumber);
 }
 
 /*
@@ -2770,33 +2978,31 @@ OpenIntoRel(QueryDesc *queryDesc)
 static void
 CloseIntoRel(QueryDesc *queryDesc)
 {
-	EState	   *estate = queryDesc->estate;
+	DR_intorel *myState = (DR_intorel *) queryDesc->dest;
 
 	/* OpenIntoRel might never have gotten called */
-	if (estate->es_into_relation_descriptor)
+	if (myState && myState->pub.mydest == DestIntoRel && myState->rel)
 	{
+		FreeBulkInsertState(myState->bistate);
+
 		/* If we skipped using WAL, must heap_sync before commit */
-		if (!estate->es_into_relation_use_wal)
-			heap_sync(estate->es_into_relation_descriptor);
+		if (myState->hi_options & HEAP_INSERT_SKIP_WAL)
+			heap_sync(myState->rel);
 
 		/* close rel, but keep lock until commit */
-		heap_close(estate->es_into_relation_descriptor, NoLock);
+		heap_close(myState->rel, NoLock);
 
-		estate->es_into_relation_descriptor = NULL;
+		myState->rel = NULL;
 	}
 }
 
 /*
  * CreateIntoRelDestReceiver -- create a suitable DestReceiver object
- *
- * Since CreateDestReceiver doesn't accept the parameters we'd need,
- * we just leave the private fields empty here.  OpenIntoRel will
- * fill them in.
  */
 DestReceiver *
 CreateIntoRelDestReceiver(void)
 {
-	DR_intorel *self = (DR_intorel *) palloc(sizeof(DR_intorel));
+	DR_intorel *self = (DR_intorel *) palloc0(sizeof(DR_intorel));
 
 	self->pub.receiveSlot = intorel_receive;
 	self->pub.rStartup = intorel_startup;
@@ -2804,7 +3010,7 @@ CreateIntoRelDestReceiver(void)
 	self->pub.rDestroy = intorel_destroy;
 	self->pub.mydest = DestIntoRel;
 
-	self->estate = NULL;
+	/* private fields will be set by OpenIntoRel */
 
 	return (DestReceiver *) self;
 }
@@ -2825,20 +3031,27 @@ static void
 intorel_receive(TupleTableSlot *slot, DestReceiver *self)
 {
 	DR_intorel *myState = (DR_intorel *) self;
-	EState	   *estate = myState->estate;
 	HeapTuple	tuple;
 
-	tuple = ExecCopySlotTuple(slot);
+	/*
+	 * get the heap tuple out of the tuple table slot, making sure we have a
+	 * writable copy
+	 */
+	tuple = ExecMaterializeSlot(slot);
 
-	heap_insert(estate->es_into_relation_descriptor,
+	/*
+	 * force assignment of new OID (see comments in ExecInsert)
+	 */
+	if (myState->rel->rd_rel->relhasoids)
+		HeapTupleSetOid(tuple, InvalidOid);
+
+	heap_insert(myState->rel,
 				tuple,
-				estate->es_output_cid,
-				estate->es_into_relation_use_wal,
-				false);			/* never any point in using FSM */
+				myState->estate->es_output_cid,
+				myState->hi_options,
+				myState->bistate);
 
 	/* We know this is a newly created relation, so there are no indexes */
-
-	heap_freetuple(tuple);
 
 	IncrAppended();
 }

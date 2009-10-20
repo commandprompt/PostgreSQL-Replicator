@@ -4,7 +4,7 @@
  *	  prototypes for nodeHash.c
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -41,8 +41,10 @@ extern void ExecHashGetBucketAndBatch(HashJoinTable hashtable,
 extern HashJoinTuple ExecScanHashBucket(HashJoinState *hjstate,
 				   ExprContext *econtext);
 extern void ExecHashTableReset(HashJoinTable hashtable);
-extern void ExecChooseHashTableSize(double ntuples, int tupwidth,
+extern void ExecChooseHashTableSize(double ntuples, int tupwidth, bool useskew,
 						int *numbuckets,
-						int *numbatches);
+						int *numbatches,
+						int *num_skew_mcvs);
+extern int	ExecHashGetSkewBucket(HashJoinTable hashtable, uint32 hashvalue);
 
 #endif   /* NODEHASH_H */

@@ -4,7 +4,7 @@
  *	  routines to support running postgres in 'bootstrap' mode
  *	bootstrap mode is used to create the initial template database
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include <time.h>
 #include <unistd.h>
 #include <signal.h>
 #ifdef HAVE_GETOPT_H
@@ -34,15 +35,15 @@
 #include "postmaster/bgwriter.h"
 #include "postmaster/walwriter.h"
 #include "postmaster/replication.h"
-#include "storage/freespace.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
-#include "utils/flatfiles.h"
 #include "utils/fmgroids.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/tqual.h"
 
 extern int	optind;
 extern char *optarg;
@@ -123,9 +124,9 @@ static const struct typinfo TypInfo[] = {
 	F_INT2IN, F_INT2OUT},
 	{"int4", INT4OID, 0, 4, true, 'i', 'p',
 	F_INT4IN, F_INT4OUT},
-	{"float4", FLOAT4OID, 0, 4, false, 'i', 'p',
+	{"float4", FLOAT4OID, 0, 4, FLOAT4PASSBYVAL, 'i', 'p',
 	F_FLOAT4IN, F_FLOAT4OUT},
-	{"name", NAMEOID, CHAROID, NAMEDATALEN, false, 'i', 'p',
+	{"name", NAMEOID, CHAROID, NAMEDATALEN, false, 'c', 'p',
 	F_NAMEIN, F_NAMEOUT},
 	{"regclass", REGCLASSOID, 0, 4, true, 'i', 'p',
 	F_REGCLASSIN, F_REGCLASSOUT},
@@ -170,7 +171,7 @@ struct typmap
 static struct typmap **Typ = NULL;
 static struct typmap *Ap = NULL;
 
-static char Blanks[MAXATTR];
+static bool Nulls[MAXATTR];
 
 Form_pg_attribute attrtypes[MAXATTR];	/* points to attribute info */
 static Datum values[MAXATTR];	/* corresponding attribute values */
@@ -430,15 +431,12 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			proc_exit(1);		/* should never return */
 
 		case StartupProcess:
-			bootstrap_signals();
-			StartupXLOG();
-			LoadFreeSpaceMap();
-			BuildFlatFiles(false);
-			proc_exit(0);		/* startup done */
+			/* don't set signals, startup process has its own agenda */
+			StartupProcessMain();
+			proc_exit(1);		/* should never return */
 
 		case BgWriterProcess:
 			/* don't set signals, bgwriter has its own agenda */
-			InitXLOGAccess();
 			BackgroundWriterMain();
 			proc_exit(1);		/* should never return */
 
@@ -506,7 +504,7 @@ BootstrapModeMain(char *dbname)
 	for (i = 0; i < MAXATTR; i++)
 	{
 		attrtypes[i] = NULL;
-		Blanks[i] = ' ';
+		Nulls[i] = false;
 	}
 	for (i = 0; i < STRTABLESIZE; ++i)
 		strtable[i] = NULL;
@@ -651,9 +649,9 @@ boot_openrel(char *relname)
 		closerel(NULL);
 
 	elog(DEBUG4, "open relation %s, attrsize %d",
-		 relname, (int) ATTRIBUTE_TUPLE_SIZE);
+		 relname, (int) ATTRIBUTE_FIXED_PART_SIZE);
 
-	boot_reldesc = heap_openrv(makeRangeVar(NULL, relname), NoLock);
+	boot_reldesc = heap_openrv(makeRangeVar(NULL, relname, -1), NoLock);
 	numattr = boot_reldesc->rd_rel->relnatts;
 	for (i = 0; i < numattr; i++)
 	{
@@ -661,7 +659,7 @@ boot_openrel(char *relname)
 			attrtypes[i] = AllocateAttribute();
 		memmove((char *) attrtypes[i],
 				(char *) boot_reldesc->rd_att->attrs[i],
-				ATTRIBUTE_TUPLE_SIZE);
+				ATTRIBUTE_FIXED_PART_SIZE);
 
 		{
 			Form_pg_attribute at = attrtypes[i];
@@ -727,7 +725,7 @@ DefineAttr(char *name, char *type, int attnum)
 
 	if (attrtypes[attnum] == NULL)
 		attrtypes[attnum] = AllocateAttribute();
-	MemSet(attrtypes[attnum], 0, ATTRIBUTE_TUPLE_SIZE);
+	MemSet(attrtypes[attnum], 0, ATTRIBUTE_FIXED_PART_SIZE);
 
 	namestrcpy(&attrtypes[attnum]->attname, name);
 	elog(DEBUG4, "column %s %s", NameStr(attrtypes[attnum]->attname), type);
@@ -815,7 +813,7 @@ InsertOneTuple(Oid objectid)
 	tupDesc = CreateTupleDesc(numattr,
 							  RelationGetForm(boot_reldesc)->relhasoids,
 							  attrtypes);
-	tuple = heap_formtuple(tupDesc, values, Blanks);
+	tuple = heap_form_tuple(tupDesc, values, Nulls);
 	if (objectid != (Oid) 0)
 		HeapTupleSetOid(tuple, objectid);
 	pfree(tupDesc);				/* just free's tupDesc, not the attrtypes */
@@ -825,10 +823,10 @@ InsertOneTuple(Oid objectid)
 	elog(DEBUG4, "row inserted");
 
 	/*
-	 * Reset blanks for next tuple
+	 * Reset null markers for next tuple
 	 */
 	for (i = 0; i < numattr; i++)
-		Blanks[i] = ' ';
+		Nulls[i] = false;
 }
 
 /* ----------------
@@ -875,7 +873,7 @@ InsertOneNull(int i)
 	elog(DEBUG4, "inserting column %d NULL", i);
 	Assert(i >= 0 || i < MAXATTR);
 	values[i] = PointerGetDatum(NULL);
-	Blanks[i] = 'n';
+	Nulls[i] = true;
 }
 
 /* ----------------
@@ -1035,16 +1033,19 @@ boot_get_type_io_data(Oid typid,
 
 /* ----------------
  *		AllocateAttribute
+ *
+ * Note: bootstrap never sets any per-column ACLs, so we only need
+ * ATTRIBUTE_FIXED_PART_SIZE space per attribute.
  * ----------------
  */
 static Form_pg_attribute
 AllocateAttribute(void)
 {
-	Form_pg_attribute attribute = (Form_pg_attribute) malloc(ATTRIBUTE_TUPLE_SIZE);
+	Form_pg_attribute attribute = (Form_pg_attribute) malloc(ATTRIBUTE_FIXED_PART_SIZE);
 
 	if (!PointerIsValid(attribute))
 		elog(FATAL, "out of memory");
-	MemSet(attribute, 0, ATTRIBUTE_TUPLE_SIZE);
+	MemSet(attribute, 0, ATTRIBUTE_FIXED_PART_SIZE);
 
 	return attribute;
 }

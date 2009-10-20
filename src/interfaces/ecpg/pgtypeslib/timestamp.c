@@ -1,3 +1,6 @@
+/*
+ * $PostgreSQL$
+ */
 #include "postgres_fe.h"
 
 #include <time.h>
@@ -88,11 +91,18 @@ tm2timestamp(struct tm * tm, fsec_t fsec, int *tzp, timestamp * result)
 static timestamp
 SetEpochTimestamp(void)
 {
+#ifdef HAVE_INT64_TIMESTAMP
+	int64		noresult = 0;
+#else
+	double		noresult = 0.0;
+#endif
 	timestamp	dt;
 	struct tm	tt,
 			   *tm = &tt;
 
-	GetEpochTime(tm);
+	if (GetEpochTime(tm) < 0)
+		return noresult;
+
 	tm2timestamp(tm, 0, NULL, &dt);
 	return dt;
 }	/* SetEpochTimestamp() */
@@ -292,7 +302,7 @@ PGTYPEStimestamp_from_asc(char *str, char **endptr)
 		return (noresult);
 	}
 
-	if (ParseDateTime(str, lowstr, field, ftype, MAXDATEFIELDS, &nf, ptr) != 0 ||
+	if (ParseDateTime(str, lowstr, field, ftype, &nf, ptr) != 0 ||
 		DecodeDateTime(field, ftype, nf, &dtype, tm, &fsec, 0) != 0)
 	{
 		errno = PGTYPES_TS_BAD_TIMESTAMP;
@@ -369,7 +379,8 @@ PGTYPEStimestamp_current(timestamp * ts)
 	struct tm	tm;
 
 	GetCurrentDateTime(&tm);
-	tm2timestamp(&tm, 0, NULL, ts);
+	if (errno == 0)
+		tm2timestamp(&tm, 0, NULL, ts);
 	return;
 }
 

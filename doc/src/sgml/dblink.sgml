@@ -14,6 +14,10 @@
  </para>
 
  <refentry id="CONTRIB-DBLINK-CONNECT">
+  <refmeta>
+   <refentrytitle>dblink_connect</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_connect</refname>
    <refpurpose>opens a persistent connection to a remote database</refpurpose>
@@ -38,6 +42,20 @@
     only one unnamed connection is permitted at a time.  The connection
     will persist until closed or until the database session is ended.
    </para>
+
+   <para>
+    The connection string may also be the name of an existing foreign
+    server.  It is recommended to use
+    the <function>postgresql_fdw_validator</function> when defining
+    the corresponding foreign-data wrapper.  See the example below, as
+    well as the following:
+    <simplelist type="inline">
+     <member><xref linkend="sql-createforeigndatawrapper" endterm="sql-createforeigndatawrapper-title"></member>
+     <member><xref linkend="sql-createserver" endterm="sql-createserver-title"></member>
+     <member><xref linkend="sql-createusermapping" endterm="sql-createusermapping-title"></member>
+    </simplelist>
+   </para>
+
   </refsect1>
 
   <refsect1>
@@ -109,11 +127,62 @@
  ----------------
   OK
  (1 row)
+
+ -- FOREIGN DATA WRAPPER functionality
+ -- Note: local connection must require password authentication for this to work properly
+ --       Otherwise, you will receive the following error from dblink_connect():
+ --       ----------------------------------------------------------------------
+ --       ERROR:  password is required
+ --       DETAIL:  Non-superuser cannot connect if the server does not request a password.
+ --       HINT:  Target server's authentication method must be changed.
+ CREATE USER dblink_regression_test WITH PASSWORD 'secret';
+ CREATE FOREIGN DATA WRAPPER postgresql VALIDATOR postgresql_fdw_validator;
+ CREATE SERVER fdtest FOREIGN DATA WRAPPER postgresql OPTIONS (hostaddr '127.0.0.1', dbname 'contrib_regression');
+
+ CREATE USER MAPPING FOR dblink_regression_test SERVER fdtest OPTIONS (user 'dblink_regression_test', password 'secret');
+ GRANT USAGE ON FOREIGN SERVER fdtest TO dblink_regression_test;
+ GRANT SELECT ON TABLE foo TO dblink_regression_test;
+
+ \set ORIGINAL_USER :USER
+ \c - dblink_regression_test
+ SELECT dblink_connect('myconn', 'fdtest');
+  dblink_connect 
+ ----------------
+  OK
+ (1 row)
+
+ SELECT * FROM dblink('myconn','SELECT * FROM foo') AS t(a int, b text, c text[]);
+  a  | b |       c       
+ ----+---+---------------
+   0 | a | {a0,b0,c0}
+   1 | b | {a1,b1,c1}
+   2 | c | {a2,b2,c2}
+   3 | d | {a3,b3,c3}
+   4 | e | {a4,b4,c4}
+   5 | f | {a5,b5,c5}
+   6 | g | {a6,b6,c6}
+   7 | h | {a7,b7,c7}
+   8 | i | {a8,b8,c8}
+   9 | j | {a9,b9,c9}
+  10 | k | {a10,b10,c10}
+ (11 rows)
+
+ \c - :ORIGINAL_USER
+ REVOKE USAGE ON FOREIGN SERVER fdtest FROM dblink_regression_test;
+ REVOKE SELECT ON TABLE foo FROM  dblink_regression_test;
+ DROP USER MAPPING FOR dblink_regression_test SERVER fdtest;
+ DROP USER dblink_regression_test;
+ DROP SERVER fdtest;
+ DROP FOREIGN DATA WRAPPER postgresql;
    </programlisting>
   </refsect1>
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-CONNECT-U">
+  <refmeta>
+   <refentrytitle>dblink_connect_u</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_connect_u</refname>
    <refpurpose>opens a persistent connection to a remote database, insecurely</refpurpose>
@@ -140,12 +209,19 @@
     involve a password, then impersonation and subsequent escalation of
     privileges can occur, because the session will appear to have
     originated from the user as which the local <productname>PostgreSQL</>
-    server runs.  Therefore, <function>dblink_connect_u()</> is initially
+    server runs.  Also, even if the remote server does demand a password,
+    it is possible for the password to be supplied from the server
+    environment, such as a <filename>~/.pgpass</> file belonging to the
+    server's user.  This opens not only a risk of impersonation, but the
+    possibility of exposing a password to an untrustworthy remote server.
+    Therefore, <function>dblink_connect_u()</> is initially
     installed with all privileges revoked from <literal>PUBLIC</>,
     making it un-callable except by superusers.  In some situations
     it may be appropriate to grant <literal>EXECUTE</> permission for
     <function>dblink_connect_u()</> to specific users who are considered
-    trustworthy, but this should be done with care.
+    trustworthy, but this should be done with care.  It is also recommended
+    that any <filename>~/.pgpass</> file belonging to the server's user
+    <emphasis>not</> contain any records specifying a wildcard host name.
    </para>
 
    <para>
@@ -155,6 +231,10 @@
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-DISCONNECT">
+  <refmeta>
+   <refentrytitle>dblink_disconnect</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_disconnect</refname>
    <refpurpose>closes a persistent connection to a remote database</refpurpose>
@@ -221,6 +301,10 @@
  </refentry>
 
  <refentry id="CONTRIB-DBLINK">
+  <refmeta>
+   <refentrytitle>dblink</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink</refname>
    <refpurpose>executes a query in a remote database</refpurpose>
@@ -439,6 +523,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-EXEC">
+  <refmeta>
+   <refentrytitle>dblink_exec</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_exec</refname>
    <refpurpose>executes a command in a remote database</refpurpose>
@@ -567,6 +655,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-OPEN">
+  <refmeta>
+   <refentrytitle>dblink_open</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_open</refname>
    <refpurpose>opens a cursor in a remote database</refpurpose>
@@ -682,6 +774,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-FETCH">
+  <refmeta>
+   <refentrytitle>dblink_fetch</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_fetch</refname>
    <refpurpose>returns rows from an open cursor in a remote database</refpurpose>
@@ -826,6 +922,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-CLOSE">
+  <refmeta>
+   <refentrytitle>dblink_close</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_close</refname>
    <refpurpose>closes a cursor in a remote database</refpurpose>
@@ -928,6 +1028,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-GET-CONNECTIONS">
+  <refmeta>
+   <refentrytitle>dblink_get_connections</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_get_connections</refname>
    <refpurpose>returns the names of all open named dblink connections</refpurpose>
@@ -964,6 +1068,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-ERROR-MESSAGE">
+  <refmeta>
+   <refentrytitle>dblink_error_message</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_error_message</refname>
    <refpurpose>gets last error message on the named connection</refpurpose>
@@ -1018,6 +1126,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-SEND-QUERY">
+  <refmeta>
+   <refentrytitle>dblink_send_query</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_send_query</refname>
    <refpurpose>sends an async query to a remote database</refpurpose>
@@ -1091,6 +1203,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-IS-BUSY">
+  <refmeta>
+   <refentrytitle>dblink_is_busy</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_is_busy</refname>
    <refpurpose>checks if connection is busy with an async query</refpurpose>
@@ -1145,6 +1261,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-GET-RESULT">
+  <refmeta>
+   <refentrytitle>dblink_get_result</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_get_result</refname>
    <refpurpose>gets an async query result</refpurpose>
@@ -1288,6 +1408,10 @@ SELECT *
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-CANCEL-QUERY">
+  <refmeta>
+   <refentrytitle>dblink_cancel_query</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_cancel_query</refname>
    <refpurpose>cancels any active query on the named connection</refpurpose>
@@ -1346,50 +1470,11 @@ SELECT *
   </refsect1>
  </refentry>
 
- <refentry id="CONTRIB-DBLINK-CURRENT-QUERY">
-  <refnamediv>
-   <refname>dblink_current_query</refname>
-   <refpurpose>returns the current query string</refpurpose>
-  </refnamediv>
-
-  <refsynopsisdiv>
-   <synopsis>
-    dblink_current_query() returns text
-   </synopsis>
-  </refsynopsisdiv>
-
-  <refsect1>
-   <title>Description</title>
-
-   <para>
-    Returns the currently executing interactive command string of the
-    local database session, or NULL if it can't be determined.  Note
-    that this function is not really related to <filename>dblink</>'s
-    other functionality.  It is provided since it is sometimes useful
-    in generating queries to be forwarded to remote databases.
-   </para>
-  </refsect1>
-
-  <refsect1>
-   <title>Return Value</title>
-
-   <para>Returns a copy of the currently executing query string.</para>
-  </refsect1>
-
-  <refsect1>
-   <title>Example</title>
-
-   <programlisting>
-test=# select dblink_current_query();
-      dblink_current_query
---------------------------------
- select dblink_current_query();
-(1 row)
-   </programlisting>
-  </refsect1>
- </refentry>
-
  <refentry id="CONTRIB-DBLINK-GET-PKEY">
+  <refmeta>
+   <refentrytitle>dblink_get_pkey</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_get_pkey</refname>
    <refpurpose>returns the positions and field names of a relation's
@@ -1464,6 +1549,10 @@ test=# select * from dblink_get_pkey('foobar');
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-BUILD-SQL-INSERT">
+  <refmeta>
+   <refentrytitle>dblink_build_sql_insert</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_build_sql_insert</refname>
    <refpurpose>
@@ -1576,6 +1665,10 @@ test=# select * from dblink_get_pkey('foobar');
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-BUILD-SQL-DELETE">
+  <refmeta>
+   <refentrytitle>dblink_build_sql_delete</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_build_sql_delete</refname>
    <refpurpose>builds a DELETE statement using supplied values for primary
@@ -1671,6 +1764,10 @@ test=# select * from dblink_get_pkey('foobar');
  </refentry>
 
  <refentry id="CONTRIB-DBLINK-BUILD-SQL-UPDATE">
+  <refmeta>
+   <refentrytitle>dblink_build_sql_update</refentrytitle>
+  </refmeta>
+
   <refnamediv>
    <refname>dblink_build_sql_update</refname>
    <refpurpose>builds an UPDATE statement using a local tuple, replacing

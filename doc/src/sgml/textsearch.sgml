@@ -74,7 +74,7 @@
    <listitem>
     <para>
      <emphasis>Parsing documents into <firstterm>tokens</></emphasis>. It is
-     useful to identify various classes of tokens, e.g. numbers, words,
+     useful to identify various classes of tokens, e.g., numbers, words,
      complex words, email addresses, so that they can be processed
      differently.  In principle token classes depend on the specific
      application, but for most purposes it is adequate to use a predefined
@@ -323,7 +323,7 @@ text @@ text
     The above are all simple text search examples.  As mentioned before, full
     text search functionality includes the ability to do many more things:
     skip indexing certain words (stop words), process synonyms, and use
-    sophisticated parsing, e.g. parse based on more than just white space.
+    sophisticated parsing, e.g., parse based on more than just white space.
     This functionality is controlled by <firstterm>text search
     configurations</>.  <productname>PostgreSQL</> comes with predefined
     configurations for many languages, and you can easily create your own
@@ -416,7 +416,7 @@ text @@ text
    <title>Searching a Table</title>
 
    <para>
-    It is possible to do full text search with no index.  A simple query
+    It is possible to do a full text search without an index.  A simple query
     to print the <structname>title</> of each row that contains the word
     <literal>friend</> in its <structfield>body</> field is:
 
@@ -455,7 +455,8 @@ WHERE to_tsvector(body) @@ to_tsquery('friend');
 SELECT title
 FROM pgweb
 WHERE to_tsvector(title || ' ' || body) @@ to_tsquery('create &amp; table')
-ORDER BY last_mod_date DESC LIMIT 10;
+ORDER BY last_mod_date DESC
+LIMIT 10;
 </programlisting>
 
     For clarity we omitted the <function>coalesce</function> function calls
@@ -518,7 +519,7 @@ CREATE INDEX pgweb_idx ON pgweb USING gin(to_tsvector(config_name, body));
     recording which configuration was used for each index entry.  This
     would be useful, for example, if the document collection contained
     documents in different languages.  Again,
-    queries that are to use the index must be phrased to match, e.g.
+    queries that are meant to use the index must be phrased to match, e.g.,
     <literal>WHERE to_tsvector(config_name, body) @@ 'a &amp; b'</>.
    </para>
 
@@ -555,7 +556,8 @@ CREATE INDEX textsearch_idx ON pgweb USING gin(textsearchable_index_col);
 SELECT title
 FROM pgweb
 WHERE textsearchable_index_col @@ to_tsquery('create &amp; table')
-ORDER BY last_mod_date DESC LIMIT 10;
+ORDER BY last_mod_date DESC
+LIMIT 10;
 </programlisting>
    </para>
 
@@ -754,6 +756,20 @@ SELECT to_tsquery('english', 'Fat | Rats:AB');
  'fat' | 'rat':AB
 </programlisting>
 
+    Also, <literal>*</> can be attached to a lexeme to specify prefix matching:
+
+<programlisting>
+SELECT to_tsquery('supern:*A &amp; star:A*B');
+        to_tsquery        
+--------------------------
+ 'supern':*A &amp; 'star':*AB
+</programlisting>
+
+    Such a lexeme will match any word in a <type>tsvector</> that begins
+    with the given string.
+   </para>
+
+   <para>
     <function>to_tsquery</function> can also accept single-quoted
     phrases.  This is primarily useful when the configuration includes a
     thesaurus dictionary that may trigger on such phrases.
@@ -798,7 +814,8 @@ SELECT to_tsquery('''supernovae stars'' &amp; !crab');
 </programlisting>
 
     Note that <function>plainto_tsquery</> cannot
-    recognize either Boolean operators or weight labels in its input:
+    recognize Boolean operators, weight labels, or prefix-match labels
+    in its input:
 
 <programlisting>
 SELECT plainto_tsquery('english', 'The Fat &amp; Rats:C');
@@ -825,7 +842,7 @@ SELECT plainto_tsquery('english', 'The Fat &amp; Rats:C');
     document, and how important is the part of the document where they occur.
     However, the concept of relevancy is vague and very application-specific.
     Different applications might require additional information for ranking,
-    e.g. document modification time.  The built-in ranking functions are only
+    e.g., document modification time.  The built-in ranking functions are only
     examples.  You can write your own ranking functions and/or combine their
     results with additional factors to fit your specific needs.
    </para>
@@ -843,7 +860,8 @@ SELECT plainto_tsquery('english', 'The Fat &amp; Rats:C');
 
       <term>
        <synopsis>
-        ts_rank(<optional> <replaceable class="PARAMETER">weights</replaceable> <type>float4[]</>, </optional> <replaceable class="PARAMETER">vector</replaceable> <type>tsvector</>, <replaceable class="PARAMETER">query</replaceable> <type>tsquery</> <optional>, <replaceable class="PARAMETER">normalization</replaceable> <type>integer</> </optional>) returns <type>float4</>
+        ts_rank(<optional> <replaceable class="PARAMETER">weights</replaceable> <type>float4[]</>, </optional> <replaceable class="PARAMETER">vector</replaceable> <type>tsvector</>,
+                <replaceable class="PARAMETER">query</replaceable> <type>tsquery</> <optional>, <replaceable class="PARAMETER">normalization</replaceable> <type>integer</> </optional>) returns <type>float4</>
        </synopsis>
       </term>
 
@@ -862,7 +880,8 @@ SELECT plainto_tsquery('english', 'The Fat &amp; Rats:C');
 
       <term>
        <synopsis>
-        ts_rank_cd(<optional> <replaceable class="PARAMETER">weights</replaceable> <type>float4[]</>, </optional> <replaceable class="PARAMETER">vector</replaceable> <type>tsvector</>, <replaceable class="PARAMETER">query</replaceable> <type>tsquery</> <optional>, <replaceable class="PARAMETER">normalization</replaceable> <type>integer</> </optional>) returns <type>float4</>
+        ts_rank_cd(<optional> <replaceable class="PARAMETER">weights</replaceable> <type>float4[]</>, </optional> <replaceable class="PARAMETER">vector</replaceable> <type>tsvector</>,
+                   <replaceable class="PARAMETER">query</replaceable> <type>tsquery</> <optional>, <replaceable class="PARAMETER">normalization</replaceable> <type>integer</> </optional>) returns <type>float4</>
        </synopsis>
       </term>
 
@@ -906,13 +925,13 @@ SELECT plainto_tsquery('english', 'The Fat &amp; Rats:C');
 </programlisting>
 
     Typically weights are used to mark words from special areas of the
-    document, like the title or an initial abstract, so that they can be
-    treated as more or less important than words in the document body.
+    document, like the title or an initial abstract, so they can be
+    treated with more or less importance than words in the document body.
    </para>
 
    <para>
     Since a longer document has a greater chance of containing a query term
-    it is reasonable to take into account document size, e.g. a hundred-word
+    it is reasonable to take into account document size, e.g., a hundred-word
     document with five instances of a search word is probably more relevant
     than a thousand-word document with five instances.  Both ranking functions
     take an integer <replaceable>normalization</replaceable> option that
@@ -981,7 +1000,8 @@ SELECT plainto_tsquery('english', 'The Fat &amp; Rats:C');
 SELECT title, ts_rank_cd(textsearch, query) AS rank
 FROM apod, to_tsquery('neutrino|(dark &amp; matter)') query
 WHERE query @@ textsearch
-ORDER BY rank DESC LIMIT 10;
+ORDER BY rank DESC
+LIMIT 10;
                      title                     |   rank
 -----------------------------------------------+----------
  Neutrinos in the Sun                          |      3.1
@@ -1002,7 +1022,8 @@ ORDER BY rank DESC LIMIT 10;
 SELECT title, ts_rank_cd(textsearch, query, 32 /* rank/(rank+1) */ ) AS rank
 FROM apod, to_tsquery('neutrino|(dark &amp; matter)') query
 WHERE  query @@ textsearch
-ORDER BY rank DESC LIMIT 10;
+ORDER BY rank DESC
+LIMIT 10;
                      title                     |        rank
 -----------------------------------------------+-------------------
  Neutrinos in the Sun                          | 0.756097569485493
@@ -1065,9 +1086,10 @@ ORDER BY rank DESC LIMIT 10;
     <itemizedlist  spacing="compact" mark="bullet">
      <listitem>
       <para>
-       <literal>StartSel</>, <literal>StopSel</literal>: the strings with which
-       query words appearing in the document should be delimited to distinguish
-       them from other excerpted words.
+       <literal>StartSel</>, <literal>StopSel</literal>: the strings with
+       which to delimit query words appearing in the document, to distinguish
+       them from other excerpted words.  You must double-quote these strings
+       if they contain spaces or commas.
       </para>
      </listitem>
      <listitem >
@@ -1080,13 +1102,36 @@ ORDER BY rank DESC LIMIT 10;
       <para>
        <literal>ShortWord</literal>: words of this length or less will be
        dropped at the start and end of a headline. The default
-       value of three eliminates the English articles.
+       value of three eliminates common English articles.
       </para>
      </listitem>
      <listitem>
       <para>
        <literal>HighlightAll</literal>: Boolean flag;  if
-       <literal>true</literal> the whole document will be highlighted.
+       <literal>true</literal> the whole document will be used as the
+       headline, ignoring the preceding three parameters.
+      </para>
+     </listitem>
+     <listitem>
+      <para>
+       <literal>MaxFragments</literal>: maximum number of text excerpts
+       or fragments to display.  The default value of zero selects a
+       non-fragment-oriented headline generation method.  A value greater than
+       zero selects fragment-based headline generation.  This method
+       finds text fragments with as many query words as possible and
+       stretches those fragments around the query words.  As a result
+       query words are close to the middle of each fragment and have words on
+       each side. Each fragment will be of at most <literal>MaxWords</> and
+       words of length <literal>ShortWord</> or less are dropped at the start
+       and end of each fragment. If not all query words are found in the
+       document, then a single fragment of the first <literal>MinWords</>
+       in the document will be displayed.
+      </para>
+     </listitem>
+     <listitem>
+      <para>
+       <literal>FragmentDelimiter</literal>: When more than one fragment is
+       displayed, the fragments will be separated by this string.
       </para>
      </listitem>
     </itemizedlist>
@@ -1094,7 +1139,9 @@ ORDER BY rank DESC LIMIT 10;
     Any unspecified options receive these defaults:
 
 <programlisting>
-StartSel=&lt;b&gt;, StopSel=&lt;/b&gt;, MaxWords=35, MinWords=15, ShortWord=3, HighlightAll=FALSE
+StartSel=&lt;b&gt;, StopSel=&lt;/b&gt;,
+MaxWords=35, MinWords=15, ShortWord=3, HighlightAll=FALSE,
+MaxFragments=0, FragmentDelimiter=" ... "
 </programlisting>
    </para>
 
@@ -1102,17 +1149,20 @@ StartSel=&lt;b&gt;, StopSel=&lt;/b&gt;, MaxWords=35, MinWords=15, ShortWord=3, H
     For example:
 
 <programlisting>
-SELECT ts_headline('english', 'The most common type of search
+SELECT ts_headline('english',
+  'The most common type of search
 is to find all documents containing given query terms 
 and return them in order of their similarity to the
-query.', to_tsquery('query &amp; similarity'));
+query.',
+  to_tsquery('query &amp; similarity'));
                         ts_headline                         
 ------------------------------------------------------------
- given &lt;b&gt;query&lt;/b&gt; terms
+ containing given &lt;b&gt;query&lt;/b&gt; terms 
  and return them in order of their &lt;b&gt;similarity&lt;/b&gt; to the
  &lt;b&gt;query&lt;/b&gt;.
 
-SELECT ts_headline('english', 'The most common type of search
+SELECT ts_headline('english',
+  'The most common type of search
 is to find all documents containing given query terms
 and return them in order of their similarity to the
 query.',
@@ -1120,7 +1170,7 @@ query.',
   'StartSel = &lt;, StopSel = &gt;');
                       ts_headline                      
 -------------------------------------------------------
- given &lt;query&gt; terms
+ containing given &lt;query&gt; terms
  and return them in order of their &lt;similarity&gt; to the
  &lt;query&gt;.
 </programlisting>
@@ -1139,7 +1189,8 @@ SELECT id, ts_headline(body, q), rank
 FROM (SELECT id, body, q, ts_rank_cd(ti, q) AS rank
       FROM apod, to_tsquery('stars') q
       WHERE ti @@ q
-      ORDER BY rank DESC LIMIT 10) AS foo;
+      ORDER BY rank DESC
+      LIMIT 10) AS foo;
 </programlisting>
    </para>
 
@@ -1223,7 +1274,7 @@ FROM (SELECT id, body, q, ts_rank_cd(ti, q) AS rank
 
      <listitem>
       <para>
-       This function returns a copy of the input vector in which every
+       <function>setweight</> returns a copy of the input vector in which every
        position has been labeled with the given <replaceable>weight</>, either
        <literal>A</literal>, <literal>B</literal>, <literal>C</literal>, or
        <literal>D</literal>.  (<literal>D</literal> is the default for new
@@ -1423,7 +1474,7 @@ SELECT querytree(to_tsquery('!defined'));
     <para>
      The <function>ts_rewrite</function> family of functions search a
      given <type>tsquery</> for occurrences of a target
-     subquery, and replace each occurrence with another
+     subquery, and replace each occurrence with a
      substitute subquery.  In essence this operation is a
      <type>tsquery</>-specific version of substring replacement.
      A target and substitute combination can be
@@ -1523,7 +1574,9 @@ SELECT ts_rewrite(to_tsquery('supernovae &amp; crab'), 'SELECT * FROM aliases');
      We can change the rewriting rules just by updating the table:
 
 <programlisting>
-UPDATE aliases SET s = to_tsquery('supernovae|sn &amp; !nebulae') WHERE t = to_tsquery('supernovae');
+UPDATE aliases
+SET s = to_tsquery('supernovae|sn &amp; !nebulae')
+WHERE t = to_tsquery('supernovae');
 
 SELECT ts_rewrite(to_tsquery('supernovae &amp; crab'), 'SELECT * FROM aliases');
                  ts_rewrite                  
@@ -1534,7 +1587,7 @@ SELECT ts_rewrite(to_tsquery('supernovae &amp; crab'), 'SELECT * FROM aliases');
 
     <para>
      Rewriting can be slow when there are many rewriting rules, since it
-     checks every rule for a possible hit. To filter out obvious non-candidate
+     checks every rule for a possible match. To filter out obvious non-candidate
      rules we can use the containment operators for the <type>tsquery</type>
      type. In the example below, we select only those rules which might match
      the original query:
@@ -1626,7 +1679,7 @@ SELECT title, body FROM messages WHERE tsv @@ to_tsquery('title &amp; body');
    </para>
 
    <para>
-    A limitation of the built-in triggers is that they treat all the
+    A limitation of these built-in triggers is that they treat all the
     input columns alike.  To process columns differently &mdash; for
     example, to weight title differently from body &mdash; it is necessary
     to write a custom trigger.  Here is an example using
@@ -1670,11 +1723,13 @@ ON messages FOR EACH ROW EXECUTE PROCEDURE messages_trigger();
    </para>
 
    <synopsis>
-    ts_stat(<replaceable class="PARAMETER">sqlquery</replaceable> <type>text</>, <optional> <replaceable class="PARAMETER">weights</replaceable> <type>text</>, </optional> OUT <replaceable class="PARAMETER">word</replaceable> <type>text</>, OUT <replaceable class="PARAMETER">ndoc</replaceable> <type>integer</>, OUT <replaceable class="PARAMETER">nentry</replaceable> <type>integer</>) returns <type>setof record</>
+    ts_stat(<replaceable class="PARAMETER">sqlquery</replaceable> <type>text</>, <optional> <replaceable class="PARAMETER">weights</replaceable> <type>text</>, </optional>
+            OUT <replaceable class="PARAMETER">word</replaceable> <type>text</>, OUT <replaceable class="PARAMETER">ndoc</replaceable> <type>integer</>,
+            OUT <replaceable class="PARAMETER">nentry</replaceable> <type>integer</>) returns <type>setof record</>
    </synopsis>
 
    <para>
-    <replaceable>sqlquery</replaceable> is a text value containing a SQL
+    <replaceable>sqlquery</replaceable> is a text value containing an SQL
     query which must return a single <type>tsvector</type> column.
     <function>ts_stat</> executes the query and returns statistics about
     each distinct lexeme (word) contained in the <type>tsvector</type>
@@ -1881,12 +1936,12 @@ LIMIT 10;
 
   <note>
    <para>
-    The parser's notion of a <quote>letter</> is determined by the server's
+    The parser's notion of a <quote>letter</> is determined by the database's
     locale setting, specifically <varname>lc_ctype</>.  Words containing
     only the basic ASCII letters are reported as a separate token type,
     since it is sometimes useful to distinguish them.  In most European
     languages, token types <literal>word</> and <literal>asciiword</>
-    should always be treated alike.
+    should be treated alike.
    </para>
   </note>
 
@@ -2209,7 +2264,8 @@ SELECT ts_lexize('public.simple_dict','The');
     dictionary can be used to overcome linguistic problems, for example, to
     prevent an English stemmer dictionary from reducing the word 'Paris' to
     'pari'.  It is enough to have a <literal>Paris paris</literal> line in the
-    synonym dictionary and put it before the <literal>english_stem</> dictionary:
+    synonym dictionary and put it before the <literal>english_stem</>
+    dictionary.  For example:
 
 <programlisting>
 SELECT * FROM ts_debug('english', 'Paris');
@@ -2223,7 +2279,8 @@ CREATE TEXT SEARCH DICTIONARY my_synonym (
 );
 
 ALTER TEXT SEARCH CONFIGURATION english
-    ALTER MAPPING FOR asciiword WITH my_synonym, english_stem;
+    ALTER MAPPING FOR asciiword
+    WITH my_synonym, english_stem;
 
 SELECT * FROM ts_debug('english', 'Paris');
    alias   |   description   | token |       dictionaries        | dictionary | lexemes 
@@ -2242,10 +2299,17 @@ SELECT * FROM ts_debug('english', 'Paris');
     <productname>PostgreSQL</> installation's shared-data directory).
     The file format is just one line
     per word to be substituted, with the word followed by its synonym,
-    separated by white space.  Blank lines and trailing spaces are ignored,
-    and upper case is folded to lower case.
+    separated by white space.  Blank lines and trailing spaces are ignored.
    </para>
 
+   <para>
+    The <literal>synonym</> template also has an optional parameter
+    <literal>CaseSensitive</>, which defaults to <literal>false</>.  When
+    <literal>CaseSensitive</> is <literal>false</>, words in the synonym file
+    are folded to lower case, as are input tokens.  When it is
+    <literal>true</>, words and tokens are not folded to lower case,
+    but are compared as-is.
+   </para>
   </sect2>
 
   <sect2 id="textsearch-thesaurus">
@@ -2376,7 +2440,8 @@ CREATE TEXT SEARCH DICTIONARY thesaurus_simple (
 
 <programlisting>
 ALTER TEXT SEARCH CONFIGURATION russian
-    ALTER MAPPING FOR asciiword, asciihword, hword_asciipart WITH thesaurus_simple;
+    ALTER MAPPING FOR asciiword, asciihword, hword_asciipart
+    WITH thesaurus_simple;
 </programlisting>
    </para>
 
@@ -2405,7 +2470,8 @@ CREATE TEXT SEARCH DICTIONARY thesaurus_astro (
 );
 
 ALTER TEXT SEARCH CONFIGURATION russian
-    ALTER MAPPING FOR asciiword, asciihword, hword_asciipart WITH thesaurus_astro, english_stem;
+    ALTER MAPPING FOR asciiword, asciihword, hword_asciipart
+    WITH thesaurus_astro, english_stem;
 </programlisting>
 
     Now we can see how it works.
@@ -2468,7 +2534,7 @@ SELECT plainto_tsquery('supernova star');
     <firstterm>morphological dictionaries</>, which can normalize many
     different linguistic forms of a word into the same lexeme.  For example,
     an English <application>Ispell</> dictionary can match all declensions and
-    conjugations of the search term <literal>bank</literal>, e.g.
+    conjugations of the search term <literal>bank</literal>, e.g.,
     <literal>banking</>, <literal>banked</>, <literal>banks</>,
     <literal>banks'</>, and <literal>bank's</>.
    </para>
@@ -2515,9 +2581,8 @@ CREATE TEXT SEARCH DICTIONARY english_ispell (
    </para>
 
    <para>
-    Ispell dictionaries support splitting compound words.
-    This is a nice feature and
-    <productname>PostgreSQL</productname> supports it.
+    Ispell dictionaries support splitting compound words;
+    a useful feature.
     Notice that the affix file should specify a special flag using the
     <literal>compoundwords controlled</literal> statement that marks dictionary
     words that can participate in compound formation:
@@ -2551,8 +2616,8 @@ SELECT ts_lexize('norwegian_ispell', 'sjokoladefabrikk');
    <title><application>Snowball</> Dictionary</title>
 
    <para>
-    The <application>Snowball</> dictionary template is based on the project
-    of Martin Porter, inventor of the popular Porter's stemming algorithm
+    The <application>Snowball</> dictionary template is based on a project
+    by Martin Porter, inventor of the popular Porter's stemming algorithm
     for the English language.  Snowball now provides stemming algorithms for
     many languages (see the <ulink url="http://snowball.tartarus.org">Snowball
     site</ulink> for more information).  Each algorithm understands how to
@@ -2615,9 +2680,9 @@ CREATE TEXT SEARCH DICTIONARY english_stem (
    </para>
 
    <para>
-    As an example, we will create a configuration
-    <literal>pg</literal>, starting from a duplicate of the built-in
-    <literal>english</> configuration.
+    As an example we will create a configuration
+    <literal>pg</literal>, starting by duplicating the built-in
+    <literal>english</> configuration:
 
 <programlisting>
 CREATE TEXT SEARCH CONFIGURATION public.pg ( COPY = pg_catalog.english );
@@ -2715,7 +2780,7 @@ SHOW default_text_search_config;
 
   <para>
    The behavior of a custom text search configuration can easily become
-   complicated enough to be confusing or undesirable.  The functions described
+   confusing.  The functions described
    in this section are useful for testing text search objects.  You can
    test a complete configuration, or test parsers and dictionaries separately.
   </para>
@@ -2886,7 +2951,7 @@ SELECT * FROM ts_debug('public.english','The Brightest supernovaes');
   </para>
 
   <para>
-   You can reduce the volume of output by explicitly specifying which columns
+   You can reduce the width of the output by explicitly specifying which columns
    you want to see:
 
 <programlisting>
@@ -2916,8 +2981,10 @@ FROM ts_debug('public.english','The Brightest supernovaes');
   </indexterm>
 
   <synopsis>
-   ts_parse(<replaceable class="PARAMETER">parser_name</replaceable> <type>text</>, <replaceable class="PARAMETER">document</replaceable> <type>text</>, OUT <replaceable class="PARAMETER">tokid</> <type>integer</>, OUT <replaceable class="PARAMETER">token</> <type>text</>) returns <type>setof record</>
-   ts_parse(<replaceable class="PARAMETER">parser_oid</replaceable> <type>oid</>, <replaceable class="PARAMETER">document</replaceable> <type>text</>, OUT <replaceable class="PARAMETER">tokid</> <type>integer</>, OUT <replaceable class="PARAMETER">token</> <type>text</>) returns <type>setof record</>
+   ts_parse(<replaceable class="PARAMETER">parser_name</replaceable> <type>text</>, <replaceable class="PARAMETER">document</replaceable> <type>text</>,
+            OUT <replaceable class="PARAMETER">tokid</> <type>integer</>, OUT <replaceable class="PARAMETER">token</> <type>text</>) returns <type>setof record</>
+   ts_parse(<replaceable class="PARAMETER">parser_oid</replaceable> <type>oid</>, <replaceable class="PARAMETER">document</replaceable> <type>text</>,
+            OUT <replaceable class="PARAMETER">tokid</> <type>integer</>, OUT <replaceable class="PARAMETER">token</> <type>text</>) returns <type>setof record</>
   </synopsis>
 
   <para>
@@ -2945,8 +3012,10 @@ SELECT * FROM ts_parse('default', '123 - a number');
   </indexterm>
 
   <synopsis>
-   ts_token_type(<replaceable class="PARAMETER">parser_name</> <type>text</>, OUT <replaceable class="PARAMETER">tokid</> <type>integer</>, OUT <replaceable class="PARAMETER">alias</> <type>text</>, OUT <replaceable class="PARAMETER">description</> <type>text</>) returns <type>setof record</>
-   ts_token_type(<replaceable class="PARAMETER">parser_oid</> <type>oid</>, OUT <replaceable class="PARAMETER">tokid</> <type>integer</>, OUT <replaceable class="PARAMETER">alias</> <type>text</>, OUT <replaceable class="PARAMETER">description</> <type>text</>) returns <type>setof record</>
+   ts_token_type(<replaceable class="PARAMETER">parser_name</> <type>text</>, OUT <replaceable class="PARAMETER">tokid</> <type>integer</>,
+                 OUT <replaceable class="PARAMETER">alias</> <type>text</>, OUT <replaceable class="PARAMETER">description</> <type>text</>) returns <type>setof record</>
+   ts_token_type(<replaceable class="PARAMETER">parser_oid</> <type>oid</>, OUT <replaceable class="PARAMETER">tokid</> <type>integer</>,
+                 OUT <replaceable class="PARAMETER">alias</> <type>text</>, OUT <replaceable class="PARAMETER">description</> <type>text</>) returns <type>setof record</>
   </synopsis>
 
   <para>
@@ -3072,8 +3141,8 @@ SELECT plainto_tsquery('supernovae stars');
    There are two kinds of indexes that can be used to speed up full text
    searches.
    Note that indexes are not mandatory for full text searching, but in
-   cases where a column is searched on a regular basis, an index will
-   usually be desirable.
+   cases where a column is searched on a regular basis, an index is
+   usually desirable.
 
    <variablelist>
 
@@ -3127,26 +3196,14 @@ SELECT plainto_tsquery('supernovae stars');
 
   <para>
    There are substantial performance differences between the two index types,
-   so it is important to understand which to use.
+   so it is important to understand their characteristics.
   </para>
 
   <para>
    A GiST index is <firstterm>lossy</firstterm>, meaning that the index
    may produce false matches, and it is necessary
    to check the actual table row to eliminate such false matches.
-   <productname>PostgreSQL</productname> does this automatically; for
-   example, in the query plan below, the <literal>Filter:</literal>
-   line indicates the index output will be rechecked:
-
-<programlisting>
-EXPLAIN SELECT * FROM apod WHERE textsearch @@ to_tsquery('supernovae');
-                               QUERY PLAN
--------------------------------------------------------------------------
- Index Scan using textsearch_gidx on apod  (cost=0.00..12.29 rows=2 width=1469)
-   Index Cond: (textsearch @@ '''supernova'''::tsquery)
-   Filter: (textsearch @@ '''supernova'''::tsquery)
-</programlisting>
-
+   (<productname>PostgreSQL</productname> does this automatically when needed.)
    GiST indexes are lossy because each document is represented in the
    index by a fixed-length signature. The signature is generated by hashing
    each word into a random bit in an n-bit string, with all these bits OR-ed
@@ -3157,7 +3214,7 @@ EXPLAIN SELECT * FROM apod WHERE textsearch @@ to_tsquery('supernovae');
   </para>
 
   <para>
-   Lossiness causes performance degradation due to useless fetches of table
+   Lossiness causes performance degradation due to unnecessary fetches of table
    records that turn out to be false matches.  Since random access to table
    records is slow, this limits the usefulness of GiST indexes.  The
    likelihood of false matches depends on several factors, in particular the
@@ -3166,57 +3223,11 @@ EXPLAIN SELECT * FROM apod WHERE textsearch @@ to_tsquery('supernovae');
   </para>
 
   <para>
-   GIN indexes are not lossy but their performance depends logarithmically on
-   the number of unique words.
-  </para>
-
-  <para>
-   Actually, GIN indexes store only the words (lexemes) of <type>tsvector</>
-   values, and not their weight labels.  Thus, while a GIN index can be
-   considered non-lossy for a query that does not specify weights, it is
-   lossy for one that does.  Thus a table row recheck is needed when using
-   a query that involves weights.  Unfortunately, in the current design of
-   <productname>PostgreSQL</>, whether a recheck is needed is a static
-   property of a particular operator, and not something that can be enabled
-   or disabled on-the-fly depending on the values given to the operator.
-   To deal with this situation without imposing the overhead of rechecks
-   on queries that do not need them, the following approach has been
-   adopted:
-  </para>
-
-  <itemizedlist  spacing="compact" mark="bullet">
-   <listitem>
-    <para>
-     The standard text match operator <literal>@@</> is marked as non-lossy
-     for GIN indexes.
-    </para>
-   </listitem>
-
-   <listitem>
-    <para>
-     An additional match operator <literal>@@@</> is provided, and marked
-     as lossy for GIN indexes.  This operator behaves exactly like
-     <literal>@@</> otherwise.
-    </para>
-   </listitem>
-
-   <listitem>
-    <para>
-     When a GIN index search is initiated with the <literal>@@</> operator,
-     the index support code will throw an error if the query specifies any
-     weights.  This protects against giving wrong answers due to failure
-     to recheck the weights.
-    </para>
-   </listitem>
-  </itemizedlist>
-
-  <para>
-   In short, you must use <literal>@@@</> rather than <literal>@@</> to
-   perform GIN index searches on queries that involve weight restrictions.
-   For queries that do not have weight restrictions, either operator will
-   work, but <literal>@@</> will be faster.
-   This awkwardness will probably be addressed in a future release of
-   <productname>PostgreSQL</>.
+   GIN indexes are not lossy for standard queries, but their performance
+   depends logarithmically on the number of unique words.
+   (However, GIN indexes store only the words (lexemes) of <type>tsvector</>
+   values, and not their weight labels.  Thus a table row recheck is needed
+   when using a query that involves weights.)
   </para>
 
   <para>
@@ -3236,12 +3247,14 @@ EXPLAIN SELECT * FROM apod WHERE textsearch @@ to_tsquery('supernovae');
     </listitem>
     <listitem>
      <para>
-      GIN indexes are about ten times slower to update than GiST
+      GIN indexes are moderately slower to update than GiST indexes, but
+      about 10 times slower if fast-update support was disabled
+      (see <xref linkend="gin-fast-update"> for details)
      </para>
     </listitem>
     <listitem>
      <para>
-      GIN indexes are two-to-three times larger than GiST
+      GIN indexes are two-to-three times larger than GiST indexes
      </para>
     </listitem>
    </itemizedlist>
@@ -3266,8 +3279,8 @@ EXPLAIN SELECT * FROM apod WHERE textsearch @@ to_tsquery('supernovae');
   <para>
    Partitioning of big collections and the proper use of GiST and GIN indexes
    allows the implementation of very fast searches with online update.
-   Partitioning can be done at the database level using table inheritance
-   and <varname>constraint_exclusion</>, or by distributing documents over
+   Partitioning can be done at the database level using table inheritance,
+   or by distributing documents over
    servers and collecting search results using the <filename>contrib/dblink</>
    extension module. The latter is possible because ranking functions use
    only local information.
@@ -3288,7 +3301,7 @@ EXPLAIN SELECT * FROM apod WHERE textsearch @@ to_tsquery('supernovae');
   </para>
 
   <para>
-   The optional parameter <literal>PATTERN</literal> should be the name of
+   The optional parameter <literal>PATTERN</literal> can be the name of
    a text search object, optionally schema-qualified.  If
    <literal>PATTERN</literal> is omitted then information about all
    visible objects will be displayed.  <literal>PATTERN</literal> can be a
@@ -3569,7 +3582,7 @@ Parser: "pg_catalog.default"
      Text search configuration setup is completely different now.
      Instead of manually inserting rows into configuration tables,
      search is configured through the specialized SQL commands shown
-     earlier in this chapter.  There is not currently any automated
+     earlier in this chapter.  There is no automated
      support for converting an existing custom configuration for 8.3;
      you're on your own here.
     </para>

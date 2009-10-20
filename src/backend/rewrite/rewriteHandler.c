@@ -3,7 +3,7 @@
  * rewriteHandler.c
  *		Primary module of query rewriter.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -16,10 +16,9 @@
 #include "access/heapam.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
-#include "optimizer/clauses.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/analyze.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteDefine.h"
 #include "rewrite/rewriteHandler.h"
@@ -216,13 +215,21 @@ AcquireRewriteLocks(Query *parsetree)
 		}
 	}
 
+	/* Recurse into subqueries in WITH */
+	foreach(l, parsetree->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr *) lfirst(l);
+
+		AcquireRewriteLocks((Query *) cte->ctequery);
+	}
+
 	/*
 	 * Recurse into sublink subqueries, too.  But we already did the ones in
-	 * the rtable.
+	 * the rtable and cteList.
 	 */
 	if (parsetree->hasSubLinks)
 		query_tree_walker(parsetree, acquireLocksOnSubLinks, NULL,
-						  QTW_IGNORE_RT_SUBQUERIES);
+						  QTW_IGNORE_RC_SUBQUERIES);
 }
 
 /*
@@ -374,7 +381,7 @@ rewriteRuleAction(Query *parsetree,
 					break;
 			}
 			if (sub_action->hasSubLinks)
-				break;		/* no need to keep scanning rtable */
+				break;			/* no need to keep scanning rtable */
 		}
 	}
 
@@ -456,7 +463,8 @@ rewriteRuleAction(Query *parsetree,
 												   sub_action->rtable),
 										  parsetree->targetList,
 										  event,
-										  current_varno);
+										  current_varno,
+										  NULL);
 		if (sub_action_ptr)
 			*sub_action_ptr = sub_action;
 		else
@@ -486,7 +494,8 @@ rewriteRuleAction(Query *parsetree,
 								parsetree->rtable),
 					   rule_action->returningList,
 					   CMD_SELECT,
-					   0);
+					   0,
+					   &rule_action->hasSubLinks);
 
 		/*
 		 * There could have been some SubLinks in parsetree's returningList,
@@ -494,7 +503,7 @@ rewriteRuleAction(Query *parsetree,
 		 */
 		if (parsetree->hasSubLinks && !rule_action->hasSubLinks)
 			rule_action->hasSubLinks =
-					checkExprHasSubLink((Node *) rule_action->returningList);
+				checkExprHasSubLink((Node *) rule_action->returningList);
 	}
 
 	return rule_action;
@@ -694,6 +703,7 @@ rewriteTargetList(Query *parsetree, Relation target_relation,
 												InvalidOid, -1,
 												att_tup->atttypid,
 												COERCE_IMPLICIT_CAST,
+												-1,
 												false,
 												false);
 				}
@@ -926,7 +936,8 @@ build_column_default(Relation rel, int attrno)
 								 expr, exprtype,
 								 atttype, atttypmod,
 								 COERCION_ASSIGNMENT,
-								 COERCE_IMPLICIT_CAST);
+								 COERCE_IMPLICIT_CAST,
+								 -1);
 	if (expr == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
@@ -1033,6 +1044,7 @@ rewriteValuesRTE(RangeTblEntry *rte, Relation target_relation, List *attrnos)
 												InvalidOid, -1,
 												att_tup->atttypid,
 												COERCE_IMPLICIT_CAST,
+												-1,
 												false,
 												false);
 				}
@@ -1168,9 +1180,13 @@ ApplyRetrieveRule(Query *parsetree,
 	Assert(subrte->relid == relation->rd_id);
 	subrte->requiredPerms = rte->requiredPerms;
 	subrte->checkAsUser = rte->checkAsUser;
+	subrte->selectedCols = rte->selectedCols;
+	subrte->modifiedCols = rte->modifiedCols;
 
 	rte->requiredPerms = 0;		/* no permission check on subquery itself */
 	rte->checkAsUser = InvalidOid;
+	rte->selectedCols = NULL;
+	rte->modifiedCols = NULL;
 
 	/*
 	 * FOR UPDATE/SHARE of view?
@@ -1224,6 +1240,35 @@ markQueryForLocking(Query *qry, Node *jtnode, bool forUpdate, bool noWait)
 		{
 			/* FOR UPDATE/SHARE of subquery is propagated to subquery's rels */
 			markQueryForLocking(rte->subquery, (Node *) rte->subquery->jointree,
+								forUpdate, noWait);
+		}
+		else if (rte->rtekind == RTE_CTE)
+		{
+			/*
+			 * We allow FOR UPDATE/SHARE of a WITH query to be propagated into
+			 * the WITH, but it doesn't seem very sane to allow this for a
+			 * reference to an outer-level WITH (compare
+			 * transformLockingClause).  Which simplifies life here.
+			 */
+			CommonTableExpr *cte = NULL;
+			ListCell   *lc;
+
+			if (rte->ctelevelsup > 0 || rte->self_reference)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("SELECT FOR UPDATE/SHARE cannot be applied to an outer-level WITH query")));
+			foreach(lc, qry->cteList)
+			{
+				cte = (CommonTableExpr *) lfirst(lc);
+				if (strcmp(cte->ctename, rte->ctename) == 0)
+					break;
+			}
+			if (lc == NULL)		/* shouldn't happen */
+				elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
+			/* should be analyzed by now */
+			Assert(IsA(cte->ctequery, Query));
+			markQueryForLocking((Query *) cte->ctequery,
+								(Node *) ((Query *) cte->ctequery)->jointree,
 								forUpdate, noWait);
 		}
 	}
@@ -1293,6 +1338,7 @@ static Query *
 fireRIRrules(Query *parsetree, List *activeRIRs)
 {
 	int			rt_index;
+	ListCell   *lc;
 
 	/*
 	 * don't try to convert this into a foreach loop, because rtable list can
@@ -1405,13 +1451,22 @@ fireRIRrules(Query *parsetree, List *activeRIRs)
 		heap_close(rel, NoLock);
 	}
 
+	/* Recurse into subqueries in WITH */
+	foreach(lc, parsetree->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+
+		cte->ctequery = (Node *)
+			fireRIRrules((Query *) cte->ctequery, activeRIRs);
+	}
+
 	/*
 	 * Recurse into sublink subqueries, too.  But we already did the ones in
-	 * the rtable.
+	 * the rtable and cteList.
 	 */
 	if (parsetree->hasSubLinks)
 		query_tree_walker(parsetree, fireRIRonSubLink, (void *) activeRIRs,
-						  QTW_IGNORE_RT_SUBQUERIES);
+						  QTW_IGNORE_RC_SUBQUERIES);
 
 	return parsetree;
 }
@@ -1457,7 +1512,8 @@ CopyAndAddInvertedQual(Query *parsetree,
 							  rt_fetch(rt_index, parsetree->rtable),
 							  parsetree->targetList,
 							  event,
-							  rt_index);
+							  rt_index,
+							  &parsetree->hasSubLinks);
 	/* And attach the fixed qual */
 	AddInvertedQual(parsetree, new_qual);
 

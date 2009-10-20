@@ -16,10 +16,11 @@
 #include "access/nbtree.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
+#include "catalog/storage.h"
 #include "commands/dbcommands.h"
 #include "commands/sequence.h"
 #include "commands/tablespace.h"
-#include "storage/smgr.h"
+#include "storage/freespace.h"
 
 
 const RmgrData RmgrTable[RM_MAX_ID + 1] = {

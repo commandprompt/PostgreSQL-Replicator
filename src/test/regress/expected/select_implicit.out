@@ -8,8 +8,8 @@
 -- load test data
 CREATE TABLE test_missing_target (a int, b int, c char(8), d char);
 INSERT INTO test_missing_target VALUES (0, 1, 'XXXX', 'A');
-INSERT INTO test_missing_target VALUES (1, 2, 'AAAA', 'b');
-INSERT INTO test_missing_target VALUES (2, 2, 'AAAA', 'c');
+INSERT INTO test_missing_target VALUES (1, 2, 'ABAB', 'b');
+INSERT INTO test_missing_target VALUES (2, 2, 'ABAB', 'c');
 INSERT INTO test_missing_target VALUES (3, 3, 'BBBB', 'D');
 INSERT INTO test_missing_target VALUES (4, 3, 'BBBB', 'e');
 INSERT INTO test_missing_target VALUES (5, 3, 'bbbb', 'F');
@@ -21,7 +21,7 @@ INSERT INTO test_missing_target VALUES (9, 4, 'CCCC', 'j');
 SELECT c, count(*) FROM test_missing_target GROUP BY test_missing_target.c ORDER BY c;
     c     | count 
 ----------+-------
- AAAA     |     2
+ ABAB     |     2
  BBBB     |     2
  CCCC     |     2
  XXXX     |     1
@@ -45,6 +45,8 @@ SELECT count(*) FROM test_missing_target GROUP BY test_missing_target.c ORDER BY
 --   failure expected
 SELECT count(*) FROM test_missing_target GROUP BY a ORDER BY b;
 ERROR:  column "test_missing_target.b" must appear in the GROUP BY clause or be used in an aggregate function
+LINE 1: ...ECT count(*) FROM test_missing_target GROUP BY a ORDER BY b;
+                                                                     ^
 --   w/o existing GROUP BY target and w/o existing same ORDER BY target
 SELECT count(*) FROM test_missing_target GROUP BY b ORDER BY b;
  count 
@@ -71,8 +73,8 @@ SELECT c FROM test_missing_target ORDER BY a;
     c     
 ----------
  XXXX    
- AAAA    
- AAAA    
+ ABAB    
+ ABAB    
  BBBB    
  BBBB    
  bbbb    
@@ -103,7 +105,7 @@ SELECT count(*) FROM test_missing_target ORDER BY 1 desc;
 SELECT c, count(*) FROM test_missing_target GROUP BY 1 ORDER BY 1;
     c     | count 
 ----------+-------
- AAAA     |     2
+ ABAB     |     2
  BBBB     |     2
  CCCC     |     2
  XXXX     |     1
@@ -115,6 +117,8 @@ SELECT c, count(*) FROM test_missing_target GROUP BY 1 ORDER BY 1;
 --   failure expected
 SELECT c, count(*) FROM test_missing_target GROUP BY 3;
 ERROR:  GROUP BY position 3 is not in select list
+LINE 1: SELECT c, count(*) FROM test_missing_target GROUP BY 3;
+                                                             ^
 --   group w/o existing GROUP BY and ORDER BY target under ambiguous condition
 --   failure expected
 SELECT count(*) FROM test_missing_target x, test_missing_target y 
@@ -238,6 +242,8 @@ ORDER BY lower(test_missing_target.c);
 --   failure expected
 SELECT count(a) FROM test_missing_target GROUP BY a ORDER BY b;
 ERROR:  column "test_missing_target.b" must appear in the GROUP BY clause or be used in an aggregate function
+LINE 1: ...ECT count(a) FROM test_missing_target GROUP BY a ORDER BY b;
+                                                                     ^
 --   w/o existing GROUP BY target and w/o existing same ORDER BY target
 SELECT count(b) FROM test_missing_target GROUP BY b/2 ORDER BY b/2;
  count 
@@ -252,7 +258,7 @@ SELECT lower(test_missing_target.c), count(c)
   FROM test_missing_target GROUP BY lower(c) ORDER BY lower(c);
  lower | count 
 -------+-------
- aaaa  |     2
+ abab  |     2
  bbbb  |     3
  cccc  |     4
  xxxx  |     1

@@ -12,19 +12,19 @@
 /* Define to the return type of 'accept' */
 #undef ACCEPT_TYPE_RETURN
 
-/* The alignment requirement of a `double'. */
+/* The normal alignment of `double', in bytes. */
 #undef ALIGNOF_DOUBLE
 
-/* The alignment requirement of a `int'. */
+/* The normal alignment of `int', in bytes. */
 #undef ALIGNOF_INT
 
-/* The alignment requirement of a `long'. */
+/* The normal alignment of `long', in bytes. */
 #undef ALIGNOF_LONG
 
-/* The alignment requirement of a `long long int'. */
+/* The normal alignment of `long long int', in bytes. */
 #undef ALIGNOF_LONG_LONG_INT
 
-/* The alignment requirement of a `short'. */
+/* The normal alignment of `short', in bytes. */
 #undef ALIGNOF_SHORT
 
 /* Define to 1 if you want to build demo version */
@@ -32,6 +32,15 @@
 
 /* The hard limit on the number of concurrent connections. */
 #undef DEF_LIMITCONN
+
+/* Size of a disk block --- this also limits the size of a tuple. You can set
+   it bigger if you need bigger tuples (although TOAST should reduce the need
+   to have large tuples, since fields can be spread across multiple tuples).
+   BLCKSZ must be a power of 2. The maximum possible value of BLCKSZ is
+   currently 2^15 (32768). This is determined by the 15-bit widths of the
+   lp_off and lp_len fields in ItemIdData (see include/storage/itemid.h).
+   Changing BLCKSZ requires an initdb. */
+#undef BLCKSZ
 
 /* Define to the default TCP port number on which the server listens and to
    which clients will try to connect. This can be overridden at run-time, but
@@ -54,6 +63,13 @@
 /* Define to 1 to build client libraries as thread-safe code.
    (--enable-thread-safety) */
 #undef ENABLE_THREAD_SAFETY
+
+/* float4 values are passed by value if 'true', by reference if 'false' */
+#undef FLOAT4PASSBYVAL
+
+/* float8, int8, and related values are passed by value if 'true', by
+   reference if 'false' */
+#undef FLOAT8PASSBYVAL
 
 /* Define to 1 if getpwuid_r() takes a 5th argument. */
 #undef GETPWUID_R_5ARG
@@ -172,6 +188,9 @@
 /* Define to 1 if you have the `getpeereid' function. */
 #undef HAVE_GETPEEREID
 
+/* Define to 1 if you have the `getpeerucred' function. */
+#undef HAVE_GETPEERUCRED
+
 /* Define to 1 if you have the `getpwuid_r' function. */
 #undef HAVE_GETPWUID_R
 
@@ -207,6 +226,9 @@
 
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
+
+/* Define to 1 if you have the global variable 'int opterr'. */
+#undef HAVE_INT_OPTERR
 
 /* Define to 1 if you have the global variable 'int optreset'. */
 #undef HAVE_INT_OPTRESET
@@ -322,6 +344,9 @@
 
 /* Define to 1 if you have the <poll.h> header file. */
 #undef HAVE_POLL_H
+
+/* Define to 1 if you have the `posix_fadvise' function. */
+#undef HAVE_POSIX_FADVISE
 
 /* Define to 1 if you have the POSIX signal interface. */
 #undef HAVE_POSIX_SIGNALS
@@ -547,6 +572,9 @@
 /* Define to 1 if you have the external array `tzname'. */
 #undef HAVE_TZNAME
 
+/* Define to 1 if you have the <ucred.h> header file. */
+#undef HAVE_UCRED_H
+
 /* Define to 1 if the system has the type `uint64'. */
 #undef HAVE_UINT64
 
@@ -629,6 +657,9 @@
    (--with-krb-srvnam=NAME) */
 #undef PG_KRB_SRVNAM
 
+/* PostgreSQL major version as a string */
+#undef PG_MAJORVERSION
+
 /* PostgreSQL version as a string */
 #undef PG_VERSION
 
@@ -649,11 +680,30 @@
    your system. */
 #undef PTHREAD_CREATE_JOINABLE
 
-/* The size of a `size_t', as computed by sizeof. */
+/* RELSEG_SIZE is the maximum number of blocks allowed in one disk file. Thus,
+   the maximum size of a single file is RELSEG_SIZE * BLCKSZ; relations bigger
+   than that are divided into multiple files. RELSEG_SIZE * BLCKSZ must be
+   less than your OS' limit on file size. This is often 2 GB or 4GB in a
+   32-bit operating system, unless you have large file support enabled. By
+   default, we make the limit 1 GB to avoid any possible integer-overflow
+   problems within the OS. A limit smaller than necessary only means we divide
+   a large relation into more chunks than necessary, so it seems best to err
+   in the direction of a small limit. A power-of-2 value is recommended to
+   save a few cycles in md.c, but is not absolutely required. Changing
+   RELSEG_SIZE requires an initdb. */
+#undef RELSEG_SIZE
+
+/* The size of `off_t', as computed by sizeof. */
+#undef SIZEOF_OFF_T
+
+/* The size of `size_t', as computed by sizeof. */
 #undef SIZEOF_SIZE_T
 
-/* The size of a `unsigned long', as computed by sizeof. */
+/* The size of `unsigned long', as computed by sizeof. */
 #undef SIZEOF_UNSIGNED_LONG
+
+/* The size of `void *', as computed by sizeof. */
+#undef SIZEOF_VOID_P
 
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
@@ -676,6 +726,14 @@
 
 /* Define to build with zlib compression connection support (--with-zlib) */
 #undef USE_COMP
+
+/* Define to 1 if you want float4 values to be passed by value.
+   (--enable-float4-byval) */
+#undef USE_FLOAT4_BYVAL
+
+/* Define to 1 if you want float8, int8, etc values to be passed by value.
+   (--enable-float8-byval) */
+#undef USE_FLOAT8_BYVAL
 
 /* Define to 1 if you want 64-bit integer timestamp and interval support.
    (--enable-integer-datetimes) */
@@ -722,6 +780,18 @@
    first (like Motorola and SPARC, unlike Intel and VAX). */
 #undef WORDS_BIGENDIAN
 
+/* Size of a WAL file block. This need have no particular relation to BLCKSZ.
+   XLOG_BLCKSZ must be a power of 2, and if your system supports O_DIRECT I/O,
+   XLOG_BLCKSZ must be a multiple of the alignment requirement for direct-I/O
+   buffers, else direct I/O may fail. Changing XLOG_BLCKSZ requires an initdb.
+   */
+#undef XLOG_BLCKSZ
+
+/* XLOG_SEG_SIZE is the size of a single WAL file. This must be a power of 2
+   and larger than XLOG_BLCKSZ (preferably, a great deal larger than
+   XLOG_BLCKSZ). Changing XLOG_SEG_SIZE requires an initdb. */
+#undef XLOG_SEG_SIZE
+
 /* Number of bits in a file offset, on hosts where this is settable. */
 #undef _FILE_OFFSET_BITS
 
@@ -734,9 +804,11 @@
 /* Define to empty if `const' does not conform to ANSI C. */
 #undef const
 
-/* Define as `__inline' if that's what the C compiler calls it, or to nothing
-   if it is not supported. */
+/* Define to `__inline__' or `__inline' if that's what the C compiler
+   calls it, or to nothing if 'inline' is not supported under any name.  */
+#ifndef __cplusplus
 #undef inline
+#endif
 
 /* Define to empty if the C compiler does not understand signed types. */
 #undef signed

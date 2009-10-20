@@ -4,7 +4,7 @@
  *	  prototypes for various files in optimizer/path
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -89,9 +89,8 @@ extern void create_tidscan_paths(PlannerInfo *root, RelOptInfo *rel);
  *	   routines to create join paths
  */
 extern void add_paths_to_joinrel(PlannerInfo *root, RelOptInfo *joinrel,
-					 RelOptInfo *outerrel,
-					 RelOptInfo *innerrel,
-					 JoinType jointype,
+					 RelOptInfo *outerrel, RelOptInfo *innerrel,
+					 JoinType jointype, SpecialJoinInfo *sjinfo,
 					 List *restrictlist);
 
 /*
@@ -128,8 +127,8 @@ extern void add_child_rel_equivalences(PlannerInfo *root,
 						   RelOptInfo *parent_rel,
 						   RelOptInfo *child_rel);
 extern void mutate_eclass_expressions(PlannerInfo *root,
-									  Node *(*mutator) (),
-									  void *context);
+						  Node *(*mutator) (),
+						  void *context);
 extern List *find_eclass_clauses_for_index_join(PlannerInfo *root,
 								   RelOptInfo *rel,
 								   Relids outer_relids);

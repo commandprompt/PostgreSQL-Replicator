@@ -16,6 +16,10 @@
 #include <locale.h>
 
 /* postgreSQL stuff */
+#include "access/xact.h"
+#include "catalog/pg_language.h"
+#include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
 #include "funcapi.h"
@@ -23,12 +27,18 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_type.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 #include "utils/typcache.h"
-#include "utils/hsearch.h"
+
+/* define our text domain for translations */
+#undef TEXTDOMAIN
+#define TEXTDOMAIN PG_TEXTDOMAIN("plperl")
 
 /* perl stuff */
 #include "plperl.h"
@@ -186,11 +196,14 @@ _PG_init(void)
 	if (inited)
 		return;
 
+	pg_bindtextdomain(TEXTDOMAIN);
+
 	DefineCustomBoolVariable("plperl.use_strict",
-	  "If true, will compile trusted and untrusted perl code in strict mode",
+							 gettext_noop("If true, trusted and untrusted Perl code will be compiled in strict mode."),
 							 NULL,
 							 &plperl_use_strict,
-							 PGC_USERSET,
+							 false,
+							 PGC_USERSET, 0,
 							 NULL, NULL);
 
 	EmitWarningsOnPlaceholders("plperl");
@@ -260,7 +273,7 @@ _PG_init(void)
 #define SAFE_MODULE \
 	"require Safe; $Safe::VERSION"
 
-/* 
+/*
  * The temporary enabling of the caller opcode here is to work around a
  * bug in perl 5.10, which unkindly changed the way its Safe.pm works, without
  * notice. It is quite safe, as caller is informational only, and in any case
@@ -385,10 +398,7 @@ plperl_init_interp(void)
 	static char *embedding[3] = {
 		"", "-e", PERLBOOT
 	};
-
-	int nargs = 3;
-
-	char *dummy_perl_env[1] = { NULL }; 
+	int			nargs = 3;
 
 #ifdef WIN32
 
@@ -444,7 +454,11 @@ plperl_init_interp(void)
 #if defined(PERL_SYS_INIT3) && !defined(MYMALLOC)
 	/* only call this the first time through, as per perlembed man page */
 	if (interp_state == INTERP_NONE)
-		PERL_SYS_INIT3(&nargs, (char ***) &embedding, (char***)&dummy_perl_env);
+	{
+		char	   *dummy_env[1] = {NULL};
+
+		PERL_SYS_INIT3(&nargs, (char ***) &embedding, (char ***) &dummy_env);
+	}
 #endif
 
 	plperl_held_interp = perl_alloc();
@@ -534,17 +548,16 @@ plperl_safe_init(void)
 		eval_pv(SAFE_OK, FALSE);
 		if (GetDatabaseEncoding() == PG_UTF8)
 		{
-			/* 
-			 * Fill in just enough information to set up this perl
-			 * function in the safe container and call it.
-			 * For some reason not entirely clear, it prevents errors that
-			 * can arise from the regex code later trying to load
-			 * utf8 modules.
+			/*
+			 * Fill in just enough information to set up this perl function in
+			 * the safe container and call it. For some reason not entirely
+			 * clear, it prevents errors that can arise from the regex code
+			 * later trying to load utf8 modules.
 			 */
-			plperl_proc_desc desc;			
+			plperl_proc_desc desc;
 			FunctionCallInfoData fcinfo;
-			SV *ret;
-			SV *func;
+			SV		   *ret;
+			SV		   *func;
 
 			/* make sure we don't call ourselves recursively */
 			plperl_safe_init_done = true;
@@ -560,9 +573,9 @@ plperl_safe_init(void)
 			desc.arg_is_rowtype[0] = false;
 			fmgr_info(F_TEXTOUT, &(desc.arg_out_func[0]));
 
-			fcinfo.arg[0] = DirectFunctionCall1(textin, CStringGetDatum("a"));
+			fcinfo.arg[0] = CStringGetTextDatum("a");
 			fcinfo.argnull[0] = false;
-			
+
 			/* and make the call */
 			ret = plperl_call_perl_func(&desc, &fcinfo);
 		}
@@ -707,6 +720,8 @@ plperl_trigger_build_args(FunctionCallInfo fcinfo)
 												   tupdesc));
 		}
 	}
+	else if (TRIGGER_FIRED_BY_TRUNCATE(tdata->tg_event))
+		event = "TRUNCATE";
 	else
 		event = "UNKNOWN";
 
@@ -916,7 +931,7 @@ plperl_validator(PG_FUNCTION_ARGS)
 				 proc->prorettype != VOIDOID)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("plperl functions cannot return type %s",
+					 errmsg("PL/Perl functions cannot return type %s",
 							format_type_be(proc->prorettype))));
 	}
 
@@ -928,7 +943,7 @@ plperl_validator(PG_FUNCTION_ARGS)
 		if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("plperl functions cannot take type %s",
+					 errmsg("PL/Perl functions cannot accept type %s",
 							format_type_be(argtypes[i]))));
 	}
 
@@ -1283,7 +1298,7 @@ plperl_func_handler(PG_FUNCTION_ARGS)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("set-returning Perl function must return "
+					 errmsg("set-returning PL/Perl function must return "
 							"reference to array or use return_next")));
 		}
 
@@ -1316,7 +1331,7 @@ plperl_func_handler(PG_FUNCTION_ARGS)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("composite-returning Perl function "
+					 errmsg("composite-returning PL/Perl function "
 							"must return reference to hash")));
 		}
 
@@ -1413,6 +1428,8 @@ plperl_trigger_handler(PG_FUNCTION_ARGS)
 			retval = (Datum) trigdata->tg_newtuple;
 		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
 			retval = (Datum) trigdata->tg_trigtuple;
+		else if (TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
+			retval = (Datum) trigdata->tg_trigtuple;
 		else
 			retval = (Datum) 0; /* can this happen? */
 	}
@@ -1439,7 +1456,7 @@ plperl_trigger_handler(PG_FUNCTION_ARGS)
 			{
 				ereport(WARNING,
 						(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
-					   errmsg("ignoring modified tuple in DELETE trigger")));
+						 errmsg("ignoring modified row in DELETE trigger")));
 				trv = NULL;
 			}
 		}
@@ -1447,8 +1464,8 @@ plperl_trigger_handler(PG_FUNCTION_ARGS)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
-					 errmsg("result of Perl trigger function must be undef, "
-							"\"SKIP\" or \"MODIFY\"")));
+				  errmsg("result of PL/Perl trigger function must be undef, "
+						 "\"SKIP\", or \"MODIFY\"")));
 			trv = NULL;
 		}
 		retval = PointerGetDatum(trv);
@@ -1613,7 +1630,7 @@ compile_plperl_function(Oid fn_oid, bool is_trigger)
 					free(prodesc);
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("plperl functions cannot return type %s",
+							 errmsg("PL/Perl functions cannot return type %s",
 									format_type_be(procStruct->prorettype))));
 				}
 			}
@@ -1660,7 +1677,7 @@ compile_plperl_function(Oid fn_oid, bool is_trigger)
 					free(prodesc);
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("plperl functions cannot take type %s",
+							 errmsg("PL/Perl functions cannot accept type %s",
 						format_type_be(procStruct->proargtypes.values[i]))));
 				}
 
@@ -1686,8 +1703,7 @@ compile_plperl_function(Oid fn_oid, bool is_trigger)
 									  Anum_pg_proc_prosrc, &isnull);
 		if (isnull)
 			elog(ERROR, "null prosrc");
-		proc_source = DatumGetCString(DirectFunctionCall1(textout,
-														  prosrcdatum));
+		proc_source = TextDatumGetCString(prosrcdatum);
 
 		/************************************************************
 		 * Create the procedure in the interpreter
@@ -1887,7 +1903,6 @@ plperl_return_next(SV *sv)
 	FunctionCallInfo fcinfo;
 	ReturnSetInfo *rsi;
 	MemoryContext old_cxt;
-	HeapTuple	tuple;
 
 	if (!sv)
 		return;
@@ -1905,7 +1920,7 @@ plperl_return_next(SV *sv)
 		!(SvOK(sv) && SvTYPE(sv) == SVt_RV && SvTYPE(SvRV(sv)) == SVt_PVHV))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("setof-composite-returning Perl function "
+				 errmsg("SETOF-composite-returning PL/Perl function "
 						"must call return_next with reference to hash")));
 
 	if (!current_call_data->ret_tdesc)
@@ -1932,7 +1947,8 @@ plperl_return_next(SV *sv)
 
 		current_call_data->ret_tdesc = CreateTupleDescCopy(tupdesc);
 		current_call_data->tuple_store =
-			tuplestore_begin_heap(true, false, work_mem);
+			tuplestore_begin_heap(rsi->allowedModes & SFRM_Materialize_Random,
+								  false, work_mem);
 		if (prodesc->fn_retistuple)
 		{
 			current_call_data->attinmeta =
@@ -1962,8 +1978,15 @@ plperl_return_next(SV *sv)
 
 	if (prodesc->fn_retistuple)
 	{
+		HeapTuple	tuple;
+
 		tuple = plperl_build_tuple_result((HV *) SvRV(sv),
 										  current_call_data->attinmeta);
+
+		/* Make sure to store the tuple in a long-lived memory context */
+		MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
+		tuplestore_puttuple(current_call_data->tuple_store, tuple);
+		MemoryContextSwitchTo(old_cxt);
 	}
 	else
 	{
@@ -1993,13 +2016,13 @@ plperl_return_next(SV *sv)
 			isNull = true;
 		}
 
-		tuple = heap_form_tuple(current_call_data->ret_tdesc, &ret, &isNull);
+		/* Make sure to store the tuple in a long-lived memory context */
+		MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
+		tuplestore_putvalues(current_call_data->tuple_store,
+							 current_call_data->ret_tdesc,
+							 &ret, &isNull);
+		MemoryContextSwitchTo(old_cxt);
 	}
-
-	/* Make sure to store the tuple in a long-lived memory context */
-	MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
-	tuplestore_puttuple(current_call_data->tuple_store, tuple);
-	MemoryContextSwitchTo(old_cxt);
 
 	MemoryContextReset(current_call_data->tmp_cxt);
 }

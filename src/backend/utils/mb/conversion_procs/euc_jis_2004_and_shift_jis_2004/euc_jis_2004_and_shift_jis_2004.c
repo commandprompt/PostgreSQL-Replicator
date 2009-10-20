@@ -2,7 +2,7 @@
  *
  *	  EUC_JIS_2004, SHIFT_JIS_2004
  *
- * Copyright (c) 2007-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2007-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -206,6 +206,7 @@ get_ten(int b, int *ku)
 	else
 	{
 		ten = -1;				/* error */
+		*ku = 0;				/* keep compiler quiet */
 	}
 	return ten;
 }

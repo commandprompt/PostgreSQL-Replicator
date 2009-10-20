@@ -3,7 +3,7 @@
  * rewriteDefine.c
  *	  routines for defining a rewrite rule
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,23 +15,25 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_rewrite.h"
+#include "catalog/storage.h"
 #include "miscadmin.h"
-#include "optimizer/clauses.h"
-#include "parser/parse_expr.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_utilcmd.h"
 #include "rewrite/rewriteDefine.h"
 #include "rewrite/rewriteManip.h"
 #include "rewrite/rewriteSupport.h"
-#include "storage/smgr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
-#include "utils/lsyscache.h"
-#include "utils/syscache.h"
 #include "utils/inval.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
 static void checkRuleResultList(List *targetList, TupleDesc resultDesc,
@@ -59,8 +61,8 @@ InsertRule(char *rulname,
 	char	   *actiontree = nodeToString((Node *) action);
 	int			i;
 	Datum		values[Natts_pg_rewrite];
-	char		nulls[Natts_pg_rewrite];
-	char		replaces[Natts_pg_rewrite];
+	bool		nulls[Natts_pg_rewrite];
+	bool		replaces[Natts_pg_rewrite];
 	NameData	rname;
 	Relation	pg_rewrite_desc;
 	HeapTuple	tup,
@@ -73,7 +75,7 @@ InsertRule(char *rulname,
 	/*
 	 * Set up *nulls and *values arrays
 	 */
-	MemSet(nulls, ' ', sizeof(nulls));
+	MemSet(nulls, false, sizeof(nulls));
 
 	i = 0;
 	namestrcpy(&rname, rulname);
@@ -83,8 +85,8 @@ InsertRule(char *rulname,
 	values[i++] = CharGetDatum(evtype + '0');	/* ev_type */
 	values[i++] = CharGetDatum(RULE_FIRES_ON_ORIGIN);	/* ev_enabled */
 	values[i++] = BoolGetDatum(evinstead);		/* is_instead */
-	values[i++] = DirectFunctionCall1(textin, CStringGetDatum(evqual)); /* ev_qual */
-	values[i++] = DirectFunctionCall1(textin, CStringGetDatum(actiontree));		/* ev_action */
+	values[i++] = CStringGetTextDatum(evqual);	/* ev_qual */
+	values[i++] = CStringGetTextDatum(actiontree);		/* ev_action */
 
 	/*
 	 * Ready to store new pg_rewrite tuple
@@ -110,15 +112,15 @@ InsertRule(char *rulname,
 		/*
 		 * When replacing, we don't need to replace every attribute
 		 */
-		MemSet(replaces, ' ', sizeof(replaces));
-		replaces[Anum_pg_rewrite_ev_attr - 1] = 'r';
-		replaces[Anum_pg_rewrite_ev_type - 1] = 'r';
-		replaces[Anum_pg_rewrite_is_instead - 1] = 'r';
-		replaces[Anum_pg_rewrite_ev_qual - 1] = 'r';
-		replaces[Anum_pg_rewrite_ev_action - 1] = 'r';
+		MemSet(replaces, false, sizeof(replaces));
+		replaces[Anum_pg_rewrite_ev_attr - 1] = true;
+		replaces[Anum_pg_rewrite_ev_type - 1] = true;
+		replaces[Anum_pg_rewrite_is_instead - 1] = true;
+		replaces[Anum_pg_rewrite_ev_qual - 1] = true;
+		replaces[Anum_pg_rewrite_ev_action - 1] = true;
 
-		tup = heap_modifytuple(oldtup, RelationGetDescr(pg_rewrite_desc),
-							   values, nulls, replaces);
+		tup = heap_modify_tuple(oldtup, RelationGetDescr(pg_rewrite_desc),
+								values, nulls, replaces);
 
 		simple_heap_update(pg_rewrite_desc, &tup->t_self, tup);
 
@@ -129,7 +131,7 @@ InsertRule(char *rulname,
 	}
 	else
 	{
-		tup = heap_formtuple(pg_rewrite_desc->rd_att, values, nulls);
+		tup = heap_form_tuple(pg_rewrite_desc->rd_att, values, nulls);
 
 		rewriteObjectId = simple_heap_insert(pg_rewrite_desc, tup);
 	}
@@ -240,6 +242,22 @@ DefineQueryRewrite(char *rulename,
 	 * let's just grab AccessExclusiveLock all the time.
 	 */
 	event_relation = heap_open(event_relid, AccessExclusiveLock);
+
+	/*
+	 * Verify relation is of a type that rules can sensibly be applied to.
+	 */
+	if (event_relation->rd_rel->relkind != RELKIND_RELATION &&
+		event_relation->rd_rel->relkind != RELKIND_VIEW)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a table or view",
+						RelationGetRelationName(event_relation))));
+
+	if (!allowSystemTableMods && IsSystemRelation(event_relation))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a system catalog",
+						RelationGetRelationName(event_relation))));
 
 	/*
 	 * Check user has permission to apply rules to this relation.
@@ -370,7 +388,11 @@ DefineQueryRewrite(char *rulename,
 		 *
 		 * If so, check that the relation is empty because the storage for the
 		 * relation is going to be deleted.  Also insist that the rel not have
-		 * any triggers, indexes, or child tables.
+		 * any triggers, indexes, or child tables.	(Note: these tests are too
+		 * strict, because they will reject relations that once had such but
+		 * don't anymore.  But we don't really care, because this whole
+		 * business of converting relations to views is just a kluge to allow
+		 * loading ancient pg_dump files.)
 		 */
 		if (event_relation->rd_rel->relkind != RELKIND_VIEW)
 		{
@@ -384,7 +406,7 @@ DefineQueryRewrite(char *rulename,
 								RelationGetRelationName(event_relation))));
 			heap_endscan(scanDesc);
 
-			if (event_relation->rd_rel->reltriggers != 0)
+			if (event_relation->rd_rel->relhastriggers)
 				ereport(ERROR,
 						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						 errmsg("could not convert table \"%s\" to a view because it has triggers",
@@ -479,10 +501,7 @@ DefineQueryRewrite(char *rulename,
 	 * XXX what about getting rid of its TOAST table?  For now, we don't.
 	 */
 	if (RelisBecomingView)
-	{
-		RelationOpenSmgr(event_relation);
-		smgrscheduleunlink(event_relation->rd_smgr, event_relation->rd_istemp);
-	}
+		RelationDropStorage(event_relation);
 
 	/* Close rel, but keep lock till commit... */
 	heap_close(event_relation, NoLock);
@@ -628,17 +647,23 @@ setRuleCheckAsUser_Query(Query *qry, Oid userid)
 			rte->checkAsUser = userid;
 	}
 
+	/* Recurse into subquery-in-WITH */
+	foreach(l, qry->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr *) lfirst(l);
+
+		setRuleCheckAsUser_Query((Query *) cte->ctequery, userid);
+	}
+
 	/* If there are sublinks, search for them and process their RTEs */
-	/* ignore subqueries in rtable because we already processed them */
 	if (qry->hasSubLinks)
 		query_tree_walker(qry, setRuleCheckAsUser_walker, (void *) &userid,
-						  QTW_IGNORE_RT_SUBQUERIES);
+						  QTW_IGNORE_RC_SUBQUERIES);
 }
 
 
 /*
  * Change the firing semantics of an existing rule.
- *
  */
 void
 EnableDisableRule(Relation rel, const char *rulename,

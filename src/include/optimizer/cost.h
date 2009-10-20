@@ -4,7 +4,7 @@
  *	  prototypes for costsize.c and clausesel.c.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -29,6 +29,13 @@
 
 #define DEFAULT_EFFECTIVE_CACHE_SIZE  16384		/* measured in pages */
 
+typedef enum
+{
+	CONSTRAINT_EXCLUSION_OFF,	/* do not use c_e */
+	CONSTRAINT_EXCLUSION_ON,	/* apply c_e to all rels */
+	CONSTRAINT_EXCLUSION_PARTITION		/* apply c_e to otherrels only */
+} ConstraintExclusionType;
+
 
 /*
  * prototypes for costsize.c
@@ -52,7 +59,7 @@ extern bool enable_hashagg;
 extern bool enable_nestloop;
 extern bool enable_mergejoin;
 extern bool enable_hashjoin;
-extern bool constraint_exclusion;
+extern int	constraint_exclusion;
 
 extern double clamp_row_est(double nrows);
 extern double index_pages_fetched(double tuples_fetched, BlockNumber pages,
@@ -72,6 +79,8 @@ extern void cost_functionscan(Path *path, PlannerInfo *root,
 				  RelOptInfo *baserel);
 extern void cost_valuesscan(Path *path, PlannerInfo *root,
 				RelOptInfo *baserel);
+extern void cost_ctescan(Path *path, PlannerInfo *root, RelOptInfo *baserel);
+extern void cost_recursive_union(Plan *runion, Plan *nrterm, Plan *rterm);
 extern void cost_sort(Path *path, PlannerInfo *root,
 		  List *pathkeys, Cost input_cost, double tuples, int width,
 		  double limit_tuples);
@@ -83,24 +92,33 @@ extern void cost_agg(Path *path, PlannerInfo *root,
 		 int numGroupCols, double numGroups,
 		 Cost input_startup_cost, Cost input_total_cost,
 		 double input_tuples);
+extern void cost_windowagg(Path *path, PlannerInfo *root,
+			   int numWindowFuncs, int numPartCols, int numOrderCols,
+			   Cost input_startup_cost, Cost input_total_cost,
+			   double input_tuples);
 extern void cost_group(Path *path, PlannerInfo *root,
 		   int numGroupCols, double numGroups,
 		   Cost input_startup_cost, Cost input_total_cost,
 		   double input_tuples);
-extern void cost_nestloop(NestPath *path, PlannerInfo *root);
-extern void cost_mergejoin(MergePath *path, PlannerInfo *root);
-extern void cost_hashjoin(HashPath *path, PlannerInfo *root);
+extern void cost_nestloop(NestPath *path, PlannerInfo *root,
+			  SpecialJoinInfo *sjinfo);
+extern void cost_mergejoin(MergePath *path, PlannerInfo *root,
+			   SpecialJoinInfo *sjinfo);
+extern void cost_hashjoin(HashPath *path, PlannerInfo *root,
+			  SpecialJoinInfo *sjinfo);
+extern void cost_subplan(PlannerInfo *root, SubPlan *subplan, Plan *plan);
 extern void cost_qual_eval(QualCost *cost, List *quals, PlannerInfo *root);
 extern void cost_qual_eval_node(QualCost *cost, Node *qual, PlannerInfo *root);
-extern Cost get_initplan_cost(PlannerInfo *root, SubPlan *subplan);
 extern void set_baserel_size_estimates(PlannerInfo *root, RelOptInfo *rel);
 extern void set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 						   RelOptInfo *outer_rel,
 						   RelOptInfo *inner_rel,
-						   JoinType jointype,
+						   SpecialJoinInfo *sjinfo,
 						   List *restrictlist);
 extern void set_function_size_estimates(PlannerInfo *root, RelOptInfo *rel);
 extern void set_values_size_estimates(PlannerInfo *root, RelOptInfo *rel);
+extern void set_cte_size_estimates(PlannerInfo *root, RelOptInfo *rel,
+					   Plan *cteplan);
 
 /*
  * prototypes for clausesel.c
@@ -109,10 +127,12 @@ extern void set_values_size_estimates(PlannerInfo *root, RelOptInfo *rel);
 extern Selectivity clauselist_selectivity(PlannerInfo *root,
 					   List *clauses,
 					   int varRelid,
-					   JoinType jointype);
+					   JoinType jointype,
+					   SpecialJoinInfo *sjinfo);
 extern Selectivity clause_selectivity(PlannerInfo *root,
 				   Node *clause,
 				   int varRelid,
-				   JoinType jointype);
+				   JoinType jointype,
+				   SpecialJoinInfo *sjinfo);
 
 #endif   /* COST_H */

@@ -3,7 +3,7 @@
  * orindxpath.c
  *	  Routines to find index paths that match a set of OR clauses
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -96,10 +96,10 @@ create_or_index_quals(PlannerInfo *root, RelOptInfo *rel)
 	 * enforced at the relation scan level.
 	 *
 	 * We must also ignore clauses that are marked !is_pushed_down (ie they
-	 * are themselves outer-join clauses).  It would be safe to extract an
+	 * are themselves outer-join clauses).	It would be safe to extract an
 	 * index condition from such a clause if we are within the nullable rather
 	 * than the non-nullable side of its join, but we haven't got enough
-	 * context here to tell which applies.  OR clauses in outer-join quals
+	 * context here to tell which applies.	OR clauses in outer-join quals
 	 * aren't exactly common, so we'll let that case go unoptimized for now.
 	 */
 	foreach(i, rel->joininfo)
@@ -175,17 +175,18 @@ create_or_index_quals(PlannerInfo *root, RelOptInfo *rel)
 	 * selectivity will stay cached ...)
 	 */
 	or_selec = clause_selectivity(root, (Node *) or_rinfo,
-								  0, JOIN_INNER);
+								  0, JOIN_INNER, NULL);
 	if (or_selec > 0 && or_selec < 1)
 	{
 		orig_selec = clause_selectivity(root, (Node *) bestrinfo,
-										0, JOIN_INNER);
-		bestrinfo->this_selec = orig_selec / or_selec;
+										0, JOIN_INNER, NULL);
+		bestrinfo->norm_selec = orig_selec / or_selec;
 		/* clamp result to sane range */
-		if (bestrinfo->this_selec > 1)
-			bestrinfo->this_selec = 1;
+		if (bestrinfo->norm_selec > 1)
+			bestrinfo->norm_selec = 1;
+		/* It isn't an outer join clause, so no need to adjust outer_selec */
 	}
 
-	/* Tell caller to recompute rel's rows estimate */
+	/* Tell caller to recompute partial index status and rowcount estimate */
 	return true;
 }

@@ -3,7 +3,7 @@
  * nbtinsert.c
  *	  Item insertion in Lehman and Yao btrees for Postgres.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,7 +19,10 @@
 #include "access/nbtree.h"
 #include "access/transam.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
+#include "storage/lmgr.h"
 #include "utils/inval.h"
+#include "utils/tqual.h"
 
 
 typedef struct
@@ -371,7 +374,7 @@ _bt_check_unique(Relation rel, IndexTuple itup, Relation heapRel,
  *		removing any LP_DEAD tuples.
  *
  *		On entry, *buf and *offsetptr point to the first legal position
- *		where the new tuple could be inserted.  The caller should hold an
+ *		where the new tuple could be inserted.	The caller should hold an
  *		exclusive lock on *buf.  *offsetptr can also be set to
  *		InvalidOffsetNumber, in which case the function will search for the
  *		right location within the page if needed.  On exit, they point to the
@@ -415,9 +418,10 @@ _bt_findinsertloc(Relation rel,
 	if (itemsz > BTMaxItemSize(page))
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("index row size %lu exceeds btree maximum, %lu",
+				 errmsg("index row size %lu exceeds maximum %lu for index \"%s\"",
 						(unsigned long) itemsz,
-						(unsigned long) BTMaxItemSize(page)),
+						(unsigned long) BTMaxItemSize(page),
+						RelationGetRelationName(rel)),
 		errhint("Values larger than 1/3 of a buffer page cannot be indexed.\n"
 				"Consider a function index of an MD5 hash of the value, "
 				"or use full text indexing.")));
@@ -790,7 +794,7 @@ _bt_split(Relation rel, Buffer buf, OffsetNumber firstright,
 
 	rbuf = _bt_getbuf(rel, P_NEW, BT_WRITE);
 	origpage = BufferGetPage(buf);
-	leftpage = PageGetTempPage(origpage, sizeof(BTPageOpaqueData));
+	leftpage = PageGetTempPage(origpage);
 	rightpage = BufferGetPage(rbuf);
 
 	_bt_pageinit(leftpage, BufferGetPageSize(buf));
@@ -948,7 +952,7 @@ _bt_split(Relation rel, Buffer buf, OffsetNumber firstright,
 		sopaque = (BTPageOpaque) PageGetSpecialPointer(spage);
 		if (sopaque->btpo_prev != ropaque->btpo_prev)
 			elog(PANIC, "right sibling's left-link doesn't match: "
-				 "block %u links to %u instead of expected %u in index \"%s\"",
+			   "block %u links to %u instead of expected %u in index \"%s\"",
 				 ropaque->btpo_next, sopaque->btpo_prev, ropaque->btpo_prev,
 				 RelationGetRelationName(rel));
 

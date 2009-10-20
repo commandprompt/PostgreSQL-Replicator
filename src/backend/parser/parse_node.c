@@ -3,7 +3,7 @@
  * parse_node.c
  *	  various routines that make nodes for querytrees
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -18,6 +18,7 @@
 #include "catalog/pg_type.h"
 #include "mb/pg_wchar.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parsetree.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_expr.h"
@@ -26,6 +27,9 @@
 #include "utils/int8.h"
 #include "utils/syscache.h"
 #include "utils/varbit.h"
+
+
+static void pcb_error_callback(void *arg);
 
 
 /*
@@ -112,12 +116,69 @@ parser_errposition(ParseState *pstate, int location)
 
 
 /*
+ * setup_parser_errposition_callback
+ *		Arrange for non-parser errors to report an error position
+ *
+ * Sometimes the parser calls functions that aren't part of the parser
+ * subsystem and can't reasonably be passed a ParseState; yet we would
+ * like any errors thrown in those functions to be tagged with a parse
+ * error location.	Use this function to set up an error context stack
+ * entry that will accomplish that.  Usage pattern:
+ *
+ *		declare a local variable "ParseCallbackState pcbstate"
+ *		...
+ *		setup_parser_errposition_callback(&pcbstate, pstate, location);
+ *		call function that might throw error;
+ *		cancel_parser_errposition_callback(&pcbstate);
+ */
+void
+setup_parser_errposition_callback(ParseCallbackState *pcbstate,
+								  ParseState *pstate, int location)
+{
+	/* Setup error traceback support for ereport() */
+	pcbstate->pstate = pstate;
+	pcbstate->location = location;
+	pcbstate->errcontext.callback = pcb_error_callback;
+	pcbstate->errcontext.arg = (void *) pcbstate;
+	pcbstate->errcontext.previous = error_context_stack;
+	error_context_stack = &pcbstate->errcontext;
+}
+
+/*
+ * Cancel a previously-set-up errposition callback.
+ */
+void
+cancel_parser_errposition_callback(ParseCallbackState *pcbstate)
+{
+	/* Pop the error context stack */
+	error_context_stack = pcbstate->errcontext.previous;
+}
+
+/*
+ * Error context callback for inserting parser error location.
+ *
+ * Note that this will be called for *any* error occurring while the
+ * callback is installed.  We avoid inserting an irrelevant error location
+ * if the error is a query cancel --- are there any other important cases?
+ */
+static void
+pcb_error_callback(void *arg)
+{
+	ParseCallbackState *pcbstate = (ParseCallbackState *) arg;
+
+	if (geterrcode() != ERRCODE_QUERY_CANCELED)
+		(void) parser_errposition(pcbstate->pstate, pcbstate->location);
+}
+
+
+/*
  * make_var
  *		Build a Var node for an attribute identified by RTE and attrno
  */
 Var *
-make_var(ParseState *pstate, RangeTblEntry *rte, int attrno)
+make_var(ParseState *pstate, RangeTblEntry *rte, int attrno, int location)
 {
+	Var		   *result;
 	int			vnum,
 				sublevels_up;
 	Oid			vartypeid;
@@ -125,7 +186,9 @@ make_var(ParseState *pstate, RangeTblEntry *rte, int attrno)
 
 	vnum = RTERangeTablePosn(pstate, rte, &sublevels_up);
 	get_rte_attribute_type(rte, attrno, &vartypeid, &type_mod);
-	return makeVar(vnum, attrno, vartypeid, type_mod, sublevels_up);
+	result = makeVar(vnum, attrno, vartypeid, type_mod, sublevels_up);
+	result->location = location;
+	return result;
 }
 
 /*
@@ -242,11 +305,13 @@ transformArraySubscripts(ParseState *pstate,
 												subexpr, exprType(subexpr),
 												INT4OID, -1,
 												COERCION_ASSIGNMENT,
-												COERCE_IMPLICIT_CAST);
+												COERCE_IMPLICIT_CAST,
+												-1);
 				if (subexpr == NULL)
 					ereport(ERROR,
 							(errcode(ERRCODE_DATATYPE_MISMATCH),
-						  errmsg("array subscript must have type integer")));
+							 errmsg("array subscript must have type integer"),
+						parser_errposition(pstate, exprLocation(ai->lidx))));
 			}
 			else
 			{
@@ -266,11 +331,13 @@ transformArraySubscripts(ParseState *pstate,
 										subexpr, exprType(subexpr),
 										INT4OID, -1,
 										COERCION_ASSIGNMENT,
-										COERCE_IMPLICIT_CAST);
+										COERCE_IMPLICIT_CAST,
+										-1);
 		if (subexpr == NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("array subscript must have type integer")));
+					 errmsg("array subscript must have type integer"),
+					 parser_errposition(pstate, exprLocation(ai->uidx))));
 		upperIndexpr = lappend(upperIndexpr, subexpr);
 	}
 
@@ -282,20 +349,24 @@ transformArraySubscripts(ParseState *pstate,
 	{
 		Oid			typesource = exprType(assignFrom);
 		Oid			typeneeded = isSlice ? arrayType : elementType;
+		Node	   *newFrom;
 
-		assignFrom = coerce_to_target_type(pstate,
-										   assignFrom, typesource,
-										   typeneeded, elementTypMod,
-										   COERCION_ASSIGNMENT,
-										   COERCE_IMPLICIT_CAST);
-		if (assignFrom == NULL)
+		newFrom = coerce_to_target_type(pstate,
+										assignFrom, typesource,
+										typeneeded, elementTypMod,
+										COERCION_ASSIGNMENT,
+										COERCE_IMPLICIT_CAST,
+										-1);
+		if (newFrom == NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("array assignment requires type %s"
 							" but expression is of type %s",
 							format_type_be(typeneeded),
 							format_type_be(typesource)),
-			   errhint("You will need to rewrite or cast the expression.")));
+				 errhint("You will need to rewrite or cast the expression."),
+					 parser_errposition(pstate, exprLocation(assignFrom))));
+		assignFrom = newFrom;
 	}
 
 	/*
@@ -332,14 +403,15 @@ transformArraySubscripts(ParseState *pstate,
  *	too many examples that fail if we try.
  */
 Const *
-make_const(Value *value)
+make_const(ParseState *pstate, Value *value, int location)
 {
+	Const	   *con;
 	Datum		val;
 	int64		val64;
 	Oid			typeid;
 	int			typelen;
 	bool		typebyval;
-	Const	   *con;
+	ParseCallbackState pcbstate;
 
 	switch (nodeTag(value))
 	{
@@ -375,15 +447,18 @@ make_const(Value *value)
 
 					typeid = INT8OID;
 					typelen = sizeof(int64);
-					typebyval = false;	/* XXX might change someday */
+					typebyval = FLOAT8PASSBYVAL;		/* int8 and float8 alike */
 				}
 			}
 			else
 			{
+				/* arrange to report location if numeric_in() fails */
+				setup_parser_errposition_callback(&pcbstate, pstate, location);
 				val = DirectFunctionCall3(numeric_in,
 										  CStringGetDatum(strVal(value)),
 										  ObjectIdGetDatum(InvalidOid),
 										  Int32GetDatum(-1));
+				cancel_parser_errposition_callback(&pcbstate);
 
 				typeid = NUMERICOID;
 				typelen = -1;	/* variable len */
@@ -405,10 +480,13 @@ make_const(Value *value)
 			break;
 
 		case T_BitString:
+			/* arrange to report location if bit_in() fails */
+			setup_parser_errposition_callback(&pcbstate, pstate, location);
 			val = DirectFunctionCall3(bit_in,
 									  CStringGetDatum(strVal(value)),
 									  ObjectIdGetDatum(InvalidOid),
 									  Int32GetDatum(-1));
+			cancel_parser_errposition_callback(&pcbstate);
 			typeid = BITOID;
 			typelen = -1;
 			typebyval = false;
@@ -422,6 +500,7 @@ make_const(Value *value)
 							(Datum) 0,
 							true,
 							false);
+			con->location = location;
 			return con;
 
 		default:
@@ -435,6 +514,7 @@ make_const(Value *value)
 					val,
 					false,
 					typebyval);
+	con->location = location;
 
 	return con;
 }

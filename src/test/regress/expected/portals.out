@@ -678,20 +678,20 @@ CLOSE foo12;
 -- leave some cursors open, to test that auto-close works.
 -- record this in the system view as well (don't query the time field there
 -- however)
-SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors;
+SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors ORDER BY 1;
  name  |                               statement                               | is_holdable | is_binary | is_scrollable 
 -------+-----------------------------------------------------------------------+-------------+-----------+---------------
  foo13 | DECLARE foo13 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
- foo15 | DECLARE foo15 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
- foo19 | DECLARE foo19 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
- foo17 | DECLARE foo17 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
  foo14 | DECLARE foo14 SCROLL CURSOR FOR SELECT * FROM tenk2;                  | f           | f         | t
- foo21 | DECLARE foo21 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
- foo23 | DECLARE foo23 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
- foo18 | DECLARE foo18 SCROLL CURSOR FOR SELECT * FROM tenk2;                  | f           | f         | t
- foo20 | DECLARE foo20 SCROLL CURSOR FOR SELECT * FROM tenk2;                  | f           | f         | t
- foo22 | DECLARE foo22 SCROLL CURSOR FOR SELECT * FROM tenk2;                  | f           | f         | t
+ foo15 | DECLARE foo15 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
  foo16 | DECLARE foo16 SCROLL CURSOR FOR SELECT * FROM tenk2;                  | f           | f         | t
+ foo17 | DECLARE foo17 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
+ foo18 | DECLARE foo18 SCROLL CURSOR FOR SELECT * FROM tenk2;                  | f           | f         | t
+ foo19 | DECLARE foo19 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
+ foo20 | DECLARE foo20 SCROLL CURSOR FOR SELECT * FROM tenk2;                  | f           | f         | t
+ foo21 | DECLARE foo21 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
+ foo22 | DECLARE foo22 SCROLL CURSOR FOR SELECT * FROM tenk2;                  | f           | f         | t
+ foo23 | DECLARE foo23 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2; | f           | f         | t
 (11 rows)
 
 END;
@@ -851,11 +851,11 @@ SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors;
 (1 row)
 
 DECLARE bc BINARY CURSOR FOR SELECT * FROM tenk1;
-SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors;
+SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors ORDER BY 1;
  name |                              statement                               | is_holdable | is_binary | is_scrollable 
 ------+----------------------------------------------------------------------+-------------+-----------+---------------
- c2   | declare c2 cursor with hold for select count_tt1_v(), count_tt1_s(); | t           | f         | f
  bc   | DECLARE bc BINARY CURSOR FOR SELECT * FROM tenk1;                    | f           | t         | t
+ c2   | declare c2 cursor with hold for select count_tt1_v(), count_tt1_s(); | t           | f         | f
 (2 rows)
 
 ROLLBACK;
@@ -1118,7 +1118,7 @@ SELECT * FROM uctest;
 (3 rows)
 
 BEGIN;
-DECLARE c1 CURSOR FOR SELECT * FROM uctest;
+DECLARE c1 CURSOR FOR SELECT * FROM uctest FOR UPDATE;
 FETCH 1 FROM c1;
  f1 |  f2   
 ----+-------
@@ -1154,6 +1154,47 @@ SELECT * FROM uctest;
  110 | hundred
 (3 rows)
 
+-- Can update from a self-join, but only if FOR UPDATE says which to use
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT * FROM uctest a, uctest b WHERE a.f1 = b.f1 + 5;
+FETCH 1 FROM c1;
+ f1 | f2  | f1 |  f2   
+----+-----+----+-------
+ 18 | one | 13 | three
+(1 row)
+
+UPDATE uctest SET f1 = f1 + 10 WHERE CURRENT OF c1;  -- fail
+ERROR:  cursor "c1" is not a simply updatable scan of table "uctest"
+ROLLBACK;
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT * FROM uctest a, uctest b WHERE a.f1 = b.f1 + 5 FOR UPDATE;
+FETCH 1 FROM c1;
+ f1 | f2  | f1 |  f2   
+----+-----+----+-------
+ 18 | one | 13 | three
+(1 row)
+
+UPDATE uctest SET f1 = f1 + 10 WHERE CURRENT OF c1;  -- fail
+ERROR:  cursor "c1" has multiple FOR UPDATE/SHARE references to table "uctest"
+ROLLBACK;
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT * FROM uctest a, uctest b WHERE a.f1 = b.f1 + 5 FOR SHARE OF a;
+FETCH 1 FROM c1;
+ f1 | f2  | f1 |  f2   
+----+-----+----+-------
+ 18 | one | 13 | three
+(1 row)
+
+UPDATE uctest SET f1 = f1 + 10 WHERE CURRENT OF c1;
+SELECT * FROM uctest;
+ f1  |   f2    
+-----+---------
+  13 | three
+  28 | one
+ 110 | hundred
+(3 rows)
+
+ROLLBACK;
 -- Check various error cases
 DELETE FROM uctest WHERE CURRENT OF c1;  -- fail, no such cursor
 ERROR:  cursor "c1" does not exist
@@ -1164,6 +1205,11 @@ BEGIN;
 DECLARE c CURSOR FOR SELECT * FROM tenk2;
 DELETE FROM uctest WHERE CURRENT OF c;  -- fail, cursor on wrong table
 ERROR:  cursor "c" is not a simply updatable scan of table "uctest"
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM tenk2 FOR SHARE;
+DELETE FROM uctest WHERE CURRENT OF c;  -- fail, cursor on wrong table
+ERROR:  cursor "c" does not have a FOR UPDATE/SHARE reference to table "uctest"
 ROLLBACK;
 BEGIN;
 DECLARE c CURSOR FOR SELECT * FROM tenk1 JOIN tenk2 USING (unique1);
@@ -1196,3 +1242,18 @@ FETCH FROM c1;
 DELETE FROM ucview WHERE CURRENT OF c1; -- fail, views not supported
 ERROR:  WHERE CURRENT OF on a view is not implemented
 ROLLBACK;
+-- Make sure snapshot management works okay, per bug report in
+-- 235395b90909301035v7228ce63q392931f15aa74b31@mail.gmail.com
+BEGIN; 
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; 
+CREATE TABLE cursor (a int); 
+INSERT INTO cursor VALUES (1); 
+DECLARE c1 NO SCROLL CURSOR FOR SELECT * FROM cursor FOR UPDATE; 
+UPDATE cursor SET a = 2; 
+FETCH ALL FROM c1; 
+ a 
+---
+(0 rows)
+
+COMMIT; 
+DROP TABLE cursor;

@@ -2,7 +2,7 @@
  * dbsize.c
  *		object size functions
  *
- * Copyright (c) 2002-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -24,8 +24,8 @@
 #include "storage/fd.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
-#include "utils/relcache.h"
 
 
 /* Return physical size of directory contents, or 0 if dir doesn't exist */
@@ -248,14 +248,14 @@ pg_tablespace_size_name(PG_FUNCTION_ARGS)
  * calculate size of a relation
  */
 static int64
-calculate_relation_size(RelFileNode *rfn)
+calculate_relation_size(RelFileNode *rfn, ForkNumber forknum)
 {
 	int64		totalsize = 0;
 	char	   *relationpath;
 	char		pathname[MAXPGPATH];
 	unsigned int segcount = 0;
 
-	relationpath = relpath(*rfn);
+	relationpath = relpath(*rfn, forknum);
 
 	for (segcount = 0;; segcount++)
 	{
@@ -284,33 +284,17 @@ calculate_relation_size(RelFileNode *rfn)
 }
 
 Datum
-pg_relation_size_oid(PG_FUNCTION_ARGS)
+pg_relation_size(PG_FUNCTION_ARGS)
 {
 	Oid			relOid = PG_GETARG_OID(0);
+	text	   *forkName = PG_GETARG_TEXT_P(1);
 	Relation	rel;
 	int64		size;
 
 	rel = relation_open(relOid, AccessShareLock);
 
-	size = calculate_relation_size(&(rel->rd_node));
-
-	relation_close(rel, AccessShareLock);
-
-	PG_RETURN_INT64(size);
-}
-
-Datum
-pg_relation_size_name(PG_FUNCTION_ARGS)
-{
-	text	   *relname = PG_GETARG_TEXT_P(0);
-	RangeVar   *relrv;
-	Relation	rel;
-	int64		size;
-
-	relrv = makeRangeVarFromNameList(textToQualifiedNameList(relname));
-	rel = relation_openrv(relrv, AccessShareLock);
-
-	size = calculate_relation_size(&(rel->rd_node));
+	size = calculate_relation_size(&(rel->rd_node),
+							  forkname_to_number(text_to_cstring(forkName)));
 
 	relation_close(rel, AccessShareLock);
 
@@ -329,12 +313,15 @@ calculate_total_relation_size(Oid Relid)
 	Oid			toastOid;
 	int64		size;
 	ListCell   *cell;
+	ForkNumber	forkNum;
 
 	heapRel = relation_open(Relid, AccessShareLock);
 	toastOid = heapRel->rd_rel->reltoastrelid;
 
 	/* Get the heap size */
-	size = calculate_relation_size(&(heapRel->rd_node));
+	size = 0;
+	for (forkNum = 0; forkNum <= MAX_FORKNUM; forkNum++)
+		size += calculate_relation_size(&(heapRel->rd_node), forkNum);
 
 	/* Include any dependent indexes */
 	if (heapRel->rd_rel->relhasindex)
@@ -348,7 +335,8 @@ calculate_total_relation_size(Oid Relid)
 
 			iRel = relation_open(idxOid, AccessShareLock);
 
-			size += calculate_relation_size(&(iRel->rd_node));
+			for (forkNum = 0; forkNum <= MAX_FORKNUM; forkNum++)
+				size += calculate_relation_size(&(iRel->rd_node), forkNum);
 
 			relation_close(iRel, AccessShareLock);
 		}
@@ -366,22 +354,9 @@ calculate_total_relation_size(Oid Relid)
 }
 
 Datum
-pg_total_relation_size_oid(PG_FUNCTION_ARGS)
+pg_total_relation_size(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
-
-	PG_RETURN_INT64(calculate_total_relation_size(relid));
-}
-
-Datum
-pg_total_relation_size_name(PG_FUNCTION_ARGS)
-{
-	text	   *relname = PG_GETARG_TEXT_P(0);
-	RangeVar   *relrv;
-	Oid			relid;
-
-	relrv = makeRangeVarFromNameList(textToQualifiedNameList(relname));
-	relid = RangeVarGetRelid(relrv, false);
 
 	PG_RETURN_INT64(calculate_total_relation_size(relid));
 }
@@ -393,41 +368,39 @@ Datum
 pg_size_pretty(PG_FUNCTION_ARGS)
 {
 	int64		size = PG_GETARG_INT64(0);
-	char	   *result = palloc(50 + VARHDRSZ);
+	char		buf[64];
 	int64		limit = 10 * 1024;
 	int64		mult = 1;
 
 	if (size < limit * mult)
-		snprintf(VARDATA(result), 50, INT64_FORMAT " bytes", size);
+		snprintf(buf, sizeof(buf), INT64_FORMAT " bytes", size);
 	else
 	{
 		mult *= 1024;
 		if (size < limit * mult)
-			snprintf(VARDATA(result), 50, INT64_FORMAT " kB",
+			snprintf(buf, sizeof(buf), INT64_FORMAT " kB",
 					 (size + mult / 2) / mult);
 		else
 		{
 			mult *= 1024;
 			if (size < limit * mult)
-				snprintf(VARDATA(result), 50, INT64_FORMAT " MB",
+				snprintf(buf, sizeof(buf), INT64_FORMAT " MB",
 						 (size + mult / 2) / mult);
 			else
 			{
 				mult *= 1024;
 				if (size < limit * mult)
-					snprintf(VARDATA(result), 50, INT64_FORMAT " GB",
+					snprintf(buf, sizeof(buf), INT64_FORMAT " GB",
 							 (size + mult / 2) / mult);
 				else
 				{
 					mult *= 1024;
-					snprintf(VARDATA(result), 50, INT64_FORMAT " TB",
+					snprintf(buf, sizeof(buf), INT64_FORMAT " TB",
 							 (size + mult / 2) / mult);
 				}
 			}
 		}
 	}
 
-	SET_VARSIZE(result, strlen(VARDATA(result)) + VARHDRSZ);
-
-	PG_RETURN_TEXT_P(result);
+	PG_RETURN_TEXT_P(cstring_to_text(buf));
 }

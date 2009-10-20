@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  */
@@ -26,10 +26,6 @@
 #include "prompt.h"
 #include "stringutils.h"
 
-#if defined(WIN32) && !defined(S_ISDIR)
-#define __S_ISTYPE(mode, mask)	(((mode) & S_IFMT) == (mask))
-#define S_ISDIR(mode)	 __S_ISTYPE((mode), S_IFDIR)
-#endif
 
 /*
  * parse_slash_copy
@@ -274,6 +270,8 @@ parse_slash_copy(const char *args)
 				result->header = true;
 			else if (pg_strcasecmp(token, "delimiter") == 0)
 			{
+				if (result->delim)
+					goto error;
 				token = strtokx(NULL, whitespace, NULL, "'",
 								nonstd_backslash, true, false, pset.encoding);
 				if (token && pg_strcasecmp(token, "as") == 0)
@@ -286,6 +284,8 @@ parse_slash_copy(const char *args)
 			}
 			else if (pg_strcasecmp(token, "null") == 0)
 			{
+				if (result->null)
+					goto error;
 				token = strtokx(NULL, whitespace, NULL, "'",
 								nonstd_backslash, true, false, pset.encoding);
 				if (token && pg_strcasecmp(token, "as") == 0)
@@ -298,6 +298,8 @@ parse_slash_copy(const char *args)
 			}
 			else if (pg_strcasecmp(token, "quote") == 0)
 			{
+				if (result->quote)
+					goto error;
 				token = strtokx(NULL, whitespace, NULL, "'",
 								nonstd_backslash, true, false, pset.encoding);
 				if (token && pg_strcasecmp(token, "as") == 0)
@@ -310,6 +312,8 @@ parse_slash_copy(const char *args)
 			}
 			else if (pg_strcasecmp(token, "escape") == 0)
 			{
+				if (result->escape)
+					goto error;
 				token = strtokx(NULL, whitespace, NULL, "'",
 								nonstd_backslash, true, false, pset.encoding);
 				if (token && pg_strcasecmp(token, "as") == 0)
@@ -326,6 +330,8 @@ parse_slash_copy(const char *args)
 								0, false, false, pset.encoding);
 				if (pg_strcasecmp(token, "quote") == 0)
 				{
+					if (result->force_quote_list)
+						goto error;
 					/* handle column list */
 					fetch_next = false;
 					for (;;)
@@ -347,6 +353,8 @@ parse_slash_copy(const char *args)
 				}
 				else if (pg_strcasecmp(token, "not") == 0)
 				{
+					if (result->force_notnull_list)
+						goto error;
 					token = strtokx(NULL, whitespace, ",", "\"",
 									0, false, false, pset.encoding);
 					if (pg_strcasecmp(token, "null") != 0)

@@ -3,7 +3,7 @@
  * relcache.c
  *	  POSTGRES relation descriptor cache code
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -32,6 +32,7 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/reloptions.h"
+#include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
@@ -58,6 +59,7 @@
 #include "rewrite/rewriteDefine.h"
 #include "postmaster/replication.h"
 #include "storage/fd.h"
+#include "storage/lmgr.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -66,6 +68,7 @@
 #include "utils/relcache.h"
 #include "utils/resowner.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 #include "utils/typcache.h"
 
 
@@ -134,8 +137,7 @@ do { \
 	RelIdCacheEnt *idhentry; bool found; \
 	idhentry = (RelIdCacheEnt*)hash_search(RelationIdCache, \
 										   (void *) &(RELATION->rd_id), \
-										   HASH_ENTER, \
-										   &found); \
+										   HASH_ENTER, &found); \
 	/* used to give notice if found -- now just keep quiet */ \
 	idhentry->reldesc = RELATION; \
 } while(0)
@@ -144,7 +146,8 @@ do { \
 do { \
 	RelIdCacheEnt *hentry; \
 	hentry = (RelIdCacheEnt*)hash_search(RelationIdCache, \
-										 (void *) &(ID), HASH_FIND,NULL); \
+										 (void *) &(ID), \
+										 HASH_FIND, NULL); \
 	if (hentry) \
 		RELATION = hentry->reldesc; \
 	else \
@@ -305,6 +308,8 @@ AllocateRelationDesc(Relation relation, Form_pg_class relp)
 	 */
 	MemSet(relation, 0, sizeof(RelationData));
 	relation->rd_targblock = InvalidBlockNumber;
+	relation->rd_fsm_nblocks = InvalidBlockNumber;
+	relation->rd_vm_nblocks = InvalidBlockNumber;
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
@@ -350,8 +355,6 @@ AllocateRelationDesc(Relation relation, Form_pg_class relp)
 static void
 RelationParseRelOptions(Relation relation, HeapTuple tuple)
 {
-	Datum		datum;
-	bool		isnull;
 	bytea	   *options;
 
 	relation->rd_options = NULL;
@@ -373,31 +376,10 @@ RelationParseRelOptions(Relation relation, HeapTuple tuple)
 	 * we might not have any other for pg_class yet (consider executing this
 	 * code for pg_class itself)
 	 */
-	datum = fastgetattr(tuple,
-						Anum_pg_class_reloptions,
-						GetPgClassDescriptor(),
-						&isnull);
-	if (isnull)
-		return;
-
-	/* Parse into appropriate format; don't error out here */
-	switch (relation->rd_rel->relkind)
-	{
-		case RELKIND_RELATION:
-		case RELKIND_TOASTVALUE:
-		case RELKIND_UNCATALOGED:
-			options = heap_reloptions(relation->rd_rel->relkind, datum,
-									  false);
-			break;
-		case RELKIND_INDEX:
-			options = index_reloptions(relation->rd_am->amoptions, datum,
-									   false);
-			break;
-		default:
-			Assert(false);		/* can't get here */
-			options = NULL;		/* keep compiler quiet */
-			break;
-	}
+	options = extractRelOptions(tuple,
+								GetPgClassDescriptor(),
+								relation->rd_rel->relkind == RELKIND_INDEX ?
+								relation->rd_am->amoptions : InvalidOid);
 
 	/* Copy parsed data into CacheMemoryContext */
 	if (options)
@@ -479,7 +461,7 @@ RelationBuildTupleDesc(Relation relation)
 
 		memcpy(relation->rd_att->attrs[attp->attnum - 1],
 			   attp,
-			   ATTRIBUTE_TUPLE_SIZE);
+			   ATTRIBUTE_FIXED_PART_SIZE);
 
 		/* Update constraint/default info */
 		if (attp->attnotnull)
@@ -649,7 +631,6 @@ RelationBuildRuleLock(Relation relation)
 		Form_pg_rewrite rewrite_form = (Form_pg_rewrite) GETSTRUCT(rewrite_tuple);
 		bool		isnull;
 		Datum		rule_datum;
-		text	   *rule_text;
 		char	   *rule_str;
 		RewriteRule *rule;
 
@@ -674,30 +655,22 @@ RelationBuildRuleLock(Relation relation)
 								  rewrite_tupdesc,
 								  &isnull);
 		Assert(!isnull);
-		rule_text = DatumGetTextP(rule_datum);
-		rule_str = DatumGetCString(DirectFunctionCall1(textout,
-												PointerGetDatum(rule_text)));
+		rule_str = TextDatumGetCString(rule_datum);
 		oldcxt = MemoryContextSwitchTo(rulescxt);
 		rule->actions = (List *) stringToNode(rule_str);
 		MemoryContextSwitchTo(oldcxt);
 		pfree(rule_str);
-		if ((Pointer) rule_text != DatumGetPointer(rule_datum))
-			pfree(rule_text);
 
 		rule_datum = heap_getattr(rewrite_tuple,
 								  Anum_pg_rewrite_ev_qual,
 								  rewrite_tupdesc,
 								  &isnull);
 		Assert(!isnull);
-		rule_text = DatumGetTextP(rule_datum);
-		rule_str = DatumGetCString(DirectFunctionCall1(textout,
-												PointerGetDatum(rule_text)));
+		rule_str = TextDatumGetCString(rule_datum);
 		oldcxt = MemoryContextSwitchTo(rulescxt);
 		rule->qual = (Node *) stringToNode(rule_str);
 		MemoryContextSwitchTo(oldcxt);
 		pfree(rule_str);
-		if ((Pointer) rule_text != DatumGetPointer(rule_datum))
-			pfree(rule_text);
 
 		/*
 		 * We want the rule's table references to be checked as though by the
@@ -729,6 +702,17 @@ RelationBuildRuleLock(Relation relation)
 	 */
 	systable_endscan(rewrite_scan);
 	heap_close(rewrite_desc, AccessShareLock);
+
+	/*
+	 * there might not be any rules (if relhasrules is out-of-date)
+	 */
+	if (numlocks == 0)
+	{
+		relation->rd_rules = NULL;
+		relation->rd_rulescxt = NULL;
+		MemoryContextDelete(rulescxt);
+		return;
+	}
 
 	/*
 	 * form a RuleLock and insert into relation
@@ -849,7 +833,11 @@ RelationBuildDesc(Oid targetRelId, Relation oldrelation)
 	relation->rd_isnailed = false;
 	relation->rd_createSubid = InvalidSubTransactionId;
 	relation->rd_newRelfilenodeSubid = InvalidSubTransactionId;
-	relation->rd_istemp = isTempOrToastNamespace(relation->rd_rel->relnamespace);
+	relation->rd_istemp = relation->rd_rel->relistemp;
+	if (relation->rd_istemp)
+		relation->rd_islocaltemp = isTempOrToastNamespace(relation->rd_rel->relnamespace);
+	else
+		relation->rd_islocaltemp = false;
 
 	/*
 	 * initialize the tuple descriptor (relation->rd_att).
@@ -867,7 +855,7 @@ RelationBuildDesc(Oid targetRelId, Relation oldrelation)
 		relation->rd_rulescxt = NULL;
 	}
 
-	if (relation->rd_rel->reltriggers > 0)
+	if (relation->rd_rel->relhastriggers)
 		RelationBuildTriggers(relation);
 	else
 		relation->trigdesc = NULL;
@@ -1159,7 +1147,7 @@ IndexSupportInitialize(oidvector *indclass,
  * Note there is no provision for flushing the cache.  This is OK at the
  * moment because there is no way to ALTER any interesting properties of an
  * existing opclass --- all you can do is drop it, which will result in
- * a useless but harmless dead entry in the cache.  To support altering
+ * a useless but harmless dead entry in the cache.	To support altering
  * opclass membership (not the same as opfamily membership!), we'd need to
  * be able to flush this cache as well as the contents of relcache entries
  * for indexes.
@@ -1226,10 +1214,10 @@ LookupOpclassInfo(Oid operatorClassOid,
 
 	/*
 	 * When testing for cache-flush hazards, we intentionally disable the
-	 * operator class cache and force reloading of the info on each call.
-	 * This is helpful because we want to test the case where a cache flush
-	 * occurs while we are loading the info, and it's very hard to provoke
-	 * that if this happens only once per opclass per backend.
+	 * operator class cache and force reloading of the info on each call. This
+	 * is helpful because we want to test the case where a cache flush occurs
+	 * while we are loading the info, and it's very hard to provoke that if
+	 * this happens only once per opclass per backend.
 	 */
 #if defined(CLOBBER_CACHE_ALWAYS)
 	opcentry->valid = false;
@@ -1390,6 +1378,8 @@ formrdesc(const char *relationName, Oid relationReltype,
 	 */
 	relation = (Relation) palloc0(sizeof(RelationData));
 	relation->rd_targblock = InvalidBlockNumber;
+	relation->rd_fsm_nblocks = InvalidBlockNumber;
+	relation->rd_vm_nblocks = InvalidBlockNumber;
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
@@ -1407,13 +1397,16 @@ formrdesc(const char *relationName, Oid relationReltype,
 	relation->rd_createSubid = InvalidSubTransactionId;
 	relation->rd_newRelfilenodeSubid = InvalidSubTransactionId;
 	relation->rd_istemp = false;
+	relation->rd_islocaltemp = false;
 
 	/*
 	 * initialize relation tuple form
 	 *
 	 * The data we insert here is pretty incomplete/bogus, but it'll serve to
 	 * get us launched.  RelationCacheInitializePhase2() will read the real
-	 * data from pg_class and replace what we've done here.
+	 * data from pg_class and replace what we've done here.  Note in particular
+	 * that relowner is left as zero; this cues RelationCacheInitializePhase2
+	 * that the real data isn't there yet.
 	 */
 	relation->rd_rel = (Form_pg_class) palloc0(CLASS_TUPLE_SIZE);
 
@@ -1427,6 +1420,12 @@ formrdesc(const char *relationName, Oid relationReltype,
 	 * present, all relations that formrdesc is used for are not shared.
 	 */
 	relation->rd_rel->relisshared = false;
+
+	/*
+	 * Likewise, we must know if a relation is temp ... but formrdesc is not
+	 * used for any temp relations.
+	 */
+	relation->rd_rel->relistemp = false;
 
 	relation->rd_rel->relpages = 1;
 	relation->rd_rel->reltuples = 1;
@@ -1455,7 +1454,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 	{
 		memcpy(relation->rd_att->attrs[i],
 			   &att[i],
-			   ATTRIBUTE_TUPLE_SIZE);
+			   ATTRIBUTE_FIXED_PART_SIZE);
 		has_not_null |= att[i].attnotnull;
 		/* make sure attcacheoff is valid */
 		relation->rd_att->attrs[i]->attcacheoff = -1;
@@ -1678,8 +1677,14 @@ RelationReloadIndexInfo(Relation relation)
 	heap_freetuple(pg_class_tuple);
 	/* We must recalculate physical address in case it changed */
 	RelationInitPhysicalAddr(relation);
-	/* Make sure targblock is reset in case rel was truncated */
+
+	/*
+	 * Must reset targblock, fsm_nblocks and vm_nblocks in case rel was
+	 * truncated
+	 */
 	relation->rd_targblock = InvalidBlockNumber;
+	relation->rd_fsm_nblocks = InvalidBlockNumber;
+	relation->rd_vm_nblocks = InvalidBlockNumber;
 	/* Must free any AM cached data, too */
 	if (relation->rd_amcache)
 		pfree(relation->rd_amcache);
@@ -1762,6 +1767,8 @@ RelationClearRelation(Relation relation, bool rebuild)
 	if (relation->rd_isnailed)
 	{
 		relation->rd_targblock = InvalidBlockNumber;
+		relation->rd_fsm_nblocks = InvalidBlockNumber;
+		relation->rd_vm_nblocks = InvalidBlockNumber;
 		if (relation->rd_rel->relkind == RELKIND_INDEX)
 		{
 			relation->rd_isvalid = false;		/* needs to be revalidated */
@@ -2356,6 +2363,8 @@ RelationBuildLocalRelation(const char *relname,
 	rel = (Relation) palloc0(sizeof(RelationData));
 
 	rel->rd_targblock = InvalidBlockNumber;
+	rel->rd_fsm_nblocks = InvalidBlockNumber;
+	rel->rd_vm_nblocks = InvalidBlockNumber;
 
 	/* make sure relation is marked as having no open file yet */
 	rel->rd_smgr = NULL;
@@ -2372,8 +2381,9 @@ RelationBuildLocalRelation(const char *relname,
 	/* must flag that we have rels created in this transaction */
 	need_eoxact_work = true;
 
-	/* is it a temporary relation? */
+	/* it is temporary if and only if it is in my temp-table namespace */
 	rel->rd_istemp = isTempOrToastNamespace(relnamespace);
+	rel->rd_islocaltemp = rel->rd_istemp;
 
 	/*
 	 * create a new tuple descriptor from the one passed in.  We do this
@@ -2420,6 +2430,7 @@ RelationBuildLocalRelation(const char *relname,
 	 * as the logical ID (OID).
 	 */
 	rel->rd_rel->relisshared = shared_relation;
+	rel->rd_rel->relistemp = rel->rd_istemp;
 
 	RelationGetRelid(rel) = relid;
 
@@ -2612,17 +2623,31 @@ RelationCacheInitializePhase2(void)
 	 * rows and replace the fake entries with them. Also, if any of the
 	 * relcache entries have rules or triggers, load that info the hard way
 	 * since it isn't recorded in the cache file.
+	 *
+	 * Whenever we access the catalogs to read data, there is a possibility
+	 * of a shared-inval cache flush causing relcache entries to be removed.
+	 * Since hash_seq_search only guarantees to still work after the *current*
+	 * entry is removed, it's unsafe to continue the hashtable scan afterward.
+	 * We handle this by restarting the scan from scratch after each access.
+	 * This is theoretically O(N^2), but the number of entries that actually
+	 * need to be fixed is small enough that it doesn't matter.
 	 */
 	hash_seq_init(&status, RelationIdCache);
 
 	while ((idhentry = (RelIdCacheEnt *) hash_seq_search(&status)) != NULL)
 	{
 		Relation	relation = idhentry->reldesc;
+		bool		restart = false;
+
+		/*
+		 * Make sure *this* entry doesn't get flushed while we work with it.
+		 */
+		RelationIncrementReferenceCount(relation);
 
 		/*
 		 * If it's a faked-up entry, read the real pg_class tuple.
 		 */
-		if (needNewCacheFile && relation->rd_isnailed)
+		if (relation->rd_rel->relowner == InvalidOid)
 		{
 			HeapTuple	htup;
 			Form_pg_class relp;
@@ -2639,7 +2664,6 @@ RelationCacheInitializePhase2(void)
 			 * Copy tuple to relation->rd_rel. (See notes in
 			 * AllocateRelationDesc())
 			 */
-			Assert(relation->rd_rel != NULL);
 			memcpy((char *) relation->rd_rel, (char *) relp, CLASS_TUPLE_SIZE);
 
 			/* Update rd_options while we have the tuple */
@@ -2648,22 +2672,57 @@ RelationCacheInitializePhase2(void)
 			RelationParseRelOptions(relation, htup);
 
 			/*
-			 * Also update the derived fields in rd_att.
+			 * Check the values in rd_att were set up correctly.  (We cannot
+			 * just copy them over now: formrdesc must have set up the
+			 * rd_att data correctly to start with, because it may already
+			 * have been copied into one or more catcache entries.)
 			 */
-			relation->rd_att->tdtypeid = relp->reltype;
-			relation->rd_att->tdtypmod = -1;	/* unnecessary, but... */
-			relation->rd_att->tdhasoid = relp->relhasoids;
+			Assert(relation->rd_att->tdtypeid == relp->reltype);
+			Assert(relation->rd_att->tdtypmod == -1);
+			Assert(relation->rd_att->tdhasoid == relp->relhasoids);
 
 			ReleaseSysCache(htup);
+
+			/* relowner had better be OK now, else we'll loop forever */
+			if (relation->rd_rel->relowner == InvalidOid)
+				elog(ERROR, "invalid relowner in pg_class entry for \"%s\"",
+					 RelationGetRelationName(relation));
+
+			restart = true;
 		}
 
 		/*
 		 * Fix data that isn't saved in relcache cache file.
+		 *
+		 * relhasrules or relhastriggers could possibly be wrong or out of
+		 * date.  If we don't actually find any rules or triggers, clear the
+		 * local copy of the flag so that we don't get into an infinite loop
+		 * here.  We don't make any attempt to fix the pg_class entry, though.
 		 */
 		if (relation->rd_rel->relhasrules && relation->rd_rules == NULL)
+		{
 			RelationBuildRuleLock(relation);
-		if (relation->rd_rel->reltriggers > 0 && relation->trigdesc == NULL)
+			if (relation->rd_rules == NULL)
+				relation->rd_rel->relhasrules = false;
+			restart = true;
+		}
+		if (relation->rd_rel->relhastriggers && relation->trigdesc == NULL)
+		{
 			RelationBuildTriggers(relation);
+			if (relation->trigdesc == NULL)
+				relation->rd_rel->relhastriggers = false;
+			restart = true;
+		}
+
+		/* Release hold on the relation */
+		RelationDecrementReferenceCount(relation);
+
+		/* Now, restart the hashtable scan if needed */
+		if (restart)
+		{
+			hash_seq_term(&status);
+			hash_seq_init(&status, RelationIdCache);
+		}
 	}
 
 	/*
@@ -2711,7 +2770,7 @@ BuildHardcodedDescriptor(int natts, Form_pg_attribute attrs, bool hasoids)
 
 	for (i = 0; i < natts; i++)
 	{
-		memcpy(result->attrs[i], &attrs[i], ATTRIBUTE_TUPLE_SIZE);
+		memcpy(result->attrs[i], &attrs[i], ATTRIBUTE_FIXED_PART_SIZE);
 		/* make sure attcacheoff is valid */
 		result->attrs[i]->attcacheoff = -1;
 	}
@@ -2818,8 +2877,7 @@ AttrDefaultFetch(Relation relation)
 					 RelationGetRelationName(relation));
 			else
 				attrdef[i].adbin = MemoryContextStrdup(CacheMemoryContext,
-								 DatumGetCString(DirectFunctionCall1(textout,
-																	 val)));
+												   TextDatumGetCString(val));
 			break;
 		}
 
@@ -2882,8 +2940,7 @@ CheckConstraintFetch(Relation relation)
 				 RelationGetRelationName(relation));
 
 		check[found].ccbin = MemoryContextStrdup(CacheMemoryContext,
-								 DatumGetCString(DirectFunctionCall1(textout,
-																	 val)));
+												 TextDatumGetCString(val));
 		found++;
 	}
 
@@ -3122,7 +3179,7 @@ RelationGetIndexExpressions(Relation relation)
 							  GetPgIndexDescriptor(),
 							  &isnull);
 	Assert(!isnull);
-	exprsString = DatumGetCString(DirectFunctionCall1(textout, exprsDatum));
+	exprsString = TextDatumGetCString(exprsDatum);
 	result = (List *) stringToNode(exprsString);
 	pfree(exprsString);
 
@@ -3189,7 +3246,7 @@ RelationGetIndexPredicate(Relation relation)
 							 GetPgIndexDescriptor(),
 							 &isnull);
 	Assert(!isnull);
-	predString = DatumGetCString(DirectFunctionCall1(textout, predDatum));
+	predString = TextDatumGetCString(predDatum);
 	result = (List *) stringToNode(predString);
 	pfree(predString);
 
@@ -3456,7 +3513,7 @@ load_relcache_init_file(void)
 		{
 			if ((nread = fread(&len, 1, sizeof(len), fp)) != sizeof(len))
 				goto read_failed;
-			if (len != ATTRIBUTE_TUPLE_SIZE)
+			if (len != ATTRIBUTE_FIXED_PART_SIZE)
 				goto read_failed;
 			if ((nread = fread(rel->rd_att->attrs[i], 1, len, fp)) != len)
 				goto read_failed;
@@ -3630,6 +3687,8 @@ load_relcache_init_file(void)
 		 */
 		rel->rd_smgr = NULL;
 		rel->rd_targblock = InvalidBlockNumber;
+		rel->rd_fsm_nblocks = InvalidBlockNumber;
+		rel->rd_vm_nblocks = InvalidBlockNumber;
 		if (rel->rd_isnailed)
 			rel->rd_refcnt = 1;
 		else
@@ -3764,7 +3823,7 @@ write_relcache_init_file(void)
 		/* next, do all the attribute tuple form data entries */
 		for (i = 0; i < relform->relnatts; i++)
 		{
-			write_item(rel->rd_att->attrs[i], ATTRIBUTE_TUPLE_SIZE, fp);
+			write_item(rel->rd_att->attrs[i], ATTRIBUTE_FIXED_PART_SIZE, fp);
 		}
 
 		/* next, do the access method specific field */

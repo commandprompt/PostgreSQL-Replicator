@@ -4,7 +4,7 @@
  *	  Standard POSTGRES buffer page definitions.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -14,10 +14,9 @@
 #ifndef BUFPAGE_H
 #define BUFPAGE_H
 
-#include "storage/bufmgr.h"
+#include "access/xlogdefs.h"
 #include "storage/item.h"
 #include "storage/off.h"
-#include "access/xlog.h"
 
 /*
  * A postgres disk page is an abstraction layered on top of a postgres
@@ -153,8 +152,10 @@ typedef PageHeaderData *PageHeader;
 #define PD_HAS_FREE_LINES	0x0001		/* are there any unused line pointers? */
 #define PD_PAGE_FULL		0x0002		/* not enough free space for new
 										 * tuple? */
+#define PD_ALL_VISIBLE		0x0004		/* all tuples on page are visible to
+										 * everyone */
 
-#define PD_VALID_FLAG_BITS	0x0003		/* OR of all valid pd_flags bits */
+#define PD_VALID_FLAG_BITS	0x0007		/* OR of all valid pd_flags bits */
 
 /*
  * Page layout version number 0 is for pre-7.3 Postgres releases.
@@ -180,9 +181,9 @@ typedef PageHeaderData *PageHeader;
 #define PageIsValid(page) PointerIsValid(page)
 
 /*
- * line pointer does not count as part of header
+ * line pointer(s) do not count as part of header
  */
-#define SizeOfPageHeaderData (offsetof(PageHeaderData, pd_linp[0]))
+#define SizeOfPageHeaderData (offsetof(PageHeaderData, pd_linp))
 
 /*
  * PageIsEmpty
@@ -207,9 +208,13 @@ typedef PageHeaderData *PageHeader;
 /*
  * PageGetContents
  *		To be used in case the page does not contain item pointers.
+ *
+ * Note: prior to 8.3 this was not guaranteed to yield a MAXALIGN'd result.
+ * Now it is.  Beware of old code that might think the offset to the contents
+ * is just SizeOfPageHeaderData rather than MAXALIGN(SizeOfPageHeaderData).
  */
 #define PageGetContents(page) \
-	((char *) (&((PageHeader) (page))->pd_linp[0]))
+	((char *) (page) + MAXALIGN(SizeOfPageHeaderData))
 
 /* ----------------
  *		macros to access page size info
@@ -291,29 +296,6 @@ typedef PageHeaderData *PageHeader;
 )
 
 /*
- * BufferGetPageSize
- *		Returns the page size within a buffer.
- *
- * Notes:
- *		Assumes buffer is valid.
- *
- *		The buffer can be a raw disk block and need not contain a valid
- *		(formatted) disk page.
- */
-/* XXX should dig out of buffer descriptor */
-#define BufferGetPageSize(buffer) \
-( \
-	AssertMacro(BufferIsValid(buffer)), \
-	(Size)BLCKSZ \
-)
-
-/*
- * BufferGetPage
- *		Returns the page associated with a buffer.
- */
-#define BufferGetPage(buffer) ((Page)BufferGetBlock(buffer))
-
-/*
  * PageGetMaxOffsetNumber
  *		Returns the maximum offset number used by the given page.
  *		Since offset numbers are 1-based, this is also the number
@@ -356,6 +338,13 @@ typedef PageHeaderData *PageHeader;
 #define PageClearFull(page) \
 	(((PageHeader) (page))->pd_flags &= ~PD_PAGE_FULL)
 
+#define PageIsAllVisible(page) \
+	(((PageHeader) (page))->pd_flags & PD_ALL_VISIBLE)
+#define PageSetAllVisible(page) \
+	(((PageHeader) (page))->pd_flags |= PD_ALL_VISIBLE)
+#define PageClearAllVisible(page) \
+	(((PageHeader) (page))->pd_flags &= ~PD_ALL_VISIBLE)
+
 #define PageIsPrunable(page, oldestxmin) \
 ( \
 	AssertMacro(TransactionIdIsNormal(oldestxmin)), \
@@ -382,7 +371,9 @@ extern void PageInit(Page page, Size pageSize, Size specialSize);
 extern bool PageHeaderIsValid(PageHeader page);
 extern OffsetNumber PageAddItem(Page page, Item item, Size size,
 			OffsetNumber offsetNumber, bool overwrite, bool is_heap);
-extern Page PageGetTempPage(Page page, Size specialSize);
+extern Page PageGetTempPage(Page page);
+extern Page PageGetTempPageCopy(Page page);
+extern Page PageGetTempPageCopySpecial(Page page);
 extern void PageRestoreTempPage(Page tempPage, Page oldPage);
 extern void PageRepairFragmentation(Page page);
 extern Size PageGetFreeSpace(Page page);

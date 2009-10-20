@@ -8,7 +8,7 @@
  *
  * $PostgreSQL$
  */
-#include "postgres.h"
+#include "postgres_fe.h"
 
 #include <unistd.h>
 #include <time.h>
@@ -69,13 +69,14 @@ main(int argc, char *argv[])
 	char		ControlFilePath[MAXPGPATH];
 	char	   *DataDir;
 	pg_crc32	crc;
+	time_t		time_tmp;
 	char		pgctime_str[128];
 	char		ckpttime_str[128];
 	char		sysident_str[32];
 	const char *strftime_fmt = "%c";
 	const char *progname;
 
-	set_pglocale_pgservice(argv[0], "pg_controldata");
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_controldata"));
 
 	progname = get_progname(argv[0]);
 
@@ -134,13 +135,20 @@ main(int argc, char *argv[])
 				 "is expecting.  The results below are untrustworthy.\n\n"));
 
 	/*
+	 * This slightly-chintzy coding will work as long as the control file
+	 * timestamps are within the range of time_t; that should be the case in
+	 * all foreseeable circumstances, so we don't bother importing the
+	 * backend's timezone library into pg_controldata.
+	 *
 	 * Use variable for format to suppress overly-anal-retentive gcc warning
 	 * about %c
 	 */
+	time_tmp = (time_t) ControlFile.time;
 	strftime(pgctime_str, sizeof(pgctime_str), strftime_fmt,
-			 localtime(&(ControlFile.time)));
+			 localtime(&time_tmp));
+	time_tmp = (time_t) ControlFile.checkPointCopy.time;
 	strftime(ckpttime_str, sizeof(ckpttime_str), strftime_fmt,
-			 localtime(&(ControlFile.checkPointCopy.time)));
+			 localtime(&time_tmp));
 
 	/*
 	 * Format system_identifier separately to keep platform-dependent format
@@ -208,12 +216,9 @@ main(int argc, char *argv[])
 		   ControlFile.toast_max_chunk_size);
 	printf(_("Date/time type storage:               %s\n"),
 		   (ControlFile.enableIntTimes ? _("64-bit integers") : _("floating-point numbers")));
-	printf(_("Maximum length of locale name:        %u\n"),
-		   ControlFile.localeBuflen);
-	printf(_("LC_COLLATE:                           %s\n"),
-		   ControlFile.lc_collate);
-	printf(_("LC_CTYPE:                             %s\n"),
-		   ControlFile.lc_ctype);
-
+	printf(_("Float4 argument passing:              %s\n"),
+		   (ControlFile.float4ByVal ? _("by value") : _("by reference")));
+	printf(_("Float8 argument passing:              %s\n"),
+		   (ControlFile.float8ByVal ? _("by value") : _("by reference")));
 	return 0;
 }

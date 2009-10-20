@@ -7,7 +7,7 @@
  * This is a modified version of src/backend/parser/scan.l
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -76,6 +76,7 @@ static struct _if_value
 %option 8bit
 %option never-interactive
 %option nodefault
+%option noinput
 %option noyywrap
 
 %option yylineno
@@ -102,6 +103,8 @@ static struct _if_value
  *	<xe> extended quoted strings (support backslash escape sequences)
  *	<xn> national character quoted strings
  *  <xdolq> $foo$ quoted strings
+ *  <xui> quoted identifier with Unicode escapes
+ *  <xus> quoted string with Unicode escapes
  */
 
 %x xb
@@ -116,6 +119,8 @@ static struct _if_value
 %x xdolq
 %x xcond
 %x xskip
+%x xui
+%x xus
 
 /* Bit string
  */
@@ -170,6 +175,18 @@ xdstart			{dquote}
 xdstop			{dquote}
 xddouble		{dquote}{dquote}
 xdinside		[^"]+
+
+/* Unicode escapes */
+/* (The ecpg scanner is not backup-free, so the fail rules in scan.l are not needed here, but could be added if desired.) */
+uescape			[uU][eE][sS][cC][aA][pP][eE]{whitespace}*{quote}[^']{quote}
+
+/* Quoted identifier with Unicode escapes */
+xuistart		[uU]&{dquote}
+xuistop			{dquote}({whitespace}*{uescape})?
+
+/* Quoted string with Unicode escapes */
+xusstart		[uU]&{quote}
+xusstop			{quote}({whitespace}*{uescape})?
 
 /* special stuff for C strings */
 xdcqq			\\\\
@@ -366,7 +383,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 <xc>{op_chars}	{ ECHO; }
 <xc>\*+ 		{ ECHO; }
 
-<xc><<EOF>>		{ mmerror(PARSE_ERROR, ET_FATAL, "Unterminated /* comment"); }
+<xc><<EOF>>		{ mmerror(PARSE_ERROR, ET_FATAL, "unterminated /* comment"); }
 
 <SQL>{xbstart}	{
 					token_start = yytext;
@@ -379,7 +396,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 					yyless(1);
 					BEGIN(SQL);
 					if (literalbuf[strspn(literalbuf, "01") + 1] != '\0')
-						mmerror(PARSE_ERROR, ET_ERROR, "invalid bit string input.");
+						mmerror(PARSE_ERROR, ET_ERROR, "invalid bit string literal");
 					yylval.str = mm_strdup(literalbuf);
 					return BCONST;
 				}
@@ -388,7 +405,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 <xb>{xbinside}	{ addlit(yytext, yyleng); }
 <xh>{quotecontinue}	|
 <xb>{quotecontinue}	{ /* ignore */ }
-<xb><<EOF>>		{ mmerror(PARSE_ERROR, ET_FATAL, "Unterminated bit string"); }
+<xb><<EOF>>		{ mmerror(PARSE_ERROR, ET_FATAL, "unterminated bit string literal"); }
 
 <SQL>{xhstart}	{
 					token_start = yytext;
@@ -404,7 +421,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 				return XCONST;
 			}
 
-<xh><<EOF>>		{ mmerror(PARSE_ERROR, ET_FATAL, "Unterminated hexadecimal integer"); }
+<xh><<EOF>>		{ mmerror(PARSE_ERROR, ET_FATAL, "unterminated hexadecimal string literal"); }
 <SQL>{xnstart}              {
 				/* National character.
 				 * Transfer it as-is to the backend.
@@ -432,6 +449,13 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 				BEGIN(xe);
 				startlit();
 			}
+<SQL>{xusstart}	{
+				token_start = yytext;
+				state_before = YYSTATE;
+				BEGIN(xus);
+				startlit();
+				addlit(yytext, yyleng);
+			}
 <xq,xqc>{quotestop} |
 <xq,xqc>{quotefail} {
 				yyless(1);
@@ -453,22 +477,28 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 				yylval.str = mm_strdup(literalbuf);
 				return NCONST;
 			}
-<xq,xe,xn>{xqdouble}	{ addlitchar('\''); }
+<xus>{xusstop} {
+				addlit(yytext, yyleng);
+				BEGIN(state_before);
+				yylval.str = mm_strdup(literalbuf);
+				return UCONST;
+			}
+<xq,xe,xn,xus>{xqdouble}	{ addlitchar('\''); }
 <xqc>{xqcquote}		{
 				addlitchar('\\');
 				addlitchar('\'');
 			}
-<xq,xqc,xn>{xqinside}	{ addlit(yytext, yyleng); }
+<xq,xqc,xn,xus>{xqinside}	{ addlit(yytext, yyleng); }
 <xe>{xeinside}		{ addlit(yytext, yyleng); }
 <xe>{xeescape}  	{ addlit(yytext, yyleng); }
 <xe>{xeoctesc}		{ addlit(yytext, yyleng); }
 <xe>{xehexesc}		{ addlit(yytext, yyleng); }
-<xq,xqc,xe,xn>{quotecontinue}	{ /* ignore */ }
+<xq,xqc,xe,xn,xus>{quotecontinue}	{ /* ignore */ }
 <xe>.                   {
 			   /* This is only needed for \ just before EOF */
 			   addlitchar(yytext[0]);
 			}
-<xq,xqc,xe,xn><<EOF>>	{ mmerror(PARSE_ERROR, ET_FATAL, "Unterminated quoted string"); }
+<xq,xqc,xe,xn,xus><<EOF>>	{ mmerror(PARSE_ERROR, ET_FATAL, "unterminated quoted string"); }
 <SQL>{dolqfailed}	{
 				/* throw back all but the initial "$" */
 				yyless(1);
@@ -514,11 +544,17 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 						BEGIN(xd);
 						startlit();
 					}
+<SQL>{xuistart}		{
+						state_before = YYSTATE;
+						BEGIN(xui);
+						startlit();
+						addlit(yytext, yyleng);
+					}
 <xd>{xdstop}		{
 						BEGIN(state_before);
 						if (literallen == 0)
 							mmerror(PARSE_ERROR, ET_ERROR, "zero-length delimited identifier");
-						/* The backend will truncate the idnetifier here. We do not as it does not change the result. */
+						/* The backend will truncate the identifier here. We do not as it does not change the result. */
 						yylval.str = mm_strdup(literalbuf);
 						return CSTRING;
 					}
@@ -527,9 +563,18 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 						yylval.str = mm_strdup(literalbuf);
 						return CSTRING;
 					}
-<xd>{xddouble}		{ addlitchar('"'); }
-<xd>{xdinside}		{ addlit(yytext, yyleng); }
-<xd,xdc><<EOF>>		{ mmerror(PARSE_ERROR, ET_FATAL, "Unterminated quoted identifier"); }
+<xui>{xuistop}		{
+						BEGIN(state_before);
+						if (literallen == 2) /* "U&" */
+							mmerror(PARSE_ERROR, ET_ERROR, "zero-length delimited identifier");
+						/* The backend will truncate the identifier here. We do not as it does not change the result. */
+						addlit(yytext, yyleng);
+						yylval.str = mm_strdup(literalbuf);
+						return UIDENT;
+					}
+<xd,xui>{xddouble}		{ addlitchar('"'); }
+<xd,xui>{xdinside}		{ addlit(yytext, yyleng); }
+<xd,xdc,xui><<EOF>>		{ mmerror(PARSE_ERROR, ET_FATAL, "unterminated quoted identifier"); }
 <C,SQL>{xdstart}	{
 						state_before = YYSTATE;
 						BEGIN(xdc);
@@ -679,7 +724,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 						if (!isdefine())
 						{
 							/* Is it an SQL/ECPG keyword? */
-							keyword = ScanKeywordLookup(yytext);
+							keyword = ScanECPGKeywordLookup(yytext);
 							if (keyword != NULL)
 								return keyword->value;
 
@@ -850,7 +895,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 					BEGIN(C);
 				}
 <undef>{other}|\n  		{
-		                	mmerror(PARSE_ERROR, ET_FATAL, "Missing identifier in 'EXEC SQL UNDEF' command");
+		                	mmerror(PARSE_ERROR, ET_FATAL, "missing identifier in EXEC SQL UNDEF command");
 			                yyterminate();
 				}
 <C>{exec_sql}{include}{space}*	{ BEGIN(incl); }
@@ -896,10 +941,10 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 					}
 <C,xskip>{exec_sql}{elif}{space}*	{	/* pop stack */
 						if ( preproc_tos == 0 ) {
-							mmerror(PARSE_ERROR, ET_FATAL, "Missing matching 'EXEC SQL IFDEF / EXEC SQL IFNDEF'");
+							mmerror(PARSE_ERROR, ET_FATAL, "missing matching \"EXEC SQL IFDEF\" / \"EXEC SQL IFNDEF\"");
 						}
 						else if ( stacked_if_value[preproc_tos].else_branch )
-							mmerror(PARSE_ERROR, ET_FATAL, "Missing 'EXEC SQL ENDIF;'");
+							mmerror(PARSE_ERROR, ET_FATAL, "missing \"EXEC SQL ENDIF;\"");
 						else
 							preproc_tos--;
 
@@ -910,9 +955,9 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 					if (INFORMIX_MODE)
 					{
 						if (preproc_tos == 0)
-							mmerror(PARSE_ERROR, ET_FATAL, "Missing matching 'EXEC SQL IFDEF / EXEC SQL IFNDEF'");
+							mmerror(PARSE_ERROR, ET_FATAL, "missing matching \"EXEC SQL IFDEF\" / \"EXEC SQL IFNDEF\"");
 						else if (stacked_if_value[preproc_tos].else_branch)
-							mmerror(PARSE_ERROR, ET_FATAL, "Missing 'EXEC SQL ENDIF;'");
+							mmerror(PARSE_ERROR, ET_FATAL, "missing \"EXEC SQL ENDIF;\"");
 						else
 							preproc_tos--;
 
@@ -928,7 +973,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 
 <C,xskip>{exec_sql}{else}{space}*";" {	/* only exec sql endif pops the stack, so take care of duplicated 'else' */
 					if (stacked_if_value[preproc_tos].else_branch)
-						mmerror(PARSE_ERROR, ET_FATAL, "Duplicated 'EXEC SQL ELSE;'");
+						mmerror(PARSE_ERROR, ET_FATAL, "more than one EXEC SQL ELSE");
 					else
 					{
 						stacked_if_value[preproc_tos].else_branch = TRUE;
@@ -947,7 +992,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 					if (INFORMIX_MODE)
 					{
 						if (stacked_if_value[preproc_tos].else_branch)
-							mmerror(PARSE_ERROR, ET_FATAL, "Duplicated 'EXEC SQL ELSE;'");
+							mmerror(PARSE_ERROR, ET_FATAL, "more than one EXEC SQL ELSE");
 						else
 						{
 							stacked_if_value[preproc_tos].else_branch = TRUE;
@@ -969,7 +1014,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 				}
 <C,xskip>{exec_sql}{endif}{space}*";" {
 					if (preproc_tos == 0)
-						mmerror(PARSE_ERROR, ET_FATAL, "Unmatched 'EXEC SQL ENDIF;'");
+						mmerror(PARSE_ERROR, ET_FATAL, "unmatched EXEC SQL ENDIF");
 					else
 						preproc_tos--;
 
@@ -983,7 +1028,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 					if (INFORMIX_MODE)
 					{
 						if (preproc_tos == 0)
-							mmerror(PARSE_ERROR, ET_FATAL, "Unmatched 'EXEC SQL ENDIF;'");
+							mmerror(PARSE_ERROR, ET_FATAL, "unmatched EXEC SQL ENDIF");
 						else
 							preproc_tos--;
 
@@ -1003,7 +1048,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 
 <xcond>{identifier}{space}*";" {
 					if (preproc_tos >= MAX_NESTED_IF-1)
-						mmerror(PARSE_ERROR, ET_FATAL, "Too many nested 'EXEC SQL IFDEF' conditions");
+						mmerror(PARSE_ERROR, ET_FATAL, "too many nested EXEC SQL IFDEF conditions");
 					else 
 					{
 						struct _defines *defptr;
@@ -1036,7 +1081,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 				}
 
 <xcond>{other}|\n	{
-				mmerror(PARSE_ERROR, ET_FATAL, "Missing identifier in 'EXEC SQL IFDEF' command");
+				mmerror(PARSE_ERROR, ET_FATAL, "missing identifier in EXEC SQL IFDEF command");
 				yyterminate();
 			}
 <def_ident>{identifier} {
@@ -1045,7 +1090,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 				startlit();
 			}
 <def_ident>{other}|\n	{
-				mmerror(PARSE_ERROR, ET_FATAL, "Missing identifier in 'EXEC SQL DEFINE' command");
+				mmerror(PARSE_ERROR, ET_FATAL, "missing identifier in EXEC SQL DEFINE command");
 				yyterminate();
 			}	
 <def>{space}*";"	{
@@ -1078,7 +1123,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 <incl>{dquote}{xdinside}{dquote}{space}*";"?	{	parse_include(); }
 <incl>[^;\<\>\"]+";"		{ parse_include(); }
 <incl>{other}|\n		{
-					mmerror(PARSE_ERROR, ET_FATAL, "Incorrect 'EXEC SQL INCLUDE' command");
+					mmerror(PARSE_ERROR, ET_FATAL, "syntax error in EXEC SQL INCLUDE command");
 					yyterminate();
 				}
 
@@ -1088,7 +1133,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 				  		if ( preproc_tos > 0 ) 
 						{
 					  		preproc_tos = 0;
-							mmerror(PARSE_ERROR, ET_FATAL, "Missing 'EXEC SQL ENDIF;'");
+							mmerror(PARSE_ERROR, ET_FATAL, "missing \"EXEC SQL ENDIF;\"");
 				  		}
 						yyterminate();
 					}
@@ -1127,7 +1172,7 @@ cppline			{space}*#(.*\\{space})*.*{newline}
 						
 			  		}
 				}
-<INITIAL>{other}|\n     	{ mmerror(PARSE_ERROR, ET_FATAL, "Internal error: unreachable state, please inform pgsql-bugs@postgresql.org"); }
+<INITIAL>{other}|\n     	{ mmerror(PARSE_ERROR, ET_FATAL, "internal error: unreachable state; please report this to <pgsql-bugs@postgresql.org>"); }
 %%
 void
 lex_init(void)
@@ -1249,7 +1294,7 @@ parse_include(void)
 	  	{
 			if (strlen(ip->path) + strlen(yytext) + 3 > MAXPGPATH)
 			{
-				fprintf(stderr, "Error: Path %s/%s is too long in line %d, skipping.\n", ip->path, yytext, yylineno);
+				fprintf(stderr, _("Error: include path \"%s/%s\" is too long on line %d, skipping\n"), ip->path, yytext, yylineno);
 				continue;
 			}
 			snprintf (inc_file, sizeof(inc_file), "%s/%s", ip->path, yytext);
@@ -1265,7 +1310,7 @@ parse_include(void)
 		}
 	}
 	if (!yyin)
-		mmerror(NO_INCLUDE_FILE, ET_FATAL, "Cannot open include file %s in line %d\n", yytext, yylineno);
+		mmerror(NO_INCLUDE_FILE, ET_FATAL, "could not open include file \"%s\" on line %d", yytext, yylineno);
 
 	input_filename = mm_strdup(inc_file);
 	yy_switch_to_buffer(yy_create_buffer(yyin,YY_BUF_SIZE ));

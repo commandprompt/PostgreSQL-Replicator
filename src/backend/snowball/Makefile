@@ -77,11 +77,7 @@ else
 VPATH = $(srcdir)/libstemmer
 endif
 
-SHLIB_LINK 	:= $(BE_DLLLIBS)
-
 NAME := dict_snowball
-SO_MAJOR_VERSION := 0
-SO_MINOR_VERSION := 0
 rpath =
 
 all: all-shared-lib $(SQLSCRIPT)
@@ -92,7 +88,8 @@ $(SQLSCRIPT): Makefile snowball_func.sql.in snowball.sql.in
 ifeq ($(enable_shared), yes)
 	echo '-- Language-specific snowball dictionaries' > $@
 	cat $(srcdir)/snowball_func.sql.in >> $@	
-	@set $(LANGUAGES) ; \
+	@set -e; \
+	set $(LANGUAGES) ; \
 	while [ "$$#" -gt 0 ] ; \
 	do \
 		lang=$$1; shift; \
@@ -115,12 +112,10 @@ else
 	echo "-- No language-specific snowball dictionaries, for lack of shared library support" > $@
 endif
 
-install: all installdirs
-ifeq ($(enable_shared), yes)
-	$(INSTALL_SHLIB) $(shlib) '$(DESTDIR)$(pkglibdir)/$(NAME)$(DLSUFFIX)'
-endif
+install: all installdirs install-lib
 	$(INSTALL_DATA) $(SQLSCRIPT) '$(DESTDIR)$(datadir)'
-	@set $(LANGUAGES) ; \
+	@set -e; \
+	set $(LANGUAGES) ; \
 	while [ "$$#" -gt 0 ] ; \
 	do \
 		lang=$$1; shift; shift; \
@@ -129,13 +124,13 @@ endif
 		fi \
 	done
 
-installdirs:
-	$(mkinstalldirs) '$(DESTDIR)$(pkglibdir)' '$(DESTDIR)$(datadir)' '$(DESTDIR)$(datadir)/$(DICTDIR)'
+installdirs: installdirs-lib
+	$(mkinstalldirs) '$(DESTDIR)$(datadir)' '$(DESTDIR)$(datadir)/$(DICTDIR)'
 
-uninstall:
-	rm -f '$(DESTDIR)$(pkglibdir)/$(NAME)$(DLSUFFIX)'
+uninstall: uninstall-lib
 	rm -f '$(DESTDIR)$(datadir)/$(SQLSCRIPT)'
-	@set $(LANGUAGES) ; \
+	@set -e; \
+	set $(LANGUAGES) ; \
 	while [ "$$#" -gt 0 ] ; \
 	do \
 		lang=$$1; shift; shift;  \

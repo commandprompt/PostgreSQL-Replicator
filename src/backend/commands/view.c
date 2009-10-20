@@ -3,7 +3,7 @@
  * view.c
  *	  use rewrite rules to construct views
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,22 +16,22 @@
 
 #include "access/heapam.h"
 #include "access/xact.h"
-#include "catalog/dependency.h"
 #include "catalog/namespace.h"
 #include "commands/defrem.h"
 #include "commands/tablecmds.h"
 #include "commands/view.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
-#include "optimizer/clauses.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/analyze.h"
-#include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteDefine.h"
 #include "rewrite/rewriteManip.h"
 #include "rewrite/rewriteSupport.h"
 #include "utils/acl.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 
 
 static void checkViewTupleDesc(TupleDesc newdesc, TupleDesc olddesc);
@@ -166,6 +166,9 @@ DefineVirtualRelation(const RangeVar *relation, List *tlist, bool replace)
 			aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
 						   RelationGetRelationName(rel));
 
+		/* Also check it's not in use already */
+		CheckTableNotInUse(rel, "CREATE OR REPLACE VIEW");
+
 		/*
 		 * Due to the namespace visibility rules for temporary objects, we
 		 * should only end up replacing a temporary view with another
@@ -175,10 +178,39 @@ DefineVirtualRelation(const RangeVar *relation, List *tlist, bool replace)
 
 		/*
 		 * Create a tuple descriptor to compare against the existing view, and
-		 * verify it matches.
+		 * verify that the old column list is an initial prefix of the new
+		 * column list.
 		 */
 		descriptor = BuildDescForRelation(attrList);
 		checkViewTupleDesc(descriptor, rel->rd_att);
+
+		/*
+		 * If new attributes have been added, we must add pg_attribute entries
+		 * for them.  It is convenient (although overkill) to use the ALTER
+		 * TABLE ADD COLUMN infrastructure for this.
+		 */
+		if (list_length(attrList) > rel->rd_att->natts)
+		{
+			List	   *atcmds = NIL;
+			ListCell   *c;
+			int			skip = rel->rd_att->natts;
+
+			foreach(c, attrList)
+			{
+				AlterTableCmd *atcmd;
+
+				if (skip > 0)
+				{
+					skip--;
+					continue;
+				}
+				atcmd = makeNode(AlterTableCmd);
+				atcmd->subtype = AT_AddColumnToView;
+				atcmd->def = (Node *) lfirst(c);
+				atcmds = lappend(atcmds, atcmd);
+			}
+			AlterTableInternal(viewOid, atcmds, true);
+		}
 
 		/*
 		 * Seems okay, so return the OID of the pre-existing view.
@@ -214,41 +246,47 @@ DefineVirtualRelation(const RangeVar *relation, List *tlist, bool replace)
  * Verify that tupledesc associated with proposed new view definition
  * matches tupledesc of old view.  This is basically a cut-down version
  * of equalTupleDescs(), with code added to generate specific complaints.
+ * Also, we allow the new tupledesc to have more columns than the old.
  */
 static void
 checkViewTupleDesc(TupleDesc newdesc, TupleDesc olddesc)
 {
 	int			i;
 
-	if (newdesc->natts != olddesc->natts)
+	if (newdesc->natts < olddesc->natts)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-				 errmsg("cannot change number of columns in view")));
+				 errmsg("cannot drop columns from view")));
 	/* we can ignore tdhasoid */
 
-	for (i = 0; i < newdesc->natts; i++)
+	for (i = 0; i < olddesc->natts; i++)
 	{
 		Form_pg_attribute newattr = newdesc->attrs[i];
 		Form_pg_attribute oldattr = olddesc->attrs[i];
 
-		/* XXX not right, but we don't support DROP COL on view anyway */
+		/* XXX msg not right, but we don't support DROP COL on view anyway */
 		if (newattr->attisdropped != oldattr->attisdropped)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("cannot change number of columns in view")));
+					 errmsg("cannot drop columns from view")));
 
 		if (strcmp(NameStr(newattr->attname), NameStr(oldattr->attname)) != 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("cannot change name of view column \"%s\"",
-							NameStr(oldattr->attname))));
+				 errmsg("cannot change name of view column \"%s\" to \"%s\"",
+						NameStr(oldattr->attname),
+						NameStr(newattr->attname))));
 		/* XXX would it be safe to allow atttypmod to change?  Not sure */
 		if (newattr->atttypid != oldattr->atttypid ||
 			newattr->atttypmod != oldattr->atttypmod)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("cannot change data type of view column \"%s\"",
-							NameStr(oldattr->attname))));
+					 errmsg("cannot change data type of view column \"%s\" from %s to %s",
+							NameStr(oldattr->attname),
+							format_type_with_typemod(oldattr->atttypid,
+													 oldattr->atttypmod),
+							format_type_with_typemod(newattr->atttypid,
+													 newattr->atttypmod))));
 		/* We can ignore the remaining attributes of an attribute... */
 	}
 
@@ -445,27 +483,4 @@ DefineView(ViewStmt *stmt, const char *queryString)
 	 * Now create the rules associated with the view.
 	 */
 	DefineViewRules(viewOid, viewParse, stmt->replace);
-}
-
-/*
- * RemoveView
- *
- * Remove a view given its name
- *
- * We just have to drop the relation; the associated rules will be
- * cleaned up automatically.
- */
-void
-RemoveView(const RangeVar *view, DropBehavior behavior)
-{
-	Oid			viewOid;
-	ObjectAddress object;
-
-	viewOid = RangeVarGetRelid(view, false);
-
-	object.classId = RelationRelationId;
-	object.objectId = viewOid;
-	object.objectSubId = 0;
-
-	performDeletion(&object, behavior);
 }

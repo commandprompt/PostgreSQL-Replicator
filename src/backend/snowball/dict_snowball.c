@@ -3,7 +3,7 @@
  * dict_snowball.c
  *		Snowball dictionary
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -262,9 +262,6 @@ dsnowball_lexize(PG_FUNCTION_ARGS)
 														 strlen(txt),
 													   GetDatabaseEncoding(),
 														 PG_UTF8);
-			if (recoded == NULL)
-				elog(ERROR, "encoding conversion failed");
-
 			if (recoded != txt)
 			{
 				pfree(txt);
@@ -294,9 +291,6 @@ dsnowball_lexize(PG_FUNCTION_ARGS)
 														 strlen(txt),
 														 PG_UTF8,
 													  GetDatabaseEncoding());
-			if (recoded == NULL)
-				elog(ERROR, "encoding conversion failed");
-
 			if (recoded != txt)
 			{
 				pfree(txt);

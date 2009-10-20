@@ -4,7 +4,7 @@
  *	  This file contains definitions for structures and
  *	  externs for functions used by frontend postgres applications.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -27,6 +27,14 @@ extern		"C"
  * such as Oid.
  */
 #include "postgres_ext.h"
+
+/*
+ * Option flags for PQcopyResult
+ */
+#define PG_COPYRES_ATTRS		  0x01
+#define PG_COPYRES_TUPLES		  0x02	/* Implies PG_COPYRES_ATTRS */
+#define PG_COPYRES_EVENTS		  0x04
+#define PG_COPYRES_NOTICEHOOKS	  0x08
 
 /* Application-visible enum types */
 
@@ -156,6 +164,7 @@ typedef struct _PQprintOpt
 
 /* ----------------
  * Structure for the conninfo parameter definitions returned by PQconndefaults
+ * or PQconninfoParse.
  *
  * All fields except "val" point at static strings which must not be altered.
  * "val" is either NULL or a malloc'd current-value string.  PQconninfoFree()
@@ -169,7 +178,7 @@ typedef struct _PQconninfoOption
 	char	   *compiled;		/* Fallback compiled in default value	*/
 	char	   *val;			/* Option's current value, or NULL		 */
 	char	   *label;			/* Label for field in connect dialog	*/
-	char	   *dispchar;		/* Character to display for this field in a
+	char	   *dispchar;		/* Indicates how to display this field in a
 								 * connect dialog. Values are: "" Display
 								 * entered value as is "*" Password field -
 								 * hide value "D"  Debug option - don't show
@@ -191,6 +200,21 @@ typedef struct
 		int			integer;
 	}			u;
 } PQArgBlock;
+
+/* ----------------
+ * PGresAttDesc -- Data about a single attribute (column) of a query result
+ * ----------------
+ */
+typedef struct pgresAttDesc
+{
+	char	   *name;			/* column name */
+	Oid			tableid;		/* source table, if known */
+	int			columnid;		/* source column, if known */
+	int			format;			/* format code for value (text/binary) */
+	Oid			typid;			/* type id */
+	int			typlen;			/* type size */
+	int			atttypmod;		/* type-specific modifier info */
+} PGresAttDesc;
 
 /* ----------------
  * Exported functions of libpq
@@ -220,7 +244,10 @@ extern void PQfinish(PGconn *conn);
 /* get info about connection options known to PQconnectdb */
 extern PQconninfoOption *PQconndefaults(void);
 
-/* free the data structure returned by PQconndefaults() */
+/* parse connection options in same way as PQconnectdb */
+extern PQconninfoOption *PQconninfoParse(const char *conninfo, char **errmsg);
+
+/* free the data structure returned by PQconndefaults() or PQconninfoParse() */
 extern void PQconninfoFree(PQconninfoOption *connOptions);
 
 /*
@@ -274,6 +301,9 @@ extern void *PQgetssl(PGconn *conn);
 
 /* Tell libpq whether it needs to initialize OpenSSL */
 extern void PQinitSSL(int do_init);
+
+/* More detailed way to tell libpq whether it needs to initialize OpenSSL */
+extern void PQinitOpenSSL(int do_ssl, int do_crypto);
 
 /* Set verbosity for PQerrorMessage and PQresultErrorMessage */
 extern PGVerbosity PQsetErrorVerbosity(PGconn *conn, PGVerbosity verbosity);
@@ -430,13 +460,12 @@ extern void PQfreemem(void *ptr);
 /* Note: depending on this is deprecated; use PQconnectionNeedsPassword(). */
 #define PQnoPasswordSupplied	"fe_sendauth: no password supplied\n"
 
-/*
- * Make an empty PGresult with given status (some apps find this
- * useful). If conn is not NULL and status indicates an error, the
- * conn's errorMessage is copied.
- */
+/* Create and manipulate PGresults */
 extern PGresult *PQmakeEmptyPGresult(PGconn *conn, ExecStatusType status);
-
+extern PGresult *PQcopyResult(const PGresult *src, int flags);
+extern int	PQsetResultAttrs(PGresult *res, int numAttributes, PGresAttDesc *attDescs);
+extern void *PQresultAlloc(PGresult *res, size_t nBytes);
+extern int	PQsetvalue(PGresult *res, int tup_num, int field_num, char *value, int len);
 
 /* Quoting strings before inclusion in queries. */
 extern size_t PQescapeStringConn(PGconn *conn,
@@ -495,6 +524,7 @@ extern int	lo_tell(PGconn *conn, int fd);
 extern int	lo_truncate(PGconn *conn, int fd, size_t len);
 extern int	lo_unlink(PGconn *conn, Oid lobjId);
 extern Oid	lo_import(PGconn *conn, const char *filename);
+extern Oid	lo_import_with_oid(PGconn *conn, const char *filename, Oid lobjId);
 extern int	lo_export(PGconn *conn, Oid lobjId, const char *filename);
 
 /* === in fe-misc.c === */

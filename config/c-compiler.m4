@@ -62,38 +62,12 @@ AC_COMPILE_IFELSE([AC_LANG_BOOL_COMPILE_TRY([], [sizeof($1) == 8])],
 
 Ac_define=$Ac_cachevar
 if test x"$Ac_cachevar" = xyes ; then
-  AC_DEFINE(Ac_define,, [Define to 1 if `]$1[' works and is 64 bits.])
+  AC_DEFINE(Ac_define, 1, [Define to 1 if `]$1[' works and is 64 bits.])
 fi
 undefine([Ac_define])dnl
 undefine([Ac_cachevar])dnl
 ])# PGAC_TYPE_64BIT_INT
 
-
-
-# PGAC_CHECK_ALIGNOF(TYPE, [INCLUDES = DEFAULT-INCLUDES])
-# -----------------------------------------------------
-# Find the alignment requirement of the given type. Define the result
-# as ALIGNOF_TYPE.  This macro works even when cross compiling.
-# (Modelled after AC_CHECK_SIZEOF.)
-
-AC_DEFUN([PGAC_CHECK_ALIGNOF],
-[AS_LITERAL_IF([$1], [],
-               [AC_FATAL([$0: requires literal arguments])])dnl
-AC_CHECK_TYPE([$1], [], [], [$2])
-AC_CACHE_CHECK([alignment of $1], [AS_TR_SH([pgac_cv_alignof_$1])],
-[if test "$AS_TR_SH([ac_cv_type_$1])" = yes; then
-  _AC_COMPUTE_INT([((char*) & pgac_struct.field) - ((char*) & pgac_struct)],
-                  [AS_TR_SH([pgac_cv_alignof_$1])],
-                  [AC_INCLUDES_DEFAULT([$2])
-struct { char filler; $1 field; } pgac_struct;],
-                  [AC_MSG_ERROR([cannot compute alignment of $1, 77])])
-else
-  AS_TR_SH([pgac_cv_alignof_$1])=0
-fi])dnl
-AC_DEFINE_UNQUOTED(AS_TR_CPP(alignof_$1),
-                   [$AS_TR_SH([pgac_cv_alignof_$1])],
-                   [The alignment requirement of a `$1'.])
-])# PGAC_CHECK_ALIGNOF
 
 
 # PGAC_C_FUNCNAME_SUPPORT
@@ -121,6 +95,8 @@ AC_DEFINE(HAVE_FUNCNAME__FUNCTION, 1,
 fi
 fi])# PGAC_C_FUNCNAME_SUPPORT
 
+
+
 # PGAC_PROG_CC_CFLAGS_OPT
 # -----------------------
 # Given a string, check if the compiler supports the string as a
@@ -135,41 +111,23 @@ _AC_COMPILE_IFELSE([AC_LANG_PROGRAM()],
                     AC_MSG_RESULT(no)])
 ])# PGAC_PROG_CC_CFLAGS_OPT
 
-# The below backpatches the following Autoconf change:
-#
-# 2002-03-28  Kevin Ryde  <user42@zip.com.au>
-#
-#         * lib/autoconf/c.m4 (AC_C_INLINE): Test with a typedef return value,
-#         to avoid versions of HP C which don't allow that.
-#
-# When we upgrade to Autoconf >= 2.53a then we can drop this and rely
-# on the standard macro.
 
-# AC_C_INLINE
-# -----------
-# Do nothing if the compiler accepts the inline keyword.
-# Otherwise define inline to __inline__ or __inline if one of those work,
-# otherwise define inline to be empty.
-AC_DEFUN([AC_C_INLINE],
-[AC_REQUIRE([AC_PROG_CC_STDC])dnl
-AC_CACHE_CHECK([for inline], ac_cv_c_inline,
-[ac_cv_c_inline=no
-for ac_kw in inline __inline__ __inline; do
-  AC_COMPILE_IFELSE([AC_LANG_SOURCE(
-[#ifndef __cplusplus
-typedef int foo_t;
-static $ac_kw foo_t static_foo () {return 0; }
-$ac_kw int foo () {return 0; }
-#endif
-])],
-                    [ac_cv_c_inline=$ac_kw; break])
-done
-])
-case $ac_cv_c_inline in
-  inline | yes) ;;
-  no) AC_DEFINE(inline,,
-                [Define as `__inline' if that's what the C compiler calls it,
-                 or to nothing if it is not supported.]) ;;
-  *)  AC_DEFINE_UNQUOTED(inline, $ac_cv_c_inline) ;;
-esac
-])# AC_C_INLINE
+
+# PGAC_PROG_CC_LDFLAGS_OPT
+# ------------------------
+# Given a string, check if the compiler supports the string as a
+# command-line option. If it does, add the string to LDFLAGS.
+# For reasons you'd really rather not know about, this checks whether
+# you can link to a particular function, not just whether you can link.
+# In fact, we must actually check that the resulting program runs :-(
+AC_DEFUN([PGAC_PROG_CC_LDFLAGS_OPT],
+[AC_MSG_CHECKING([if $CC supports $1])
+pgac_save_LDFLAGS=$LDFLAGS
+LDFLAGS="$pgac_save_LDFLAGS $1"
+AC_RUN_IFELSE([AC_LANG_PROGRAM([extern void $2 (); void (*fptr) () = $2;],[])],
+              AC_MSG_RESULT(yes),
+              [LDFLAGS="$pgac_save_LDFLAGS"
+               AC_MSG_RESULT(no)],
+              [LDFLAGS="$pgac_save_LDFLAGS"
+               AC_MSG_RESULT(assuming no)])
+])# PGAC_PROG_CC_LDFLAGS_OPT

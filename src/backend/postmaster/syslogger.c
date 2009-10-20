@@ -14,7 +14,7 @@
  *
  * Author: Andreas Pflug <pgadmin@pse-consulting.de>
  *
- * Copyright (c) 2004-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2004-2009, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -184,7 +184,7 @@ SysLoggerMain(int argc, char *argv[])
 	 */
 	if (redirection_done)
 	{
-		int			fd = open(NULL_DEV, O_WRONLY, 0);
+		int			fd = open(DEVNULL, O_WRONLY, 0);
 
 		/*
 		 * The closes might look redundant, but they are not: we want to be
@@ -267,11 +267,9 @@ SysLoggerMain(int argc, char *argv[])
 	/* Fire up separate data transfer thread */
 	InitializeCriticalSection(&sysfileSection);
 
-	{
-		unsigned int tid;
-
-		threadHandle = (HANDLE) _beginthreadex(0, 0, pipeThread, 0, 0, &tid);
-	}
+	threadHandle = (HANDLE) _beginthreadex(NULL, 0, pipeThread, NULL, 0, NULL);
+	if (threadHandle == 0)
+		elog(FATAL, "could not create syslogger data transfer thread: %m");
 #endif   /* WIN32 */
 
 	/* remember active logfile parameters */
@@ -331,7 +329,7 @@ SysLoggerMain(int argc, char *argv[])
 		if (!rotation_requested && Log_RotationAge > 0)
 		{
 			/* Do a logfile rotation if it's time */
-			pg_time_t	now = time(NULL);
+			pg_time_t	now = (pg_time_t) time(NULL);
 
 			if (now >= next_rotation_time)
 				rotation_requested = time_based_rotation = true;
@@ -370,7 +368,8 @@ SysLoggerMain(int argc, char *argv[])
 		 * Wait for some data, timing out after 1 second
 		 */
 		FD_ZERO(&rfds);
-		FD_SET(syslogPipe[0], &rfds);
+		FD_SET		(syslogPipe[0], &rfds);
+
 		timeout.tv_sec = 1;
 		timeout.tv_usec = 0;
 
@@ -1194,18 +1193,9 @@ logfile_getname(pg_time_t timestamp, char *suffix)
 
 	len = strlen(filename);
 
-	if (strchr(Log_filename, '%'))
-	{
-		/* treat it as a strftime pattern */
-		pg_strftime(filename + len, MAXPGPATH - len, Log_filename,
-					pg_localtime(&timestamp, log_timezone));
-	}
-	else
-	{
-		/* no strftime escapes, so append timestamp to new filename */
-		snprintf(filename + len, MAXPGPATH - len, "%s.%lu",
-				 Log_filename, (unsigned long) timestamp);
-	}
+	/* treat it as a strftime pattern */
+	pg_strftime(filename + len, MAXPGPATH - len, Log_filename,
+				pg_localtime(&timestamp, log_timezone));
 
 	if (suffix != NULL)
 	{

@@ -3,7 +3,7 @@
  * restrictinfo.c
  *	  RestrictInfo node manipulation routines.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -35,8 +35,9 @@ static Expr *make_sub_restrictinfos(Expr *clause,
 					   bool pseudoconstant,
 					   Relids required_relids,
 					   Relids nullable_relids);
-static bool join_clause_is_redundant(PlannerInfo *root,
-						 RestrictInfo *rinfo,
+static List *select_nonredundant_join_list(List *restrictinfo_list,
+							  List *reference_list);
+static bool join_clause_is_redundant(RestrictInfo *rinfo,
 						 List *reference_list);
 
 
@@ -271,6 +272,57 @@ make_restrictinfo_from_bitmapqual(Path *bitmapqual,
 }
 
 /*
+ * make_restrictinfos_from_actual_clauses
+ *
+ * Given a list of implicitly-ANDed restriction clauses, produce a list
+ * of RestrictInfo nodes.  This is used to reconstitute the RestrictInfo
+ * representation after doing transformations of a list of clauses.
+ *
+ * We assume that the clauses are relation-level restrictions and therefore
+ * we don't have to worry about is_pushed_down, outerjoin_delayed, or
+ * nullable_relids (these can be assumed true, false, and NULL, respectively).
+ * We do take care to recognize pseudoconstant clauses properly.
+ */
+List *
+make_restrictinfos_from_actual_clauses(PlannerInfo *root,
+									   List *clause_list)
+{
+	List	   *result = NIL;
+	ListCell   *l;
+
+	foreach(l, clause_list)
+	{
+		Expr   *clause = (Expr *) lfirst(l);
+		bool	pseudoconstant;
+		RestrictInfo *rinfo;
+
+		/*
+		 * It's pseudoconstant if it contains no Vars and no volatile
+		 * functions.  We probably can't see any sublinks here, so
+		 * contain_var_clause() would likely be enough, but for safety
+		 * use contain_vars_of_level() instead.
+		 */
+		pseudoconstant =
+			!contain_vars_of_level((Node *) clause, 0) &&
+			!contain_volatile_functions((Node *) clause);
+		if (pseudoconstant)
+		{
+			/* tell createplan.c to check for gating quals */
+			root->hasPseudoConstantQuals = true;
+		}
+
+		rinfo = make_restrictinfo(clause,
+								  true,
+								  false,
+								  pseudoconstant,
+								  NULL,
+								  NULL);
+		result = lappend(result, rinfo);
+	}
+	return result;
+}
+
+/*
  * make_restrictinfo_internal
  *
  * Common code for the main entry points and the recursive cases.
@@ -347,7 +399,8 @@ make_restrictinfo_internal(Expr *clause,
 	restrictinfo->parent_ec = NULL;
 
 	restrictinfo->eval_cost.startup = -1;
-	restrictinfo->this_selec = -1;
+	restrictinfo->norm_selec = -1;
+	restrictinfo->outer_selec = -1;
 
 	restrictinfo->mergeopfamilies = NIL;
 
@@ -480,6 +533,31 @@ get_actual_clauses(List *restrictinfo_list)
 }
 
 /*
+ * get_all_actual_clauses
+ *
+ * Returns a list containing the bare clauses from 'restrictinfo_list'.
+ *
+ * This loses the distinction between regular and pseudoconstant clauses,
+ * so be careful what you use it for.
+ */
+List *
+get_all_actual_clauses(List *restrictinfo_list)
+{
+	List	   *result = NIL;
+	ListCell   *l;
+
+	foreach(l, restrictinfo_list)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+
+		Assert(IsA(rinfo, RestrictInfo));
+
+		result = lappend(result, rinfo->clause);
+	}
+	return result;
+}
+
+/*
  * extract_actual_clauses
  *
  * Extract bare clauses from 'restrictinfo_list', returning either the
@@ -544,26 +622,91 @@ extract_actual_join_clauses(List *restrictinfo_list,
 	}
 }
 
+
 /*
  * select_nonredundant_join_clauses
  *
  * Given a list of RestrictInfo clauses that are to be applied in a join,
- * select the ones that are not redundant with any clause in the
- * reference_list.	This is used only for nestloop-with-inner-indexscan
- * joins: any clauses being checked by the index should be removed from
- * the qpquals list.
+ * select the ones that are not redundant with any clause that's enforced
+ * by the inner_path.  This is used for nestloop joins, wherein any clause
+ * being used in an inner indexscan need not be checked again at the join.
  *
  * "Redundant" means either equal() or derived from the same EquivalenceClass.
  * We have to check the latter because indxqual.c may select different derived
  * clauses than were selected by generate_join_implied_equalities().
  *
- * Note that we assume the given restrictinfo_list has already been checked
- * for local redundancies, so we don't check again.
+ * Note that we are *not* checking for local redundancies within the given
+ * restrictinfo_list; that should have been handled elsewhere.
  */
 List *
 select_nonredundant_join_clauses(PlannerInfo *root,
 								 List *restrictinfo_list,
-								 List *reference_list)
+								 Path *inner_path)
+{
+	if (IsA(inner_path, IndexPath))
+	{
+		/*
+		 * Check the index quals to see if any of them are join clauses.
+		 *
+		 * We can skip this if the index path is an ordinary indexpath and not
+		 * a special innerjoin path, since it then wouldn't be using any join
+		 * clauses.
+		 */
+		IndexPath  *innerpath = (IndexPath *) inner_path;
+
+		if (innerpath->isjoininner)
+			restrictinfo_list =
+				select_nonredundant_join_list(restrictinfo_list,
+											  innerpath->indexclauses);
+	}
+	else if (IsA(inner_path, BitmapHeapPath))
+	{
+		/*
+		 * Same deal for bitmapped index scans.
+		 *
+		 * Note: both here and above, we ignore any implicit index
+		 * restrictions associated with the use of partial indexes.  This is
+		 * OK because we're only trying to prove we can dispense with some
+		 * join quals; failing to prove that doesn't result in an incorrect
+		 * plan.  It's quite unlikely that a join qual could be proven
+		 * redundant by an index predicate anyway.	(Also, if we did manage to
+		 * prove it, we'd have to have a special case for update targets; see
+		 * notes about EvalPlanQual testing in create_indexscan_plan().)
+		 */
+		BitmapHeapPath *innerpath = (BitmapHeapPath *) inner_path;
+
+		if (innerpath->isjoininner)
+		{
+			List	   *bitmapclauses;
+
+			bitmapclauses =
+				make_restrictinfo_from_bitmapqual(innerpath->bitmapqual,
+												  true,
+												  false);
+			restrictinfo_list =
+				select_nonredundant_join_list(restrictinfo_list,
+											  bitmapclauses);
+		}
+	}
+
+	/*
+	 * XXX the inner path of a nestloop could also be an append relation whose
+	 * elements use join quals.  However, they might each use different quals;
+	 * we could only remove join quals that are enforced by all the appendrel
+	 * members.  For the moment we don't bother to try.
+	 */
+
+	return restrictinfo_list;
+}
+
+/*
+ * select_nonredundant_join_list
+ *		Select the members of restrictinfo_list that are not redundant with
+ *		any member of reference_list.  See above for more info.
+ */
+static List *
+select_nonredundant_join_list(List *restrictinfo_list,
+							  List *reference_list)
 {
 	List	   *result = NIL;
 	ListCell   *item;
@@ -573,7 +716,7 @@ select_nonredundant_join_clauses(PlannerInfo *root,
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(item);
 
 		/* drop it if redundant with any reference clause */
-		if (join_clause_is_redundant(root, rinfo, reference_list))
+		if (join_clause_is_redundant(rinfo, reference_list))
 			continue;
 
 		/* otherwise, add it to result list */
@@ -588,8 +731,7 @@ select_nonredundant_join_clauses(PlannerInfo *root,
  *		Test whether rinfo is redundant with any clause in reference_list.
  */
 static bool
-join_clause_is_redundant(PlannerInfo *root,
-						 RestrictInfo *rinfo,
+join_clause_is_redundant(RestrictInfo *rinfo,
 						 List *reference_list)
 {
 	ListCell   *refitem;

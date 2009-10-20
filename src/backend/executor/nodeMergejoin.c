@@ -3,7 +3,7 @@
  * nodeMergejoin.c
  *	  routines supporting merge joins
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -180,7 +180,6 @@ MJExamineQuals(List *mergeclauses,
 		int			op_strategy;
 		Oid			op_lefttype;
 		Oid			op_righttype;
-		bool		op_recheck;
 		RegProcedure cmpproc;
 		AclResult	aclresult;
 
@@ -197,12 +196,10 @@ MJExamineQuals(List *mergeclauses,
 		get_op_opfamily_properties(qual->opno, opfamily,
 								   &op_strategy,
 								   &op_lefttype,
-								   &op_righttype,
-								   &op_recheck);
+								   &op_righttype);
 		if (op_strategy != BTEqualStrategyNumber)		/* should not happen */
 			elog(ERROR, "cannot merge using non-equality operator %u",
 				 qual->opno);
-		Assert(!op_recheck);	/* never true for btree */
 
 		/* And get the matching support procedure (comparison function) */
 		cmpproc = get_opfamily_proc(opfamily,
@@ -760,20 +757,28 @@ ExecMergeJoin(MergeJoinState *node)
 				innerTupleSlot = node->mj_InnerTupleSlot;
 				econtext->ecxt_innertuple = innerTupleSlot;
 
-				if (node->js.jointype == JOIN_IN &&
-					node->mj_MatchedOuter)
-					qualResult = false;
-				else
-				{
-					qualResult = (joinqual == NIL ||
-								  ExecQual(joinqual, econtext, false));
-					MJ_DEBUG_QUAL(joinqual, qualResult);
-				}
+				qualResult = (joinqual == NIL ||
+							  ExecQual(joinqual, econtext, false));
+				MJ_DEBUG_QUAL(joinqual, qualResult);
 
 				if (qualResult)
 				{
 					node->mj_MatchedOuter = true;
 					node->mj_MatchedInner = true;
+
+					/* In an antijoin, we never return a matched tuple */
+					if (node->js.jointype == JOIN_ANTI)
+					{
+						node->mj_JoinState = EXEC_MJ_NEXTOUTER;
+						break;
+					}
+
+					/*
+					 * In a semijoin, we'll consider returning the first
+					 * match, but after that we're done with this outer tuple.
+					 */
+					if (node->js.jointype == JOIN_SEMI)
+						node->mj_JoinState = EXEC_MJ_NEXTOUTER;
 
 					qualResult = (otherqual == NIL ||
 								  ExecQual(otherqual, econtext, false));
@@ -1475,11 +1480,12 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	switch (node->join.jointype)
 	{
 		case JOIN_INNER:
-		case JOIN_IN:
+		case JOIN_SEMI:
 			mergestate->mj_FillOuter = false;
 			mergestate->mj_FillInner = false;
 			break;
 		case JOIN_LEFT:
+		case JOIN_ANTI:
 			mergestate->mj_FillOuter = true;
 			mergestate->mj_FillInner = false;
 			mergestate->mj_NullInnerTupleSlot =

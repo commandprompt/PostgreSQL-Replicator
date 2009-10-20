@@ -6,7 +6,7 @@
  *	  changes should be made with care.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -18,9 +18,9 @@
 
 #include "access/xlog.h"
 #include "access/xlogdefs.h"
+#include "storage/block.h"
 #include "storage/bufpage.h"
-#include "storage/off.h"
-#include "utils/rel.h"
+#include "utils/relcache.h"
 
 /*
  * amproc indexes for GiST indexes.

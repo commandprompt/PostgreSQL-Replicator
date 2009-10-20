@@ -45,17 +45,6 @@
 
 #define USES_WINSOCK
 
-/*
- * Ensure that anyone building an extension is using a 32 bit time_t.
- * On Mingw/Msys, that should always be the case, but MSVC++ defaults
- * to 64 bits. We set that for our own build in the project files
- */
-#if defined(WIN32_ONLY_COMPILER) && !defined(FRONTEND)
-#ifndef _USE_32BIT_TIME_T
-#error "Postgres uses 32 bit time_t - add #define _USE_32BIT_TIME_T on Windows"
-#endif
-#endif
-
 /* defines for dynamic linking on Win32 platform */
 #if defined(WIN32) || defined(__CYGWIN__)
 
@@ -198,8 +187,21 @@ struct itimerval
 	struct timeval it_interval;
 	struct timeval it_value;
 };
+
 int			setitimer(int which, const struct itimerval * value, struct itimerval * ovalue);
 
+/*
+ * WIN32 does not provide 64-bit off_t, but does provide the functions operating
+ * with 64-bit offsets.
+ */
+#define pgoff_t __int64
+#ifdef WIN32_ONLY_COMPILER
+#define fseeko(stream, offset, origin) _fseeki64(stream, offset, origin)
+#define ftello(stream) _ftelli64(stream)
+#else
+#define fseeko(stream, offset, origin) fseeko64(stream, offset, origin)
+#define ftello(stream) ftello64(stream)
+#endif
 
 /*
  * Supplement to <sys/types.h>.
@@ -292,10 +294,17 @@ extern int	pgwin32_ReserveSharedMemoryRegion(HANDLE);
 /* in port/win32error.c */
 extern void _dosmaperr(unsigned long);
 
+/* in port/win32env.c */
+extern int	pgwin32_putenv(const char *);
+extern void pgwin32_unsetenv(const char *);
 
-/* Things that exist in MingW headers, but need to be added to MSVC */
+#define putenv(x) pgwin32_putenv(x)
+#define unsetenv(x) pgwin32_unsetenv(x)
+
+/* Things that exist in MingW headers, but need to be added to MSVC & BCC */
 #ifdef WIN32_ONLY_COMPILER
 typedef long ssize_t;
+
 #ifndef __BORLANDC__
 typedef unsigned short mode_t;
 #endif
@@ -330,5 +339,22 @@ typedef unsigned short mode_t;
 
 /* Pulled from Makefile.port in mingw */
 #define DLSUFFIX ".dll"
+
+#ifdef __BORLANDC__
+
+/* for port/dirent.c */
+#ifndef INVALID_FILE_ATTRIBUTES
+#define INVALID_FILE_ATTRIBUTES ((DWORD) -1)
+#endif
+
+/* for port/open.c */
+#ifndef O_RANDOM
+#define O_RANDOM		0x0010	/* File access is primarily random */
+#define O_SEQUENTIAL	0x0020	/* File access is primarily sequential */
+#define O_TEMPORARY 0x0040		/* Temporary file bit */
+#define O_SHORT_LIVED	0x1000	/* Temporary storage file, try not to flush */
+#define _O_SHORT_LIVED	O_SHORT_LIVED
+#endif   /* ifndef O_RANDOM */
+#endif   /* __BORLANDC__ */
 
 #endif

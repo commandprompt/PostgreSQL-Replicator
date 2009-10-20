@@ -3,7 +3,7 @@
  * win32error.c
  *	  Map win32 error codes to errno values
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -180,7 +180,7 @@ _dosmaperr(unsigned long e)
 			ereport(DEBUG5,
 					(errmsg_internal("mapped win32 error code %lu to %d",
 									 e, errno)));
-#else
+#elif FRONTEND_DEBUG
 			fprintf(stderr, _("mapped win32 error code %lu to %d"), e, errno);
 #endif
 			return;

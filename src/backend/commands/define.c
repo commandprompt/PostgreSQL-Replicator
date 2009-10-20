@@ -4,7 +4,7 @@
  *	  Support routines for various kinds of object creation.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -311,9 +311,5 @@ defGetTypeLength(DefElem *def)
 DefElem *
 defWithOids(bool value)
 {
-	DefElem    *f = makeNode(DefElem);
-
-	f->defname = "oids";
-	f->arg = (Node *) makeInteger(value);
-	return f;
+	return makeDefElem("oids", (Node *) makeInteger(value));
 }

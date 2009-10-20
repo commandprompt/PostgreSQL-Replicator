@@ -53,6 +53,9 @@ SELECT a[1:3],
           d[1:1][1:2]
    FROM arrtest;
 
+SELECT array_ndims(a) AS a,array_ndims(b) AS b,array_ndims(c) AS c
+   FROM arrtest;
+
 SELECT array_dims(a) AS a,array_dims(b) AS b,array_dims(c) AS c
    FROM arrtest;
 
@@ -254,7 +257,8 @@ insert into arr_tbl values ('{1,2,10}');
 set enable_seqscan to off;
 set enable_bitmapscan to off;
 select * from arr_tbl where f1 > '{1,2,3}' and f1 <= '{1,5,3}';
--- note: if above select doesn't produce the expected tuple order,
+select * from arr_tbl where f1 >= '{1,2,3}' and f1 < '{1,5,3}';
+-- note: if above selects don't produce the expected tuple order,
 -- then you didn't get an indexscan plan, and something is busted.
 reset enable_seqscan;
 reset enable_bitmapscan;
@@ -280,6 +284,7 @@ select E'{{1,2},\\{2,3}}'::text[];
 select '{{"1 2" x},{3}}'::text[];
 select '{}}'::text[];
 select '{ }}'::text[];
+select array[];
 -- none of the above should be accepted
 
 -- all of the following should be accepted
@@ -292,6 +297,8 @@ select '{
            0 second,
            @ 1 hour @ 42 minutes @ 20 seconds
          }'::interval[];
+select array[]::text[];
+select '[0:1]={1.1,2.2}'::float8[];
 -- all of the above should be accepted
 
 -- tests for array aggregates
@@ -338,3 +345,62 @@ select c2[2].f2 from comptable;
 drop type _comptype;
 drop table comptable;
 drop type comptype;
+
+create or replace function unnest1(anyarray) 
+returns setof anyelement as $$
+select $1[s] from generate_subscripts($1,1) g(s);
+$$ language sql immutable;
+
+create or replace function unnest2(anyarray) 
+returns setof anyelement as $$
+select $1[s1][s2] from generate_subscripts($1,1) g1(s1),
+                   generate_subscripts($1,2) g2(s2);
+$$ language sql immutable;
+
+select * from unnest1(array[1,2,3]);
+select * from unnest2(array[[1,2,3],[4,5,6]]);
+
+drop function unnest1(anyarray);
+drop function unnest2(anyarray);
+
+select array_fill(null::integer, array[3,3],array[2,2]);
+select array_fill(null::integer, array[3,3]);
+select array_fill(null::text, array[3,3],array[2,2]);
+select array_fill(null::text, array[3,3]);
+select array_fill(7, array[3,3],array[2,2]);
+select array_fill(7, array[3,3]);
+select array_fill('juhu'::text, array[3,3],array[2,2]);
+select array_fill('juhu'::text, array[3,3]);
+-- raise exception
+select array_fill(1, null, array[2,2]);
+select array_fill(1, array[2,2], null);
+select array_fill(1, array[3,3], array[1,1,1]);
+select array_fill(1, array[1,2,null]);
+
+select string_to_array('1|2|3', '|');
+select string_to_array('1|2|3|', '|');
+select string_to_array('1||2|3||', '||');
+select string_to_array('1|2|3', '');
+select string_to_array('', '|');
+select string_to_array('1|2|3', NULL);
+select string_to_array(NULL, '|');
+
+select array_to_string(string_to_array('1|2|3', '|'), '|');
+
+select array_length(array[1,2,3], 1);
+select array_length(array[[1,2,3], [4,5,6]], 0);
+select array_length(array[[1,2,3], [4,5,6]], 1);
+select array_length(array[[1,2,3], [4,5,6]], 2);
+select array_length(array[[1,2,3], [4,5,6]], 3);
+
+select array_agg(unique1) from (select unique1 from tenk1 where unique1 < 15 order by unique1) ss;
+select array_agg(ten) from (select ten from tenk1 where unique1 < 15 order by unique1) ss;
+select array_agg(nullif(ten, 4)) from (select ten from tenk1 where unique1 < 15 order by unique1) ss;
+select array_agg(unique1) from tenk1 where unique1 < -15;
+
+select unnest(array[1,2,3]);
+select * from unnest(array[1,2,3]);
+select unnest(array[1,2,3,4.5]::float8[]);
+select unnest(array[1,2,3,4.5]::numeric[]);
+select unnest(array[1,2,3,null,4,null,null,5,6]);
+select unnest(array[1,2,3,null,4,null,null,5,6]::text[]);

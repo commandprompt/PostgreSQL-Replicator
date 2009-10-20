@@ -1,13 +1,13 @@
 /*-------------------------------------------------------------------------
  *
  * like_match.c
- *	  like expression handling internal code.
+ *	  LIKE pattern matching internal code.
  *
- * This file is included by like.c four times, to provide natching code for
- * single-byte encodings, UTF8, and for other multi-byte encodings,
- * and case insensitive matches for single byte encodings.
- * UTF8 is a special case because we can use a much more efficient version
- * of NextChar than can be used for other multi-byte encodings.
+ * This file is included by like.c four times, to provide matching code for
+ * (1) single-byte encodings, (2) UTF8, (3) other multi-byte encodings,
+ * and (4) case insensitive matches in single byte encodings.
+ * (UTF8 is a special case because we can use a much more efficient version
+ * of NextChar than can be used for general multi-byte encodings.)
  *
  * Before the inclusion, we need to define the following macros:
  *
@@ -16,7 +16,7 @@
  * do_like_escape - name of function if wanted - needs CHAREQ and CopyAdvChar
  * MATCH_LOWER - define iff using to_lower on text chars
  *
- * Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	$PostgreSQL$
@@ -94,9 +94,14 @@ MatchText(char *t, int tlen, char *p, int plen)
 	{
 		if (*p == '\\')
 		{
-			/* Next byte must match literally, whatever it is */
+			/* Next pattern byte must match literally, whatever it is */
 			NextByte(p, plen);
-			if ((plen <= 0) || TCHAR(*p) != TCHAR(*t))
+			/* ... and there had better be one, per SQL standard */
+			if (plen <= 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_ESCAPE_SEQUENCE),
+				 errmsg("LIKE pattern must not end with escape character")));
+			if (TCHAR (*p) != TCHAR (*t))
 				return LIKE_FALSE;
 		}
 		else if (*p == '%')
@@ -130,9 +135,9 @@ MatchText(char *t, int tlen, char *p, int plen)
 				} while (tlen > 0 && plen > 0 && *p == '_');
 
 				/*
-				 * If we are at the end of the pattern, succeed: % followed
-				 * by n _'s matches any string of at least n characters, and
-				 * we have now found there are at least n characters.
+				 * If we are at the end of the pattern, succeed: % followed by
+				 * n _'s matches any string of at least n characters, and we
+				 * have now found there are at least n characters.
 				 */
 				if (plen <= 0)
 					return LIKE_TRUE;
@@ -150,13 +155,13 @@ MatchText(char *t, int tlen, char *p, int plen)
 			}
 			else
 			{
-				char		firstpat = TCHAR(*p);
+				char		firstpat = TCHAR (*p);
 
 				if (*p == '\\')
 				{
 					if (plen < 2)
 						return LIKE_FALSE;
-					firstpat = TCHAR(p[1]);
+					firstpat = TCHAR (p[1]);
 				}
 
 				while (tlen > 0)
@@ -165,7 +170,7 @@ MatchText(char *t, int tlen, char *p, int plen)
 					 * Optimization to prevent most recursion: don't recurse
 					 * unless first pattern byte matches first text byte.
 					 */
-					if (TCHAR(*t) == firstpat)
+					if (TCHAR (*t) == firstpat)
 					{
 						int			matched = MatchText(t, tlen, p, plen);
 
@@ -190,7 +195,7 @@ MatchText(char *t, int tlen, char *p, int plen)
 			NextByte(p, plen);
 			continue;
 		}
-		else if (TCHAR(*p) != TCHAR(*t))
+		else if (TCHAR (*p) != TCHAR (*t))
 		{
 			/* non-wildcard pattern char fails to match text char */
 			return LIKE_FALSE;
@@ -215,8 +220,9 @@ MatchText(char *t, int tlen, char *p, int plen)
 	if (tlen > 0)
 		return LIKE_FALSE;		/* end of pattern, but not of text */
 
-	/* End of text string.  Do we have matching pattern remaining? */
-	while (plen > 0 && *p == '%')	/* allow multiple %'s at end of pattern */
+	/* End of text string.	Do we have matching pattern remaining? */
+	while (plen > 0 && *p == '%')		/* allow multiple %'s at end of
+										 * pattern */
 		NextByte(p, plen);
 
 	if (plen <= 0)
@@ -346,4 +352,5 @@ do_like_escape(text *pat, text *esc)
 
 #ifdef MATCH_LOWER
 #undef MATCH_LOWER
+
 #endif

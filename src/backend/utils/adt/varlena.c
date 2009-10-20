@@ -3,7 +3,7 @@
  * varlena.c
  *	  Functions for the variable-length built-in types.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,7 +16,6 @@
 
 #include <ctype.h>
 
-#include "access/tupmacs.h"
 #include "access/tuptoaster.h"
 #include "catalog/pg_type.h"
 #include "libpq/md5.h"
@@ -40,6 +39,9 @@ typedef struct
 	pg_wchar   *wstr2;			/* note: these are palloc'd */
 	int			len1;			/* string lengths in logical characters */
 	int			len2;
+	/* Skip table for Boyer-Moore-Horspool search algorithm: */
+	int			skiptablemask;	/* mask for ANDing with skiptable subscripts */
+	int			skiptable[256]; /* skip distance for given mismatched char */
 } TextPositionState;
 
 #define DatumGetUnknownP(X)			((unknown *) PG_DETOAST_DATUM(X))
@@ -47,15 +49,6 @@ typedef struct
 #define PG_GETARG_UNKNOWN_P(n)		DatumGetUnknownP(PG_GETARG_DATUM(n))
 #define PG_GETARG_UNKNOWN_P_COPY(n) DatumGetUnknownPCopy(PG_GETARG_DATUM(n))
 #define PG_RETURN_UNKNOWN_P(x)		PG_RETURN_POINTER(x)
-
-#define PG_TEXTARG_GET_STR(arg_) \
-	DatumGetCString(DirectFunctionCall1(textout, PG_GETARG_DATUM(arg_)))
-#define PG_TEXT_GET_STR(textp_) \
-	DatumGetCString(DirectFunctionCall1(textout, PointerGetDatum(textp_)))
-#define PG_STR_GET_TEXT(str_) \
-	DatumGetTextP(DirectFunctionCall1(textin, CStringGetDatum(str_)))
-#define TEXTLEN(textp) \
-	text_length(PointerGetDatum(textp))
 
 static int	text_cmp(text *arg1, text *arg2);
 static int32 text_length(Datum str);
@@ -67,8 +60,105 @@ static text *text_substring(Datum str,
 			   int32 start,
 			   int32 length,
 			   bool length_not_specified);
-
 static void appendStringInfoText(StringInfo str, const text *t);
+
+
+/*****************************************************************************
+ *	 CONVERSION ROUTINES EXPORTED FOR USE BY C CODE							 *
+ *****************************************************************************/
+
+/*
+ * cstring_to_text
+ *
+ * Create a text value from a null-terminated C string.
+ *
+ * The new text value is freshly palloc'd with a full-size VARHDR.
+ */
+text *
+cstring_to_text(const char *s)
+{
+	return cstring_to_text_with_len(s, strlen(s));
+}
+
+/*
+ * cstring_to_text_with_len
+ *
+ * Same as cstring_to_text except the caller specifies the string length;
+ * the string need not be null_terminated.
+ */
+text *
+cstring_to_text_with_len(const char *s, int len)
+{
+	text	   *result = (text *) palloc(len + VARHDRSZ);
+
+	SET_VARSIZE(result, len + VARHDRSZ);
+	memcpy(VARDATA(result), s, len);
+
+	return result;
+}
+
+/*
+ * text_to_cstring
+ *
+ * Create a palloc'd, null-terminated C string from a text value.
+ *
+ * We support being passed a compressed or toasted text value.
+ * This is a bit bogus since such values shouldn't really be referred to as
+ * "text *", but it seems useful for robustness.  If we didn't handle that
+ * case here, we'd need another routine that did, anyway.
+ */
+char *
+text_to_cstring(const text *t)
+{
+	/* must cast away the const, unfortunately */
+	text	   *tunpacked = pg_detoast_datum_packed((struct varlena *) t);
+	int			len = VARSIZE_ANY_EXHDR(tunpacked);
+	char	   *result;
+
+	result = (char *) palloc(len + 1);
+	memcpy(result, VARDATA_ANY(tunpacked), len);
+	result[len] = '\0';
+
+	if (tunpacked != t)
+		pfree(tunpacked);
+
+	return result;
+}
+
+/*
+ * text_to_cstring_buffer
+ *
+ * Copy a text value into a caller-supplied buffer of size dst_len.
+ *
+ * The text string is truncated if necessary to fit.  The result is
+ * guaranteed null-terminated (unless dst_len == 0).
+ *
+ * We support being passed a compressed or toasted text value.
+ * This is a bit bogus since such values shouldn't really be referred to as
+ * "text *", but it seems useful for robustness.  If we didn't handle that
+ * case here, we'd need another routine that did, anyway.
+ */
+void
+text_to_cstring_buffer(const text *src, char *dst, size_t dst_len)
+{
+	/* must cast away the const, unfortunately */
+	text	   *srcunpacked = pg_detoast_datum_packed((struct varlena *) src);
+	size_t		src_len = VARSIZE_ANY_EXHDR(srcunpacked);
+
+	if (dst_len > 0)
+	{
+		dst_len--;
+		if (dst_len >= src_len)
+			dst_len = src_len;
+		else	/* ensure truncation is encoding-safe */
+			dst_len = pg_mbcliplen(VARDATA_ANY(srcunpacked), src_len, dst_len);
+		memcpy(dst, VARDATA_ANY(srcunpacked), dst_len);
+		dst[dst_len] = '\0';
+	}
+
+	if (srcunpacked != src)
+		pfree(srcunpacked);
+}
 
 
 /*****************************************************************************
@@ -96,10 +186,10 @@ byteain(PG_FUNCTION_ARGS)
 	char	   *inputText = PG_GETARG_CSTRING(0);
 	char	   *tp;
 	char	   *rp;
-	int			byte;
+	int byte;
 	bytea	   *result;
 
-	for (byte = 0, tp = inputText; *tp != '\0'; byte++)
+	for (byte = 0, tp = inputText; *tp != '\0'; byte ++)
 	{
 		if (tp[0] != '\\')
 			tp++;
@@ -122,7 +212,8 @@ byteain(PG_FUNCTION_ARGS)
 		}
 	}
 
-	byte += VARHDRSZ;
+	byte	  +=VARHDRSZ;
+
 	result = (bytea *) palloc(byte);
 	SET_VARSIZE(result, byte);
 
@@ -138,10 +229,11 @@ byteain(PG_FUNCTION_ARGS)
 				 (tp[3] >= '0' && tp[3] <= '7'))
 		{
 			byte = VAL(tp[1]);
-			byte <<= 3;
-			byte += VAL(tp[2]);
-			byte <<= 3;
-			*rp++ = byte + VAL(tp[3]);
+			byte	 <<=3;
+			byte	  +=VAL(tp[2]);
+			byte	 <<=3;
+			*rp++ = byte +VAL(tp[3]);
+
 			tp += 4;
 		}
 		else if ((tp[0] == '\\') &&
@@ -259,16 +351,8 @@ Datum
 textin(PG_FUNCTION_ARGS)
 {
 	char	   *inputText = PG_GETARG_CSTRING(0);
-	text	   *result;
-	int			len;
 
-	len = strlen(inputText);
-	result = (text *) palloc(len + VARHDRSZ);
-	SET_VARSIZE(result, len + VARHDRSZ);
-
-	memcpy(VARDATA(result), inputText, len);
-
-	PG_RETURN_TEXT_P(result);
+	PG_RETURN_TEXT_P(cstring_to_text(inputText));
 }
 
 /*
@@ -277,16 +361,9 @@ textin(PG_FUNCTION_ARGS)
 Datum
 textout(PG_FUNCTION_ARGS)
 {
-	text	   *t = PG_GETARG_TEXT_PP(0);
-	int			len;
-	char	   *result;
+	Datum		txt = PG_GETARG_DATUM(0);
 
-	len = VARSIZE_ANY_EXHDR(t);
-	result = (char *) palloc(len + 1);
-	memcpy(result, VARDATA_ANY(t), len);
-	result[len] = '\0';
-
-	PG_RETURN_CSTRING(result);
+	PG_RETURN_CSTRING(TextDatumGetCString(txt));
 }
 
 /*
@@ -302,9 +379,7 @@ textrecv(PG_FUNCTION_ARGS)
 
 	str = pq_getmsgtext(buf, buf->len - buf->cursor, &nbytes);
 
-	result = (text *) palloc(nbytes + VARHDRSZ);
-	SET_VARSIZE(result, nbytes + VARHDRSZ);
-	memcpy(VARDATA(result), str, nbytes);
+	result = cstring_to_text_with_len(str, nbytes);
 	pfree(str);
 	PG_RETURN_TEXT_P(result);
 }
@@ -600,7 +675,7 @@ text_substring(Datum str, int32 start, int32 length, bool length_not_specified)
 			 * string.
 			 */
 			if (E < 1)
-				return PG_STR_GET_TEXT("");
+				return cstring_to_text("");
 
 			L1 = E - S1;
 		}
@@ -664,7 +739,7 @@ text_substring(Datum str, int32 start, int32 length, bool length_not_specified)
 			 * string.
 			 */
 			if (E < 1)
-				return PG_STR_GET_TEXT("");
+				return cstring_to_text("");
 
 			/*
 			 * if E is past the end of the string, the tuple toaster will
@@ -683,7 +758,8 @@ text_substring(Datum str, int32 start, int32 length, bool length_not_specified)
 		 * If we're working with an untoasted source, no need to do an extra
 		 * copying step.
 		 */
-		if (VARATT_IS_COMPRESSED(str) || VARATT_IS_EXTERNAL(str))
+		if (VARATT_IS_COMPRESSED(DatumGetPointer(str)) ||
+			VARATT_IS_EXTERNAL(DatumGetPointer(str)))
 			slice = DatumGetTextPSlice(str, slice_start, slice_size);
 		else
 			slice = (text *) DatumGetPointer(str);
@@ -693,7 +769,7 @@ text_substring(Datum str, int32 start, int32 length, bool length_not_specified)
 		{
 			if (slice != (text *) DatumGetPointer(str))
 				pfree(slice);
-			return PG_STR_GET_TEXT("");
+			return cstring_to_text("");
 		}
 
 		/* Now we can get the actual length of the slice in MB characters */
@@ -708,7 +784,7 @@ text_substring(Datum str, int32 start, int32 length, bool length_not_specified)
 		{
 			if (slice != (text *) DatumGetPointer(str))
 				pfree(slice);
-			return PG_STR_GET_TEXT("");
+			return cstring_to_text("");
 		}
 
 		/*
@@ -795,6 +871,7 @@ text_position(text *t1, text *t2)
 	return result;
 }
 
+
 /*
  * text_position_setup, text_position_next, text_position_cleanup -
  *	Component steps of text_position()
@@ -838,64 +915,218 @@ text_position_setup(text *t1, text *t2, TextPositionState *state)
 		state->len1 = len1;
 		state->len2 = len2;
 	}
+
+	/*
+	 * Prepare the skip table for Boyer-Moore-Horspool searching.  In these
+	 * notes we use the terminology that the "haystack" is the string to be
+	 * searched (t1) and the "needle" is the pattern being sought (t2).
+	 *
+	 * If the needle is empty or bigger than the haystack then there is no
+	 * point in wasting cycles initializing the table.	We also choose not to
+	 * use B-M-H for needles of length 1, since the skip table can't possibly
+	 * save anything in that case.
+	 */
+	if (len1 >= len2 && len2 > 1)
+	{
+		int			searchlength = len1 - len2;
+		int			skiptablemask;
+		int			last;
+		int			i;
+
+		/*
+		 * First we must determine how much of the skip table to use.  The
+		 * declaration of TextPositionState allows up to 256 elements, but for
+		 * short search problems we don't really want to have to initialize so
+		 * many elements --- it would take too long in comparison to the
+		 * actual search time.	So we choose a useful skip table size based on
+		 * the haystack length minus the needle length.  The closer the needle
+		 * length is to the haystack length the less useful skipping becomes.
+		 *
+		 * Note: since we use bit-masking to select table elements, the skip
+		 * table size MUST be a power of 2, and so the mask must be 2^N-1.
+		 */
+		if (searchlength < 16)
+			skiptablemask = 3;
+		else if (searchlength < 64)
+			skiptablemask = 7;
+		else if (searchlength < 128)
+			skiptablemask = 15;
+		else if (searchlength < 512)
+			skiptablemask = 31;
+		else if (searchlength < 2048)
+			skiptablemask = 63;
+		else if (searchlength < 4096)
+			skiptablemask = 127;
+		else
+			skiptablemask = 255;
+		state->skiptablemask = skiptablemask;
+
+		/*
+		 * Initialize the skip table.  We set all elements to the needle
+		 * length, since this is the correct skip distance for any character
+		 * not found in the needle.
+		 */
+		for (i = 0; i <= skiptablemask; i++)
+			state->skiptable[i] = len2;
+
+		/*
+		 * Now examine the needle.	For each character except the last one,
+		 * set the corresponding table element to the appropriate skip
+		 * distance.  Note that when two characters share the same skip table
+		 * entry, the one later in the needle must determine the skip
+		 * distance.
+		 */
+		last = len2 - 1;
+
+		if (!state->use_wchar)
+		{
+			const char *str2 = state->str2;
+
+			for (i = 0; i < last; i++)
+				state->skiptable[(unsigned char) str2[i] & skiptablemask] = last - i;
+		}
+		else
+		{
+			const pg_wchar *wstr2 = state->wstr2;
+
+			for (i = 0; i < last; i++)
+				state->skiptable[wstr2[i] & skiptablemask] = last - i;
+		}
+	}
 }
 
 static int
 text_position_next(int start_pos, TextPositionState *state)
 {
-	int			pos = 0,
-				p,
-				px;
+	int			haystack_len = state->len1;
+	int			needle_len = state->len2;
+	int			skiptablemask = state->skiptablemask;
 
 	Assert(start_pos > 0);		/* else caller error */
 
-	if (state->len2 <= 0)
+	if (needle_len <= 0)
 		return start_pos;		/* result for empty pattern */
+
+	start_pos--;				/* adjust for zero based arrays */
+
+	/* Done if the needle can't possibly fit */
+	if (haystack_len < start_pos + needle_len)
+		return 0;
 
 	if (!state->use_wchar)
 	{
 		/* simple case - single byte encoding */
-		char	   *p1 = state->str1;
-		char	   *p2 = state->str2;
+		const char *haystack = state->str1;
+		const char *needle = state->str2;
+		const char *haystack_end = &haystack[haystack_len];
+		const char *hptr;
 
-		/* no use in searching str past point where search_str will fit */
-		px = (state->len1 - state->len2);
-
-		p1 += start_pos - 1;
-
-		for (p = start_pos - 1; p <= px; p++)
+		if (needle_len == 1)
 		{
-			if ((*p1 == *p2) && (strncmp(p1, p2, state->len2) == 0))
+			/* No point in using B-M-H for a one-character needle */
+			char		nchar = *needle;
+
+			hptr = &haystack[start_pos];
+			while (hptr < haystack_end)
 			{
-				pos = p + 1;
-				break;
+				if (*hptr == nchar)
+					return hptr - haystack + 1;
+				hptr++;
 			}
-			p1++;
+		}
+		else
+		{
+			const char *needle_last = &needle[needle_len - 1];
+
+			/* Start at startpos plus the length of the needle */
+			hptr = &haystack[start_pos + needle_len - 1];
+			while (hptr < haystack_end)
+			{
+				/* Match the needle scanning *backward* */
+				const char *nptr;
+				const char *p;
+
+				nptr = needle_last;
+				p = hptr;
+				while (*nptr == *p)
+				{
+					/* Matched it all?	If so, return 1-based position */
+					if (nptr == needle)
+						return p - haystack + 1;
+					nptr--, p--;
+				}
+
+				/*
+				 * No match, so use the haystack char at hptr to decide how
+				 * far to advance.	If the needle had any occurrence of that
+				 * character (or more precisely, one sharing the same
+				 * skiptable entry) before its last character, then we advance
+				 * far enough to align the last such needle character with
+				 * that haystack position.	Otherwise we can advance by the
+				 * whole needle length.
+				 */
+				hptr += state->skiptable[(unsigned char) *hptr & skiptablemask];
+			}
 		}
 	}
 	else
 	{
-		/* not as simple - multibyte encoding */
-		pg_wchar   *p1 = state->wstr1;
-		pg_wchar   *p2 = state->wstr2;
+		/* The multibyte char version. This works exactly the same way. */
+		const pg_wchar *haystack = state->wstr1;
+		const pg_wchar *needle = state->wstr2;
+		const pg_wchar *haystack_end = &haystack[haystack_len];
+		const pg_wchar *hptr;
 
-		/* no use in searching str past point where search_str will fit */
-		px = (state->len1 - state->len2);
-
-		p1 += start_pos - 1;
-
-		for (p = start_pos - 1; p <= px; p++)
+		if (needle_len == 1)
 		{
-			if ((*p1 == *p2) && (pg_wchar_strncmp(p1, p2, state->len2) == 0))
+			/* No point in using B-M-H for a one-character needle */
+			pg_wchar	nchar = *needle;
+
+			hptr = &haystack[start_pos];
+			while (hptr < haystack_end)
 			{
-				pos = p + 1;
-				break;
+				if (*hptr == nchar)
+					return hptr - haystack + 1;
+				hptr++;
 			}
-			p1++;
+		}
+		else
+		{
+			const pg_wchar *needle_last = &needle[needle_len - 1];
+
+			/* Start at startpos plus the length of the needle */
+			hptr = &haystack[start_pos + needle_len - 1];
+			while (hptr < haystack_end)
+			{
+				/* Match the needle scanning *backward* */
+				const pg_wchar *nptr;
+				const pg_wchar *p;
+
+				nptr = needle_last;
+				p = hptr;
+				while (*nptr == *p)
+				{
+					/* Matched it all?	If so, return 1-based position */
+					if (nptr == needle)
+						return p - haystack + 1;
+					nptr--, p--;
+				}
+
+				/*
+				 * No match, so use the haystack char at hptr to decide how
+				 * far to advance.	If the needle had any occurrence of that
+				 * character (or more precisely, one sharing the same
+				 * skiptable entry) before its last character, then we advance
+				 * far enough to align the last such needle character with
+				 * that haystack position.	Otherwise we can advance by the
+				 * whole needle length.
+				 */
+				hptr += state->skiptable[*hptr & skiptablemask];
+			}
 		}
 	}
 
-	return pos;
+	return 0;					/* not found */
 }
 
 static void
@@ -912,7 +1143,8 @@ text_position_cleanup(TextPositionState *state)
  * Comparison function for text strings with given lengths.
  * Includes locale support, but must copy strings to temporary memory
  *	to allow null-termination for inputs to strcoll().
- * Returns -1, 0 or 1
+ * Returns an integer less than, equal to, or greater than zero, indicating
+ * whether arg1 is less than, equal to, or greater than arg2.
  */
 int
 varstr_cmp(char *arg1, int len1, char *arg2, int len2)
@@ -1238,22 +1470,27 @@ text_smaller(PG_FUNCTION_ARGS)
 
 /*
  * The following operators support character-by-character comparison
- * of text data types, to allow building indexes suitable for LIKE
- * clauses.
+ * of text datums, to allow building indexes suitable for LIKE clauses.
+ * Note that the regular texteq/textne comparison operators are assumed
+ * to be compatible with these!
  */
 
 static int
 internal_text_pattern_compare(text *arg1, text *arg2)
 {
 	int			result;
+	int			len1,
+				len2;
 
-	result = memcmp(VARDATA_ANY(arg1), VARDATA_ANY(arg2),
-					Min(VARSIZE_ANY_EXHDR(arg1), VARSIZE_ANY_EXHDR(arg2)));
+	len1 = VARSIZE_ANY_EXHDR(arg1);
+	len2 = VARSIZE_ANY_EXHDR(arg2);
+
+	result = strncmp(VARDATA_ANY(arg1), VARDATA_ANY(arg2), Min(len1, len2));
 	if (result != 0)
 		return result;
-	else if (VARSIZE_ANY_EXHDR(arg1) < VARSIZE_ANY_EXHDR(arg2))
+	else if (len1 < len2)
 		return -1;
-	else if (VARSIZE_ANY_EXHDR(arg1) > VARSIZE_ANY_EXHDR(arg2))
+	else if (len1 > len2)
 		return 1;
 	else
 		return 0;
@@ -1293,25 +1530,6 @@ text_pattern_le(PG_FUNCTION_ARGS)
 
 
 Datum
-text_pattern_eq(PG_FUNCTION_ARGS)
-{
-	text	   *arg1 = PG_GETARG_TEXT_PP(0);
-	text	   *arg2 = PG_GETARG_TEXT_PP(1);
-	int			result;
-
-	if (VARSIZE_ANY_EXHDR(arg1) != VARSIZE_ANY_EXHDR(arg2))
-		result = 1;
-	else
-		result = internal_text_pattern_compare(arg1, arg2);
-
-	PG_FREE_IF_COPY(arg1, 0);
-	PG_FREE_IF_COPY(arg2, 1);
-
-	PG_RETURN_BOOL(result == 0);
-}
-
-
-Datum
 text_pattern_ge(PG_FUNCTION_ARGS)
 {
 	text	   *arg1 = PG_GETARG_TEXT_PP(0);
@@ -1340,25 +1558,6 @@ text_pattern_gt(PG_FUNCTION_ARGS)
 	PG_FREE_IF_COPY(arg2, 1);
 
 	PG_RETURN_BOOL(result > 0);
-}
-
-
-Datum
-text_pattern_ne(PG_FUNCTION_ARGS)
-{
-	text	   *arg1 = PG_GETARG_TEXT_PP(0);
-	text	   *arg2 = PG_GETARG_TEXT_PP(1);
-	int			result;
-
-	if (VARSIZE_ANY_EXHDR(arg1) != VARSIZE_ANY_EXHDR(arg2))
-		result = 1;
-	else
-		result = internal_text_pattern_compare(arg1, arg2);
-
-	PG_FREE_IF_COPY(arg1, 0);
-	PG_FREE_IF_COPY(arg2, 1);
-
-	PG_RETURN_BOOL(result != 0);
 }
 
 
@@ -1570,7 +1769,7 @@ byteaGetByte(PG_FUNCTION_ARGS)
 	bytea	   *v = PG_GETARG_BYTEA_PP(0);
 	int32		n = PG_GETARG_INT32(1);
 	int			len;
-	int			byte;
+	int byte;
 
 	len = VARSIZE_ANY_EXHDR(v);
 
@@ -1601,7 +1800,7 @@ byteaGetBit(PG_FUNCTION_ARGS)
 	int			byteNo,
 				bitNo;
 	int			len;
-	int			byte;
+	int byte;
 
 	len = VARSIZE_ANY_EXHDR(v);
 
@@ -1616,7 +1815,7 @@ byteaGetBit(PG_FUNCTION_ARGS)
 
 	byte = ((unsigned char *) VARDATA_ANY(v))[byteNo];
 
-	if (byte & (1 << bitNo))
+	if (byte &(1 << bitNo))
 		PG_RETURN_INT32(1);
 	else
 		PG_RETURN_INT32(0);
@@ -1759,16 +1958,8 @@ Datum
 name_text(PG_FUNCTION_ARGS)
 {
 	Name		s = PG_GETARG_NAME(0);
-	text	   *result;
-	int			len;
 
-	len = strlen(NameStr(*s));
-
-	result = palloc(VARHDRSZ + len);
-	SET_VARSIZE(result, VARHDRSZ + len);
-	memcpy(VARDATA(result), NameStr(*s), len);
-
-	PG_RETURN_TEXT_P(result);
+	PG_RETURN_TEXT_P(cstring_to_text(NameStr(*s)));
 }
 
 
@@ -1790,8 +1981,7 @@ textToQualifiedNameList(text *textval)
 
 	/* Convert to C string (handles possible detoasting). */
 	/* Note we rely on being able to modify rawname below. */
-	rawname = DatumGetCString(DirectFunctionCall1(textout,
-												  PointerGetDatum(textval)));
+	rawname = text_to_cstring(textval);
 
 	if (!SplitIdentifierString(rawname, '.', &namelist))
 		ereport(ERROR,
@@ -2103,7 +2293,7 @@ byteacmp(PG_FUNCTION_ARGS)
  * appendStringInfoText
  *
  * Append a text to str.
- * Like appendStringInfoString(str, PG_TEXT_GET_STR(s)) but faster.
+ * Like appendStringInfoString(str, text_to_cstring(t)) but faster.
  */
 static void
 appendStringInfoText(StringInfo str, const text *t)
@@ -2191,7 +2381,7 @@ replace_text(PG_FUNCTION_ARGS)
 
 	text_position_cleanup(&state);
 
-	ret_text = PG_STR_GET_TEXT(str.data);
+	ret_text = cstring_to_text_with_len(str.data, str.len);
 	pfree(str.data);
 
 	PG_RETURN_TEXT_P(ret_text);
@@ -2458,7 +2648,7 @@ replace_text_regexp(text *src_text, void *regexp,
 		appendBinaryStringInfo(&buf, start_ptr, chunk_len);
 	}
 
-	ret_text = PG_STR_GET_TEXT(buf.data);
+	ret_text = cstring_to_text_with_len(buf.data, buf.len);
 	pfree(buf.data);
 	pfree(data);
 
@@ -2503,7 +2693,7 @@ split_text(PG_FUNCTION_ARGS)
 	if (inputstring_len < 1)
 	{
 		text_position_cleanup(&state);
-		PG_RETURN_TEXT_P(PG_STR_GET_TEXT(""));
+		PG_RETURN_TEXT_P(cstring_to_text(""));
 	}
 
 	/* empty field separator */
@@ -2514,7 +2704,7 @@ split_text(PG_FUNCTION_ARGS)
 		if (fldnum == 1)
 			PG_RETURN_TEXT_P(inputstring);
 		else
-			PG_RETURN_TEXT_P(PG_STR_GET_TEXT(""));
+			PG_RETURN_TEXT_P(cstring_to_text(""));
 	}
 
 	/* identify bounds of first field */
@@ -2529,7 +2719,7 @@ split_text(PG_FUNCTION_ARGS)
 		if (fldnum == 1)
 			PG_RETURN_TEXT_P(inputstring);
 		else
-			PG_RETURN_TEXT_P(PG_STR_GET_TEXT(""));
+			PG_RETURN_TEXT_P(cstring_to_text(""));
 	}
 
 	while (end_posn > 0 && --fldnum > 0)
@@ -2551,7 +2741,7 @@ split_text(PG_FUNCTION_ARGS)
 										 -1,
 										 true);
 		else
-			result_text = PG_STR_GET_TEXT("");
+			result_text = cstring_to_text("");
 	}
 	else
 	{
@@ -2636,9 +2826,7 @@ text_to_array(PG_FUNCTION_ARGS)
 		}
 
 		/* must build a temp text datum to pass to accumArrayResult */
-		result_text = (text *) palloc(VARHDRSZ + chunk_len);
-		SET_VARSIZE(result_text, VARHDRSZ + chunk_len);
-		memcpy(VARDATA(result_text), start_ptr, chunk_len);
+		result_text = cstring_to_text_with_len(start_ptr, chunk_len);
 
 		/* stash away this field */
 		astate = accumArrayResult(astate,
@@ -2673,7 +2861,7 @@ Datum
 array_to_text(PG_FUNCTION_ARGS)
 {
 	ArrayType  *v = PG_GETARG_ARRAYTYPE_P(0);
-	char	   *fldsep = PG_TEXTARG_GET_STR(1);
+	char	   *fldsep = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	int			nitems,
 			   *dims,
 				ndims;
@@ -2695,7 +2883,7 @@ array_to_text(PG_FUNCTION_ARGS)
 
 	/* if there are no elements, return an empty string */
 	if (nitems == 0)
-		PG_RETURN_TEXT_P(PG_STR_GET_TEXT(""));
+		PG_RETURN_TEXT_P(cstring_to_text(""));
 
 	element_type = ARR_ELEMTYPE(v);
 	initStringInfo(&buf);
@@ -2773,7 +2961,7 @@ array_to_text(PG_FUNCTION_ARGS)
 		}
 	}
 
-	PG_RETURN_TEXT_P(PG_STR_GET_TEXT(buf.data));
+	PG_RETURN_TEXT_P(cstring_to_text_with_len(buf.data, buf.len));
 }
 
 #define HEXBASE 16
@@ -2785,7 +2973,6 @@ Datum
 to_hex32(PG_FUNCTION_ARGS)
 {
 	uint32		value = (uint32) PG_GETARG_INT32(0);
-	text	   *result_text;
 	char	   *ptr;
 	const char *digits = "0123456789abcdef";
 	char		buf[32];		/* bigger than needed, but reasonable */
@@ -2799,8 +2986,7 @@ to_hex32(PG_FUNCTION_ARGS)
 		value /= HEXBASE;
 	} while (ptr > buf && value);
 
-	result_text = PG_STR_GET_TEXT(ptr);
-	PG_RETURN_TEXT_P(result_text);
+	PG_RETURN_TEXT_P(cstring_to_text(ptr));
 }
 
 /*
@@ -2811,7 +2997,6 @@ Datum
 to_hex64(PG_FUNCTION_ARGS)
 {
 	uint64		value = (uint64) PG_GETARG_INT64(0);
-	text	   *result_text;
 	char	   *ptr;
 	const char *digits = "0123456789abcdef";
 	char		buf[32];		/* bigger than needed, but reasonable */
@@ -2825,8 +3010,7 @@ to_hex64(PG_FUNCTION_ARGS)
 		value /= HEXBASE;
 	} while (ptr > buf && value);
 
-	result_text = PG_STR_GET_TEXT(ptr);
-	PG_RETURN_TEXT_P(result_text);
+	PG_RETURN_TEXT_P(cstring_to_text(ptr));
 }
 
 /*
@@ -2842,7 +3026,6 @@ md5_text(PG_FUNCTION_ARGS)
 	text	   *in_text = PG_GETARG_TEXT_PP(0);
 	size_t		len;
 	char		hexsum[MD5_HASH_LEN + 1];
-	text	   *result_text;
 
 	/* Calculate the length of the buffer using varlena metadata */
 	len = VARSIZE_ANY_EXHDR(in_text);
@@ -2854,8 +3037,7 @@ md5_text(PG_FUNCTION_ARGS)
 				 errmsg("out of memory")));
 
 	/* convert to text and return it */
-	result_text = PG_STR_GET_TEXT(hexsum);
-	PG_RETURN_TEXT_P(result_text);
+	PG_RETURN_TEXT_P(cstring_to_text(hexsum));
 }
 
 /*
@@ -2868,7 +3050,6 @@ md5_bytea(PG_FUNCTION_ARGS)
 	bytea	   *in = PG_GETARG_BYTEA_PP(0);
 	size_t		len;
 	char		hexsum[MD5_HASH_LEN + 1];
-	text	   *result_text;
 
 	len = VARSIZE_ANY_EXHDR(in);
 	if (pg_md5_hash(VARDATA_ANY(in), len, hexsum) == false)
@@ -2876,8 +3057,7 @@ md5_bytea(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OUT_OF_MEMORY),
 				 errmsg("out of memory")));
 
-	result_text = PG_STR_GET_TEXT(hexsum);
-	PG_RETURN_TEXT_P(result_text);
+	PG_RETURN_TEXT_P(cstring_to_text(hexsum));
 }
 
 /*

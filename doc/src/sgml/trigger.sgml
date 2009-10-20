@@ -36,14 +36,15 @@
     performed.  Triggers can be defined to execute either before or after any
     <command>INSERT</command>, <command>UPDATE</command>, or
     <command>DELETE</command> operation, either once per modified row,
-    or once per <acronym>SQL</acronym> statement.
-    If a trigger event occurs, the trigger's function is called
-    at the appropriate time to handle the event.
+    or once per <acronym>SQL</acronym> statement.  Triggers can also fire
+    for <command>TRUNCATE</command> statements.  If a trigger event occurs,
+    the trigger's function is called at the appropriate time to handle the
+    event.
    </para>
 
    <para>
     The trigger function must be defined before the trigger itself can be
-    created.  The trigger function must be declared as a 
+    created.  The trigger function must be declared as a
     function taking no arguments and returning type <literal>trigger</>.
     (The trigger function receives its input through a specially-passed
     <structname>TriggerData</> structure, not in the form of ordinary function
@@ -69,7 +70,8 @@
     in the execution of any applicable per-statement triggers. These
     two types of triggers are sometimes called <firstterm>row-level</>
     triggers and <firstterm>statement-level</> triggers,
-    respectively.
+    respectively. Triggers on <command>TRUNCATE</command> may only be
+    defined at statement-level.
    </para>
 
    <para>
@@ -248,6 +250,14 @@
    </para>
 
    <para>
+    If your trigger function is written in any of the standard procedural
+    languages, then the above statements apply only if the function is
+    declared <literal>VOLATILE</>.  Functions that are declared
+    <literal>STABLE</> or <literal>IMMUTABLE</> will not see changes made by
+    the calling command in any case.
+   </para>
+
+   <para>
     Further information about data visibility rules can be found in
     <xref linkend="spi-visibility">.  The example in <xref
     linkend="trigger-example"> contains a demonstration of these rules.
@@ -395,6 +405,15 @@ typedef struct TriggerData
           <listitem>
            <para>
             Returns true if the trigger was fired by a <command>DELETE</command> command.
+           </para>
+          </listitem>
+         </varlistentry>
+
+         <varlistentry>
+          <term><literal>TRIGGER_FIRED_BY_TRUNCATE(tg_event)</literal></term>
+          <listitem>
+           <para>
+            Returns true if the trigger was fired by a <command>TRUNCATE</command> command.
            </para>
           </listitem>
          </varlistentry>
@@ -548,7 +567,7 @@ CREATE TABLE ttest (
 
    <para>
     This is the source code of the trigger function:
-<programlisting>
+<programlisting><![CDATA[
 #include "postgres.h"
 #include "executor/spi.h"       /* this is what you need to work with SPI */
 #include "commands/trigger.h"   /* ... and triggers */
@@ -560,7 +579,7 @@ PG_FUNCTION_INFO_V1(trigf);
 Datum
 trigf(PG_FUNCTION_ARGS)
 {
-    TriggerData *trigdata = (TriggerData *) fcinfo-&gt;context;
+    TriggerData *trigdata = (TriggerData *) fcinfo->context;
     TupleDesc   tupdesc;
     HeapTuple   rettuple;
     char       *when;
@@ -573,38 +592,38 @@ trigf(PG_FUNCTION_ARGS)
         elog(ERROR, "trigf: not called by trigger manager");
 
     /* tuple to return to executor */
-    if (TRIGGER_FIRED_BY_UPDATE(trigdata-&gt;tg_event))
-        rettuple = trigdata-&gt;tg_newtuple;
+    if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+        rettuple = trigdata->tg_newtuple;
     else
-        rettuple = trigdata-&gt;tg_trigtuple;
+        rettuple = trigdata->tg_trigtuple;
 
     /* check for null values */
-    if (!TRIGGER_FIRED_BY_DELETE(trigdata-&gt;tg_event)
-        &amp;&amp; TRIGGER_FIRED_BEFORE(trigdata-&gt;tg_event))
+    if (!TRIGGER_FIRED_BY_DELETE(trigdata->tg_event)
+        && TRIGGER_FIRED_BEFORE(trigdata->tg_event))
         checknull = true;
 
-    if (TRIGGER_FIRED_BEFORE(trigdata-&gt;tg_event))
+    if (TRIGGER_FIRED_BEFORE(trigdata->tg_event))
         when = "before";
     else
         when = "after ";
 
-    tupdesc = trigdata-&gt;tg_relation-&gt;rd_att;
+    tupdesc = trigdata->tg_relation->rd_att;
 
     /* connect to SPI manager */
-    if ((ret = SPI_connect()) &lt; 0)
-        elog(INFO, "trigf (fired %s): SPI_connect returned %d", when, ret);
+    if ((ret = SPI_connect()) < 0)
+        elog(ERROR, "trigf (fired %s): SPI_connect returned %d", when, ret);
 
     /* get number of rows in table */
     ret = SPI_exec("SELECT count(*) FROM ttest", 0);
 
-    if (ret &lt; 0)
-        elog(NOTICE, "trigf (fired %s): SPI_exec returned %d", when, ret);
+    if (ret < 0)
+        elog(ERROR, "trigf (fired %s): SPI_exec returned %d", when, ret);
 
     /* count(*) returns int8, so be careful to convert */
-    i = DatumGetInt64(SPI_getbinval(SPI_tuptable-&gt;vals[0],
-                                    SPI_tuptable-&gt;tupdesc,
+    i = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+                                    SPI_tuptable->tupdesc,
                                     1,
-                                    &amp;isnull));
+                                    &isnull));
 
     elog (INFO, "trigf (fired %s): there are %d rows in ttest", when, i);
 
@@ -612,28 +631,29 @@ trigf(PG_FUNCTION_ARGS)
 
     if (checknull)
     {
-        SPI_getbinval(rettuple, tupdesc, 1, &amp;isnull);
+        SPI_getbinval(rettuple, tupdesc, 1, &isnull);
         if (isnull)
             rettuple = NULL;
     }
 
     return PointerGetDatum(rettuple);
 }
+]]>
 </programlisting>
    </para>
 
    <para>
-    After you have compiled the source code, declare the function and
-    the triggers:
+    After you have compiled the source code (see <xref
+    linkend="dfunc">), declare the function and the triggers:
 <programlisting>
 CREATE FUNCTION trigf() RETURNS trigger
     AS '<replaceable>filename</>'
     LANGUAGE C;
 
-CREATE TRIGGER tbefore BEFORE INSERT OR UPDATE OR DELETE ON ttest 
+CREATE TRIGGER tbefore BEFORE INSERT OR UPDATE OR DELETE ON ttest
     FOR EACH ROW EXECUTE PROCEDURE trigf();
 
-CREATE TRIGGER tafter AFTER INSERT OR UPDATE OR DELETE ON ttest 
+CREATE TRIGGER tafter AFTER INSERT OR UPDATE OR DELETE ON ttest
     FOR EACH ROW EXECUTE PROCEDURE trigf();
 </programlisting>
    </para>

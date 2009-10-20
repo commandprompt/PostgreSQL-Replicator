@@ -4,7 +4,7 @@
  *	  interface routines for the postgres GiST index access method.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -16,10 +16,13 @@
 
 #include "access/genam.h"
 #include "access/gist_private.h"
-#include "access/heapam.h"
+#include "catalog/storage.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "storage/freespace.h"
+#include "storage/indexfsm.h"
+#include "storage/lmgr.h"
 #include "utils/memutils.h"
 
 
@@ -84,7 +87,8 @@ gistDeleteSubtree(GistVacuum *gv, BlockNumber blkno)
 	Buffer		buffer;
 	Page		page;
 
-	buffer = ReadBufferWithStrategy(gv->index, blkno, gv->strategy);
+	buffer = ReadBufferExtended(gv->index, MAIN_FORKNUM, blkno, RBM_NORMAL,
+								gv->strategy);
 	LockBuffer(buffer, GIST_EXCLUSIVE);
 	page = (Page) BufferGetPage(buffer);
 
@@ -139,18 +143,6 @@ gistDeleteSubtree(GistVacuum *gv, BlockNumber blkno)
 	END_CRIT_SECTION();
 
 	UnlockReleaseBuffer(buffer);
-}
-
-static Page
-GistPageGetCopyPage(Page page)
-{
-	Size		pageSize = PageGetPageSize(page);
-	Page		tmppage;
-
-	tmppage = (Page) palloc(pageSize);
-	memcpy(tmppage, page, pageSize);
-
-	return tmppage;
 }
 
 static ArrayTuple
@@ -304,7 +296,8 @@ gistVacuumUpdate(GistVacuum *gv, BlockNumber blkno, bool needunion)
 
 	vacuum_delay_point();
 
-	buffer = ReadBufferWithStrategy(gv->index, blkno, gv->strategy);
+	buffer = ReadBufferExtended(gv->index, MAIN_FORKNUM, blkno, RBM_NORMAL,
+								gv->strategy);
 	LockBuffer(buffer, GIST_EXCLUSIVE);
 	gistcheckpage(gv->index, buffer);
 	page = (Page) BufferGetPage(buffer);
@@ -321,7 +314,7 @@ gistVacuumUpdate(GistVacuum *gv, BlockNumber blkno, bool needunion)
 		addon = (IndexTuple *) palloc(sizeof(IndexTuple) * lenaddon);
 
 		/* get copy of page to work */
-		tempPage = GistPageGetCopyPage(page);
+		tempPage = PageGetTempPageCopy(page);
 
 		for (i = FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
 		{
@@ -402,7 +395,7 @@ gistVacuumUpdate(GistVacuum *gv, BlockNumber blkno, bool needunion)
 			}
 			else
 				/* enough free space */
-				gistfillbuffer(gv->index, tempPage, addon, curlenaddon, InvalidOffsetNumber);
+				gistfillbuffer(tempPage, addon, curlenaddon, InvalidOffsetNumber);
 		}
 	}
 
@@ -517,21 +510,22 @@ gistvacuumcleanup(PG_FUNCTION_ARGS)
 	Relation	rel = info->index;
 	BlockNumber npages,
 				blkno;
-	BlockNumber totFreePages,
-				nFreePages,
-			   *freePages,
-				maxFreePages;
+	BlockNumber totFreePages;
 	BlockNumber lastBlock = GIST_ROOT_BLKNO,
 				lastFilledBlock = GIST_ROOT_BLKNO;
 	bool		needLock;
+
+	/* No-op in ANALYZE ONLY mode */
+	if (info->analyze_only)
+		PG_RETURN_POINTER(stats);
 
 	/* Set up all-zero stats if gistbulkdelete wasn't called */
 	if (stats == NULL)
 	{
 		stats = (GistBulkDeleteResult *) palloc0(sizeof(GistBulkDeleteResult));
 		/* use heap's tuple count */
-		Assert(info->num_heap_tuples >= 0);
 		stats->std.num_index_tuples = info->num_heap_tuples;
+		stats->std.estimated_count = info->estimated_count;
 
 		/*
 		 * XXX the above is wrong if index is partial.	Would it be OK to just
@@ -588,13 +582,7 @@ gistvacuumcleanup(PG_FUNCTION_ARGS)
 	if (needLock)
 		UnlockRelationForExtension(rel, ExclusiveLock);
 
-	maxFreePages = npages;
-	if (maxFreePages > MaxFSMPages)
-		maxFreePages = MaxFSMPages;
-
-	totFreePages = nFreePages = 0;
-	freePages = (BlockNumber *) palloc(sizeof(BlockNumber) * maxFreePages);
-
+	totFreePages = 0;
 	for (blkno = GIST_ROOT_BLKNO + 1; blkno < npages; blkno++)
 	{
 		Buffer		buffer;
@@ -602,15 +590,15 @@ gistvacuumcleanup(PG_FUNCTION_ARGS)
 
 		vacuum_delay_point();
 
-		buffer = ReadBufferWithStrategy(rel, blkno, info->strategy);
+		buffer = ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL,
+									info->strategy);
 		LockBuffer(buffer, GIST_SHARE);
 		page = (Page) BufferGetPage(buffer);
 
 		if (PageIsNew(page) || GistPageIsDeleted(page))
 		{
-			if (nFreePages < maxFreePages)
-				freePages[nFreePages++] = blkno;
 			totFreePages++;
+			RecordFreeIndexPage(rel, blkno);
 		}
 		else
 			lastFilledBlock = blkno;
@@ -618,24 +606,16 @@ gistvacuumcleanup(PG_FUNCTION_ARGS)
 	}
 	lastBlock = npages - 1;
 
-	if (info->vacuum_full && nFreePages > 0)
+	if (info->vacuum_full && lastFilledBlock < lastBlock)
 	{							/* try to truncate index */
-		int			i;
+		RelationTruncate(rel, lastFilledBlock + 1);
 
-		for (i = 0; i < nFreePages; i++)
-			if (freePages[i] >= lastFilledBlock)
-			{
-				totFreePages = nFreePages = i;
-				break;
-			}
-
-		if (lastBlock > lastFilledBlock)
-			RelationTruncate(rel, lastFilledBlock + 1);
 		stats->std.pages_removed = lastBlock - lastFilledBlock;
+		totFreePages = totFreePages - stats->std.pages_removed;
 	}
 
-	RecordIndexFreeSpace(&rel->rd_node, totFreePages, nFreePages, freePages);
-	pfree(freePages);
+	/* Finally, vacuum the FSM */
+	IndexFreeSpaceMapVacuum(info->index);
 
 	/* return statistics */
 	stats->std.pages_free = totFreePages;
@@ -699,6 +679,7 @@ gistbulkdelete(PG_FUNCTION_ARGS)
 	if (stats == NULL)
 		stats = (GistBulkDeleteResult *) palloc0(sizeof(GistBulkDeleteResult));
 	/* we'll re-count the tuples each time */
+	stats->std.estimated_count = false;
 	stats->std.num_index_tuples = 0;
 
 	stack = (GistBDItem *) palloc0(sizeof(GistBDItem));
@@ -706,13 +687,15 @@ gistbulkdelete(PG_FUNCTION_ARGS)
 
 	while (stack)
 	{
-		Buffer		buffer = ReadBufferWithStrategy(rel, stack->blkno, info->strategy);
+		Buffer		buffer;
 		Page		page;
 		OffsetNumber i,
 					maxoff;
 		IndexTuple	idxtuple;
 		ItemId		iid;
 
+		buffer = ReadBufferExtended(rel, MAIN_FORKNUM, stack->blkno,
+									RBM_NORMAL, info->strategy);
 		LockBuffer(buffer, GIST_SHARE);
 		gistcheckpage(rel, buffer);
 		page = (Page) BufferGetPage(buffer);

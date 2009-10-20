@@ -3,7 +3,7 @@
  * pg_proc.c
  *	  routines to support manipulation of the pg_proc relation
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,11 +21,13 @@
 #include "catalog/pg_language.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_proc_fn.h"
 #include "catalog/pg_type.h"
 #include "executor/functions.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_type.h"
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
@@ -51,7 +53,7 @@ static bool match_prosrc_to_literal(const char *prosrc, const char *literal,
  *
  * Note: allParameterTypes, parameterModes, parameterNames, and proconfig
  * are either arrays of the proper types or NULL.  We declare them Datum,
- * not "ArrayType *", to avoid importing array.h into pg_proc.h.
+ * not "ArrayType *", to avoid importing array.h into pg_proc_fn.h.
  * ----------------------------------------------------------------
  */
 Oid
@@ -65,6 +67,7 @@ ProcedureCreate(const char *procedureName,
 				const char *prosrc,
 				const char *probin,
 				bool isAgg,
+				bool isWindowFunc,
 				bool security_definer,
 				bool isStrict,
 				char volatility,
@@ -72,6 +75,7 @@ ProcedureCreate(const char *procedureName,
 				Datum allParameterTypes,
 				Datum parameterModes,
 				Datum parameterNames,
+				List *parameterDefaults,
 				Datum proconfig,
 				float4 procost,
 				float4 prorows)
@@ -84,12 +88,14 @@ ProcedureCreate(const char *procedureName,
 	bool		genericOutParam = false;
 	bool		internalInParam = false;
 	bool		internalOutParam = false;
+	Oid			variadicType = InvalidOid;
+	Oid			proowner = GetUserId();
 	Relation	rel;
 	HeapTuple	tup;
 	HeapTuple	oldtup;
-	char		nulls[Natts_pg_proc];
+	bool		nulls[Natts_pg_proc];
 	Datum		values[Natts_pg_proc];
-	char		replaces[Natts_pg_proc];
+	bool		replaces[Natts_pg_proc];
 	Oid			relid;
 	NameData	procname;
 	TupleDesc	tupDesc;
@@ -102,14 +108,15 @@ ProcedureCreate(const char *procedureName,
 	 * sanity checks
 	 */
 	Assert(PointerIsValid(prosrc));
-	Assert(PointerIsValid(probin));
 
 	parameterCount = parameterTypes->dim1;
 	if (parameterCount < 0 || parameterCount > FUNC_MAX_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-				 errmsg("functions cannot have more than %d arguments",
-						FUNC_MAX_ARGS)));
+				 errmsg_plural("functions cannot have more than %d argument",
+							   "functions cannot have more than %d arguments",
+							   FUNC_MAX_ARGS,
+							   FUNC_MAX_ARGS)));
 	/* note: the above is correct, we do NOT count output arguments */
 
 	if (allParameterTypes != PointerGetDatum(NULL))
@@ -210,54 +217,122 @@ ProcedureCreate(const char *procedureName,
 						procedureName,
 						format_type_be(parameterTypes->values[0]))));
 
+	if (parameterModes != PointerGetDatum(NULL))
+	{
+		/*
+		 * We expect the array to be a 1-D CHAR array; verify that. We don't
+		 * need to use deconstruct_array() since the array data is just going
+		 * to look like a C array of char values.
+		 */
+		ArrayType  *modesArray = (ArrayType *) DatumGetPointer(parameterModes);
+		char	   *modes;
+
+		if (ARR_NDIM(modesArray) != 1 ||
+			ARR_DIMS(modesArray)[0] != allParamCount ||
+			ARR_HASNULL(modesArray) ||
+			ARR_ELEMTYPE(modesArray) != CHAROID)
+			elog(ERROR, "parameterModes is not a 1-D char array");
+		modes = (char *) ARR_DATA_PTR(modesArray);
+
+		/*
+		 * Only the last input parameter can be variadic; if it is, save its
+		 * element type.  Errors here are just elog since caller should have
+		 * checked this already.
+		 */
+		for (i = 0; i < allParamCount; i++)
+		{
+			switch (modes[i])
+			{
+				case PROARGMODE_IN:
+				case PROARGMODE_INOUT:
+					if (OidIsValid(variadicType))
+						elog(ERROR, "variadic parameter must be last");
+					break;
+				case PROARGMODE_OUT:
+				case PROARGMODE_TABLE:
+					/* okay */
+					break;
+				case PROARGMODE_VARIADIC:
+					if (OidIsValid(variadicType))
+						elog(ERROR, "variadic parameter must be last");
+					switch (allParams[i])
+					{
+						case ANYOID:
+							variadicType = ANYOID;
+							break;
+						case ANYARRAYOID:
+							variadicType = ANYELEMENTOID;
+							break;
+						default:
+							variadicType = get_element_type(allParams[i]);
+							if (!OidIsValid(variadicType))
+								elog(ERROR, "variadic parameter is not an array");
+							break;
+					}
+					break;
+				default:
+					elog(ERROR, "invalid parameter mode '%c'", modes[i]);
+					break;
+			}
+		}
+	}
+
 	/*
 	 * All seems OK; prepare the data to be inserted into pg_proc.
 	 */
 
 	for (i = 0; i < Natts_pg_proc; ++i)
 	{
-		nulls[i] = ' ';
+		nulls[i] = false;
 		values[i] = (Datum) 0;
-		replaces[i] = 'r';
+		replaces[i] = true;
 	}
 
 	namestrcpy(&procname, procedureName);
 	values[Anum_pg_proc_proname - 1] = NameGetDatum(&procname);
 	values[Anum_pg_proc_pronamespace - 1] = ObjectIdGetDatum(procNamespace);
-	values[Anum_pg_proc_proowner - 1] = ObjectIdGetDatum(GetUserId());
+	values[Anum_pg_proc_proowner - 1] = ObjectIdGetDatum(proowner);
 	values[Anum_pg_proc_prolang - 1] = ObjectIdGetDatum(languageObjectId);
 	values[Anum_pg_proc_procost - 1] = Float4GetDatum(procost);
 	values[Anum_pg_proc_prorows - 1] = Float4GetDatum(prorows);
+	values[Anum_pg_proc_provariadic - 1] = ObjectIdGetDatum(variadicType);
 	values[Anum_pg_proc_proisagg - 1] = BoolGetDatum(isAgg);
+	values[Anum_pg_proc_proiswindow - 1] = BoolGetDatum(isWindowFunc);
 	values[Anum_pg_proc_prosecdef - 1] = BoolGetDatum(security_definer);
 	values[Anum_pg_proc_proisstrict - 1] = BoolGetDatum(isStrict);
 	values[Anum_pg_proc_proretset - 1] = BoolGetDatum(returnsSet);
 	values[Anum_pg_proc_provolatile - 1] = CharGetDatum(volatility);
 	values[Anum_pg_proc_pronargs - 1] = UInt16GetDatum(parameterCount);
+	values[Anum_pg_proc_pronargdefaults - 1] = UInt16GetDatum(list_length(parameterDefaults));
 	values[Anum_pg_proc_prorettype - 1] = ObjectIdGetDatum(returnType);
 	values[Anum_pg_proc_proargtypes - 1] = PointerGetDatum(parameterTypes);
 	if (allParameterTypes != PointerGetDatum(NULL))
 		values[Anum_pg_proc_proallargtypes - 1] = allParameterTypes;
 	else
-		nulls[Anum_pg_proc_proallargtypes - 1] = 'n';
+		nulls[Anum_pg_proc_proallargtypes - 1] = true;
 	if (parameterModes != PointerGetDatum(NULL))
 		values[Anum_pg_proc_proargmodes - 1] = parameterModes;
 	else
-		nulls[Anum_pg_proc_proargmodes - 1] = 'n';
+		nulls[Anum_pg_proc_proargmodes - 1] = true;
 	if (parameterNames != PointerGetDatum(NULL))
 		values[Anum_pg_proc_proargnames - 1] = parameterNames;
 	else
-		nulls[Anum_pg_proc_proargnames - 1] = 'n';
-	values[Anum_pg_proc_prosrc - 1] = DirectFunctionCall1(textin,
-													CStringGetDatum(prosrc));
-	values[Anum_pg_proc_probin - 1] = DirectFunctionCall1(textin,
-													CStringGetDatum(probin));
+		nulls[Anum_pg_proc_proargnames - 1] = true;
+	if (parameterDefaults != NIL)
+		values[Anum_pg_proc_proargdefaults - 1] = CStringGetTextDatum(nodeToString(parameterDefaults));
+	else
+		nulls[Anum_pg_proc_proargdefaults - 1] = true;
+	values[Anum_pg_proc_prosrc - 1] = CStringGetTextDatum(prosrc);
+	if (probin)
+		values[Anum_pg_proc_probin - 1] = CStringGetTextDatum(probin);
+	else
+		nulls[Anum_pg_proc_probin - 1] = true;
 	if (proconfig != PointerGetDatum(NULL))
 		values[Anum_pg_proc_proconfig - 1] = proconfig;
 	else
-		nulls[Anum_pg_proc_proconfig - 1] = 'n';
+		nulls[Anum_pg_proc_proconfig - 1] = true;
 	/* start out with empty permissions */
-	nulls[Anum_pg_proc_proacl - 1] = 'n';
+	nulls[Anum_pg_proc_proacl - 1] = true;
 
 	rel = heap_open(ProcedureRelationId, RowExclusiveLock);
 	tupDesc = RelationGetDescr(rel);
@@ -279,7 +354,7 @@ ProcedureCreate(const char *procedureName,
 					(errcode(ERRCODE_DUPLICATE_FUNCTION),
 			errmsg("function \"%s\" already exists with same argument types",
 				   procedureName)));
-		if (!pg_proc_ownercheck(HeapTupleGetOid(oldtup), GetUserId()))
+		if (!pg_proc_ownercheck(HeapTupleGetOid(oldtup), proowner))
 			aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_PROC,
 						   procedureName);
 
@@ -318,27 +393,94 @@ ProcedureCreate(const char *procedureName,
 						 errhint("Use DROP FUNCTION first.")));
 		}
 
-		/* Can't change aggregate status, either */
+		/*
+		 * If there are existing defaults, check compatibility: redefinition
+		 * must not remove any defaults nor change their types.  (Removing a
+		 * default might cause a function to fail to satisfy an existing call.
+		 * Changing type would only be possible if the associated parameter is
+		 * polymorphic, and in such cases a change of default type might alter
+		 * the resolved output type of existing calls.)
+		 */
+		if (oldproc->pronargdefaults != 0)
+		{
+			Datum		proargdefaults;
+			bool		isnull;
+			List	   *oldDefaults;
+			ListCell   *oldlc;
+			ListCell   *newlc;
+
+			if (list_length(parameterDefaults) < oldproc->pronargdefaults)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+						 errmsg("cannot remove parameter defaults from existing function"),
+						 errhint("Use DROP FUNCTION first.")));
+
+			proargdefaults = SysCacheGetAttr(PROCNAMEARGSNSP, oldtup,
+											 Anum_pg_proc_proargdefaults,
+											 &isnull);
+			Assert(!isnull);
+			oldDefaults = (List *) stringToNode(TextDatumGetCString(proargdefaults));
+			Assert(IsA(oldDefaults, List));
+			Assert(list_length(oldDefaults) == oldproc->pronargdefaults);
+
+			/* new list can have more defaults than old, advance over 'em */
+			newlc = list_head(parameterDefaults);
+			for (i = list_length(parameterDefaults) - oldproc->pronargdefaults;
+				 i > 0;
+				 i--)
+				newlc = lnext(newlc);
+
+			foreach(oldlc, oldDefaults)
+			{
+				Node	   *oldDef = (Node *) lfirst(oldlc);
+				Node	   *newDef = (Node *) lfirst(newlc);
+
+				if (exprType(oldDef) != exprType(newDef))
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+							 errmsg("cannot change data type of existing parameter default value"),
+							 errhint("Use DROP FUNCTION first.")));
+				newlc = lnext(newlc);
+			}
+		}
+
+		/* Can't change aggregate or window-function status, either */
 		if (oldproc->proisagg != isAgg)
 		{
 			if (oldproc->proisagg)
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-						 errmsg("function \"%s\" is an aggregate",
+						 errmsg("function \"%s\" is an aggregate function",
 								procedureName)));
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-						 errmsg("function \"%s\" is not an aggregate",
+					   errmsg("function \"%s\" is not an aggregate function",
+							  procedureName)));
+		}
+		if (oldproc->proiswindow != isWindowFunc)
+		{
+			if (oldproc->proiswindow)
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("function \"%s\" is a window function",
+								procedureName)));
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("function \"%s\" is not a window function",
 								procedureName)));
 		}
 
-		/* do not change existing ownership or permissions, either */
-		replaces[Anum_pg_proc_proowner - 1] = ' ';
-		replaces[Anum_pg_proc_proacl - 1] = ' ';
+		/*
+		 * Do not change existing ownership or permissions, either.  Note
+		 * dependency-update code below has to agree with this decision.
+		 */
+		replaces[Anum_pg_proc_proowner - 1] = false;
+		replaces[Anum_pg_proc_proacl - 1] = false;
 
 		/* Okay, do it... */
-		tup = heap_modifytuple(oldtup, tupDesc, values, nulls, replaces);
+		tup = heap_modify_tuple(oldtup, tupDesc, values, nulls, replaces);
 		simple_heap_update(rel, &tup->t_self, tup);
 
 		ReleaseSysCache(oldtup);
@@ -347,7 +489,7 @@ ProcedureCreate(const char *procedureName,
 	else
 	{
 		/* Creating a new procedure */
-		tup = heap_formtuple(tupDesc, values, nulls);
+		tup = heap_form_tuple(tupDesc, values, nulls);
 		simple_heap_insert(rel, tup);
 		is_update = false;
 	}
@@ -360,12 +502,11 @@ ProcedureCreate(const char *procedureName,
 	/*
 	 * Create dependencies for the new function.  If we are updating an
 	 * existing function, first delete any existing pg_depend entries.
+	 * (However, since we are not changing ownership or permissions, the
+	 * shared dependencies do *not* need to change, and we leave them alone.)
 	 */
 	if (is_update)
-	{
 		deleteDependencyRecordsFor(ProcedureRelationId, retval);
-		deleteSharedDependencyRecordsFor(ProcedureRelationId, retval);
-	}
 
 	myself.classId = ProcedureRelationId;
 	myself.objectId = retval;
@@ -399,7 +540,8 @@ ProcedureCreate(const char *procedureName,
 	}
 
 	/* dependency on owner */
-	recordDependencyOnOwner(ProcedureRelationId, retval, GetUserId());
+	if (!is_update)
+		recordDependencyOnOwner(ProcedureRelationId, retval, proowner);
 
 	heap_freetuple(tup);
 
@@ -449,7 +591,7 @@ fmgr_internal_validator(PG_FUNCTION_ARGS)
 	tmp = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_prosrc, &isnull);
 	if (isnull)
 		elog(ERROR, "null prosrc");
-	prosrc = DatumGetCString(DirectFunctionCall1(textout, tmp));
+	prosrc = TextDatumGetCString(tmp);
 
 	if (fmgr_internal_function(prosrc) == InvalidOid)
 		ereport(ERROR,
@@ -498,13 +640,13 @@ fmgr_c_validator(PG_FUNCTION_ARGS)
 
 	tmp = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_prosrc, &isnull);
 	if (isnull)
-		elog(ERROR, "null prosrc");
-	prosrc = DatumGetCString(DirectFunctionCall1(textout, tmp));
+		elog(ERROR, "null prosrc for C function %u", funcoid);
+	prosrc = TextDatumGetCString(tmp);
 
 	tmp = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_probin, &isnull);
 	if (isnull)
-		elog(ERROR, "null probin");
-	probin = DatumGetCString(DirectFunctionCall1(textout, tmp));
+		elog(ERROR, "null probin for C function %u", funcoid);
+	probin = TextDatumGetCString(tmp);
 
 	(void) load_external_function(probin, prosrc, true, &libraryhandle);
 	(void) fetch_finfo_record(libraryhandle, prosrc);
@@ -576,7 +718,7 @@ fmgr_sql_validator(PG_FUNCTION_ARGS)
 		if (isnull)
 			elog(ERROR, "null prosrc");
 
-		prosrc = DatumGetCString(DirectFunctionCall1(textout, tmp));
+		prosrc = TextDatumGetCString(tmp);
 
 		/*
 		 * Setup error traceback support for ereport().
@@ -601,7 +743,8 @@ fmgr_sql_validator(PG_FUNCTION_ARGS)
 												  proc->proargtypes.values,
 												  proc->pronargs);
 			(void) check_sql_fn_retval(funcoid, proc->prorettype,
-									   querytree_list, NULL);
+									   querytree_list,
+									   false, NULL);
 		}
 		else
 			querytree_list = pg_parse_query(prosrc);
@@ -630,7 +773,7 @@ sql_function_parse_error_callback(void *arg)
 	tmp = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_prosrc, &isnull);
 	if (isnull)
 		elog(ERROR, "null prosrc");
-	prosrc = DatumGetCString(DirectFunctionCall1(textout, tmp));
+	prosrc = TextDatumGetCString(tmp);
 
 	if (!function_parse_error_transpose(prosrc))
 	{

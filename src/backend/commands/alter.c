@@ -3,7 +3,7 @@
  * alter.c
  *	  Drivers for generic alter commands
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -117,7 +117,7 @@ ExecRenameStmt(RenameStmt *stmt)
 								aclcheck_error(aclresult, ACL_KIND_NAMESPACE,
 											get_namespace_name(namespaceId));
 
-							renamerel(relid, stmt->newname, stmt->renameType);
+							RenameRelation(relid, stmt->newname, stmt->renameType);
 							break;
 						}
 					case OBJECT_COLUMN:
@@ -154,6 +154,10 @@ ExecRenameStmt(RenameStmt *stmt)
 			RenameTSConfiguration(stmt->object, stmt->newname);
 			break;
 
+		case OBJECT_TYPE:
+			RenameType(stmt->object, stmt->newname);
+			break;
+
 		default:
 			elog(ERROR, "unrecognized rename stmt type: %d",
 				 (int) stmt->renameType);
@@ -181,8 +185,10 @@ ExecAlterObjectSchemaStmt(AlterObjectSchemaStmt *stmt)
 
 		case OBJECT_SEQUENCE:
 		case OBJECT_TABLE:
+		case OBJECT_VIEW:
 			CheckRelationOwnership(stmt->relation, true);
-			AlterTableNamespace(stmt->relation, stmt->newschema);
+			AlterTableNamespace(stmt->relation, stmt->newschema,
+								stmt->objectType);
 			break;
 
 		case OBJECT_TYPE:
@@ -262,6 +268,15 @@ ExecAlterOwnerStmt(AlterOwnerStmt *stmt)
 
 		case OBJECT_TSCONFIGURATION:
 			AlterTSConfigurationOwner(stmt->object, newowner);
+			break;
+
+		case OBJECT_FDW:
+			AlterForeignDataWrapperOwner(strVal(linitial(stmt->object)),
+										 newowner);
+			break;
+
+		case OBJECT_FOREIGN_SERVER:
+			AlterForeignServerOwner(strVal(linitial(stmt->object)), newowner);
 			break;
 
 		default:

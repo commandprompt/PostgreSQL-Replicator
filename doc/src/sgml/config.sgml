@@ -20,8 +20,8 @@
 
    <para>
     All parameter names are case-insensitive. Every parameter takes a
-    value of one of four types: Boolean, integer, floating point,
-    or string. Boolean values can be written as <literal>ON</literal>,
+    value of one of five types: Boolean, integer, floating point,
+    string or enum. Boolean values can be written as <literal>ON</literal>,
     <literal>OFF</literal>, <literal>TRUE</literal>,
     <literal>FALSE</literal>, <literal>YES</literal>,
     <literal>NO</literal>, <literal>1</literal>, <literal>0</literal>
@@ -32,7 +32,8 @@
     Some settings specify a memory or time value.  Each of these has an
     implicit unit, which is either kilobytes, blocks (typically eight
     kilobytes), milliseconds, seconds, or minutes.  Default units can be
-    queried by referencing <literal>pg_settings.unit</>. For convenience,
+    found by referencing <structname>pg_settings</>.<structfield>unit</>.
+    For convenience,
     a different unit can also be specified explicitly.  Valid memory units
     are <literal>kB</literal> (kilobytes), <literal>MB</literal>
     (megabytes), and <literal>GB</literal> (gigabytes); valid time units
@@ -40,6 +41,14 @@
     (seconds), <literal>min</literal> (minutes), <literal>h</literal>
     (hours), and <literal>d</literal> (days).  Note that the multiplier
     for memory units is 1024, not 1000.
+   </para>
+
+   <para>
+    Parameters of type <quote>enum</> are specified in the same way as string
+    parameters, but are restricted to a limited set of values.  The allowed
+    values can be found
+    from <structname>pg_settings</>.<structfield>enumvals</>.
+    Enum parameter values are case-insensitive.
    </para>
 
    <para>
@@ -162,7 +171,8 @@ SET ENABLE_SEQSCAN TO OFF;
     displaying and updating session run-time parameters.  It is equivalent
     to <command>SHOW</> and <command>SET</>, but can be more convenient
     to use because it can be joined with other tables, or selected from using
-    any desired selection condition.
+    any desired selection condition. It also contains more information about
+    what values are allowed for the parameters.
    </para>
   </sect1>
 
@@ -564,7 +574,8 @@ SET ENABLE_SEQSCAN TO OFF;
         Enables <acronym>SSL</> connections. Please read
         <xref linkend="ssl-tcp"> before using this. The default
         is <literal>off</>. This parameter can only be set at server
-        start.
+        start.  <acronym>SSL</> communication is only possible with
+        TCP/IP connections.
        </para>
       </listitem>
      </varlistentry>
@@ -601,21 +612,6 @@ SET ENABLE_SEQSCAN TO OFF;
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-krb-realm" xreflabel="krb_realm">
-      <term><varname>krb_realm</varname> (<type>string</type>)</term>
-      <indexterm>
-       <primary><varname>krb_realm</> configuration parameter</primary>
-      </indexterm>
-      <listitem>
-       <para>
-        Sets the realm to match Kerberos, GSSAPI and SSPI user names against.
-        See <xref linkend="kerberos-auth">, <xref linkend="gssapi-auth"> or
-        <xref linkend="sspi-auth"> for details. This parameter can only be
-        set at server start.
-       </para>
-      </listitem>
-     </varlistentry>
-
      <varlistentry id="guc-krb-server-keyfile" xreflabel="krb_server_keyfile">
       <term><varname>krb_server_keyfile</varname> (<type>string</type>)</term>
       <indexterm>
@@ -625,7 +621,8 @@ SET ENABLE_SEQSCAN TO OFF;
        <para>
         Sets the location of the Kerberos server key file. See
         <xref linkend="kerberos-auth"> or <xref linkend="gssapi-auth"> 
-        for details. This parameter can only be set at server start.
+        for details. This parameter can only be set in the
+        <filename>postgresql.conf</> file or on the server command line.
        </para>
       </listitem>
      </varlistentry>
@@ -638,24 +635,8 @@ SET ENABLE_SEQSCAN TO OFF;
       <listitem>
        <para>
         Sets the Kerberos service name. See <xref linkend="kerberos-auth">
-        for details.  This parameter can only be set at server start.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry id="guc-krb-server-hostname" xreflabel="krb_server_hostname">
-      <term><varname>krb_server_hostname</varname> (<type>string</type>)</term>
-      <indexterm>
-       <primary><varname>krb_server_hostname</> configuration parameter</primary>
-      </indexterm>
-      <listitem>
-       <para>
-        Sets the host name part of the service principal.
-        This, combined with <varname>krb_srvname</>, is used to generate
-        the complete service principal, that is
-        <varname>krb_srvname</><literal>/</><varname>krb_server_hostname</><literal>@</>REALM.
-        If not set, the default is the server host name.  See <xref linkend="kerberos-auth">
-        for details.  This parameter can only be set at server start.
+        for details. This parameter can only be set in the
+        <filename>postgresql.conf</> file or on the server command line.
        </para>
       </listitem>
      </varlistentry>
@@ -669,8 +650,8 @@ SET ENABLE_SEQSCAN TO OFF;
        <para>
         Sets whether Kerberos and GSSAPI user names should be treated
         case-insensitively.
-        The default is <literal>off</> (case sensitive). This parameter
-        can only be set at server start.
+        The default is <literal>off</> (case sensitive). This parameter can only be 
+        set in the <filename>postgresql.conf</> file or on the server command line.
        </para>
       </listitem>
      </varlistentry>
@@ -702,6 +683,17 @@ SET ENABLE_SEQSCAN TO OFF;
         users.  Simply append <literal>@</> when specifying the user
         name in the client.  The <literal>@</> will be stripped off
         before the user name is looked up by the server.
+       </para>
+
+       <para>
+        <varname>db_user_namespace</> causes the client's and
+        server's user name representation to differ.
+        Authentication checks are always done with the server's user name
+        so authentication methods must be configured for the
+        server's user name, not the client's.  Because
+        <literal>md5</> uses the user name as salt on both the
+        client and server, <literal>md5</> cannot be used with
+        <varname>db_user_namespace</>.
        </para>
 
        <note>
@@ -736,8 +728,7 @@ SET ENABLE_SEQSCAN TO OFF;
         memory buffers.  The default is typically 32 megabytes
         (<literal>32MB</>), but might be less if your kernel settings will
         not support it (as determined during <application>initdb</>).
-        This setting must be at least 128 kilobytes and at least 16
-        kilobytes times <xref linkend="guc-max-connections">.  (Non-default
+        This setting must be at least 128 kilobytes.  (Non-default
         values of <symbol>BLCKSZ</symbol> change the minimum.)  However,
         settings significantly higher than the minimum are usually needed
         for good performance.  Several tens of megabytes are recommended
@@ -794,18 +785,18 @@ SET ENABLE_SEQSCAN TO OFF;
         <quote>prepared</> state simultaneously (see <xref
         linkend="sql-prepare-transaction"
         endterm="sql-prepare-transaction-title">).
-        Setting this parameter to zero disables the prepared-transaction
-        feature.
-        The default is five transactions.
+        Setting this parameter to zero (which is the default)
+        disables the prepared-transaction feature.
         This parameter can only be set at server start.
        </para>
 
        <para>
-        If you are not using prepared transactions, this parameter may as
-        well be set to zero.  If you are using them, you will probably
-        want <varname>max_prepared_transactions</varname> to be at least
-        as large as <xref linkend="guc-max-connections">, to avoid unwanted
-        failures at the prepare step.
+        If you are not planning to use prepared transactions, this parameter
+        should be set to zero to prevent accidental creation of prepared
+        transactions.  If you are using prepared transactions, you will
+        probably want <varname>max_prepared_transactions</varname> to be at
+        least as large as <xref linkend="guc-max-connections">, so that every
+        session can have a prepared transaction pending.
        </para>
 
        <para>
@@ -826,7 +817,7 @@ SET ENABLE_SEQSCAN TO OFF;
       <listitem>
        <para>
         Specifies the amount of memory to be used by internal sort operations
-        and hash tables before switching to temporary disk files. The value is
+        and hash tables before switching to temporary disk files. The value
         defaults to one megabyte (<literal>1MB</>).
         Note that for a complex query, several sort or hash operations might be
         running in parallel; each one will be allowed to use as much memory
@@ -901,80 +892,6 @@ SET ENABLE_SEQSCAN TO OFF;
      </varlistentry>
 
      </variablelist>
-     </sect2>
-     <sect2 id="runtime-config-resource-fsm">
-     <title>Free Space Map</title>
-
-     <indexterm>
-      <primary>free space map</primary>
-     </indexterm>
-
-     <para>
-      These parameters control the size of the shared <firstterm>free space
-      map</> (<acronym>FSM</>), which tracks the locations of unused space in the database.
-      An undersized free space map can cause the database to consume
-      increasing amounts of disk space over time, because free space that
-      is not in the map cannot be re-used; instead <productname>PostgreSQL</>
-      will request more disk space from the operating system when it needs
-      to store new data.
-      The last few lines displayed by a database-wide <command>VACUUM VERBOSE</>
-      command can help in determining if the current settings are adequate.
-      A <literal>NOTICE</> message is also printed during such an operation
-      if the current settings are too low.
-     </para>
-
-     <para>
-      Increasing these parameters might cause <productname>PostgreSQL</>
-      to request more <systemitem class="osname">System V</> shared
-      memory than your operating system's default configuration
-      allows. See <xref linkend="sysvipc"> for information on how to
-      adjust those parameters, if necessary.
-     </para>
-
-     <variablelist>
-     <varlistentry id="guc-max-fsm-pages" xreflabel="max_fsm_pages">
-      <term><varname>max_fsm_pages</varname> (<type>integer</type>)</term>
-      <indexterm>
-       <primary><varname>max_fsm_pages</> configuration parameter</primary>
-      </indexterm>
-      <listitem>
-       <para>
-        Sets the maximum number of disk pages for which free space will
-        be tracked in the shared free-space map.  Six bytes of shared memory
-        are consumed for each page slot.  This setting must be at least
-        16 * <varname>max_fsm_relations</varname>.  The default is chosen
-        by <application>initdb</> depending on the amount of available memory,
-        and can range from 20k to 200k pages.
-        This parameter can only be set at server start.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry id="guc-max-fsm-relations" xreflabel="max_fsm_relations">
-      <term><varname>max_fsm_relations</varname> (<type>integer</type>)</term>
-      <indexterm>
-       <primary><varname>max_fsm_relations</> configuration parameter</primary>
-      </indexterm>
-      <listitem>
-       <para>
-        Sets the maximum number of relations (tables and indexes) for which
-        free space will be tracked in the shared free-space map.  Roughly
-        seventy bytes of shared memory are consumed for each slot.
-        The default is one thousand relations.
-        This parameter can only be set at server start.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     </variablelist>
-
-     <note>
-      <para>
-       See the <xref linkend="sql-vacuum" endterm="sql-vacuum-title">
-       command for information on setting this parameter.
-      </para>
-     </note>
-
      </sect2>
 
      <sect2 id="runtime-config-resource-kernel">
@@ -1093,7 +1010,8 @@ SET ENABLE_SEQSCAN TO OFF;
      </para>
 
      <para>
-      This feature is disabled by default. To enable it, set the
+      This feature is disabled by default for manually issued
+      <command>VACUUM</command> commands. To enable it, set the
       <varname>vacuum_cost_delay</varname> variable to a nonzero
       value.
      </para>
@@ -1115,6 +1033,13 @@ SET ENABLE_SEQSCAN TO OFF;
          <varname>vacuum_cost_delay</varname> to a value that is
          not a multiple of 10 might have the same results as setting it
          to the next higher multiple of 10.
+        </para>
+
+        <para>
+         When using cost-based vacuuming, appropriate values for
+         <varname>vacuum_cost_delay</> are usually quite small, perhaps
+         10 or 20 milliseconds.  Adjusting vacuum's resource consumption
+         is best done by changing the other vacuum cost parameters.
         </para>
        </listitem>
       </varlistentry>
@@ -1286,6 +1211,54 @@ SET ENABLE_SEQSCAN TO OFF;
       queries.
      </para>
     </sect2>
+
+    <sect2 id="runtime-config-resource-async-behavior">
+     <title>Asynchronous Behavior</title>
+
+     <variablelist>
+      <varlistentry id="guc-effective-io-concurrency" xreflabel="effective_io_concurrency">
+       <term><varname>effective_io_concurrency</varname> (<type>integer</type>)</term>
+       <indexterm>
+        <primary><varname>effective_io_concurrency</> configuration parameter</primary>
+       </indexterm>
+       <listitem>
+        <para>
+         Sets the number of concurrent disk I/O operations that
+         <productname>PostgreSQL</> expects can be executed
+         simultaneously.  Raising this value will increase the number of I/O
+         operations that any individual <productname>PostgreSQL</> session
+         attempts to initiate in parallel.  The allowed range is 1 to 1000,
+         or zero to disable issuance of asynchronous I/O requests.
+        </para>
+
+        <para>
+         A good starting point for this setting is the number of separate
+         drives comprising a RAID 0 stripe or RAID 1 mirror being used for the
+         database.  (For RAID 5 the parity drive should not be counted.)
+         However, if the database is often busy with multiple queries issued in
+         concurrent sessions, lower values may be sufficient to keep the disk
+         array busy.  A value higher than needed to keep the disks busy will
+         only result in extra CPU overhead.
+        </para>
+
+        <para>
+         For more exotic systems, such as memory-based storage or a RAID array
+         that is limited by bus bandwidth, the correct value might be the
+         number of I/O paths available.  Some experimentation may be needed
+         to find the best value.
+        </para>
+
+        <para>
+         Asynchronous I/O depends on an effective <function>posix_fadvise</>
+         function, which some operating systems lack.  If the function is not
+         present then setting this parameter to anything but zero will result
+         in an error.  On some operating systems (e.g., Solaris), the function
+         is present but does not actually do anything.
+        </para>
+       </listitem>
+      </varlistentry>
+     </variablelist>
+    </sect2>
    </sect1>
 
    <sect1 id="runtime-config-wal">
@@ -1396,7 +1369,7 @@ SET ENABLE_SEQSCAN TO OFF;
      </varlistentry>
      
      <varlistentry id="guc-wal-sync-method" xreflabel="wal_sync_method">
-      <term><varname>wal_sync_method</varname> (<type>string</type>)</term>
+      <term><varname>wal_sync_method</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>wal_sync_method</> configuration parameter</primary>
       </indexterm>
@@ -2052,6 +2025,16 @@ archive_command = 'copy "%p" "C:\\server\\archivedir\\%f"'  # Windows
      <sect2 id="runtime-config-query-geqo">
      <title>Genetic Query Optimizer</title>
 
+     <para>
+      The genetic query optimizer (GEQO) is an algorithm that does query
+      planning using heuristic searching.  This reduces planning time for
+      complex queries (those joining many relations), at the cost of producing
+      plans that are sometimes inferior to those found by the normal
+      exhaustive-search algorithm.  Also, GEQO's searching is randomized and
+      therefore its plans may vary nondeterministically.
+      For more information see <xref linkend="geqo">.
+     </para>
+
      <variablelist>
 
      <varlistentry id="guc-geqo" xreflabel="geqo">
@@ -2068,11 +2051,10 @@ archive_command = 'copy "%p" "C:\\server\\archivedir\\%f"'  # Windows
       <term><varname>geqo</varname> (<type>boolean</type>)</term>
       <listitem>
        <para>
-        Enables or disables genetic query optimization, which is an
-        algorithm that attempts to do query planning without
-        exhaustive searching. This is on by default. The
-        <varname>geqo_threshold</varname> variable provides a more
-        granular way to disable GEQO for certain classes of queries.
+        Enables or disables genetic query optimization.
+        This is on by default.  It is usually best not to turn it off in
+        production; the <varname>geqo_threshold</varname> variable provides a
+        more granular way to control use of GEQO.
        </para>
       </listitem>
      </varlistentry>
@@ -2102,8 +2084,8 @@ archive_command = 'copy "%p" "C:\\server\\archivedir\\%f"'  # Windows
       </indexterm>
       <listitem>
        <para>
-        Controls the trade off between planning time and query plan
-        efficiency in GEQO. This variable must be an integer in the
+        Controls the trade-off between planning time and query plan
+        quality in GEQO. This variable must be an integer in the
         range from 1 to 10. The default value is five. Larger values
         increase the time spent doing query planning, but also
         increase the likelihood that an efficient query plan will be
@@ -2127,11 +2109,11 @@ archive_command = 'copy "%p" "C:\\server\\archivedir\\%f"'  # Windows
       </indexterm>
       <listitem>
        <para>
-        Controls the pool size used by GEQO. The pool size is the
+        Controls the pool size used by GEQO, that is the
         number of individuals in the genetic population.  It must be
         at least two, and useful values are typically 100 to 1000.  If
         it is set to zero (the default setting) then a suitable
-        default is chosen based on <varname>geqo_effort</varname> and
+        value is chosen based on <varname>geqo_effort</varname> and
         the number of tables in the query.
        </para>
       </listitem>
@@ -2144,11 +2126,11 @@ archive_command = 'copy "%p" "C:\\server\\archivedir\\%f"'  # Windows
       </indexterm>
       <listitem>
        <para>
-        Controls the number of generations used by GEQO.  Generations
-        specifies the number of iterations of the algorithm.  It must
+        Controls the number of generations used by GEQO, that is
+        the number of iterations of the algorithm.  It must
         be at least one, and useful values are in the same range as
         the pool size.  If it is set to zero (the default setting)
-        then a suitable default is chosen based on
+        then a suitable value is chosen based on
         <varname>geqo_pool_size</varname>.
        </para>
       </listitem>
@@ -2186,7 +2168,7 @@ archive_command = 'copy "%p" "C:\\server\\archivedir\\%f"'  # Windows
         not had a column-specific target set via <command>ALTER TABLE
         SET STATISTICS</>.  Larger values increase the time needed to
         do <command>ANALYZE</>, but might improve the quality of the
-        planner's estimates. The default is 10. For more information
+        planner's estimates. The default is 100. For more information
         on the use of statistics by the <productname>PostgreSQL</>
         query planner, refer to <xref linkend="planner-stats">.
        </para>
@@ -2194,7 +2176,7 @@ archive_command = 'copy "%p" "C:\\server\\archivedir\\%f"'  # Windows
      </varlistentry>
 
      <varlistentry id="guc-constraint-exclusion" xreflabel="constraint_exclusion">
-      <term><varname>constraint_exclusion</varname> (<type>boolean</type>)</term>
+      <term><varname>constraint_exclusion</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary>constraint exclusion</primary>
       </indexterm>
@@ -2203,15 +2185,21 @@ archive_command = 'copy "%p" "C:\\server\\archivedir\\%f"'  # Windows
       </indexterm>
       <listitem>
        <para>
-        Enables or disables the query planner's use of table constraints to
-        optimize queries.  The default is <literal>off</>.
+        Controls the query planner's use of table constraints to
+        optimize queries.
+        The allowed values of <varname>constraint_exclusion</> are
+        <literal>on</> (examine constraints for all tables),
+        <literal>off</> (never examine constraints), and
+        <literal>partition</> (examine constraints only for inheritance child
+        tables and <literal>UNION ALL</> subqueries).
+        <literal>partition</> is the default setting.
        </para>
 
        <para>
-        When this parameter is <literal>on</>, the planner compares
-        query conditions with table <literal>CHECK</> constraints, and
-        omits scanning tables for which the conditions contradict the
-        constraints.  For example:
+        When this parameter allows it for a particular table, the planner
+        compares query conditions with the table's <literal>CHECK</>
+        constraints, and omits scanning tables for which the conditions
+        contradict the constraints.  For example:
 
 <programlisting>
 CREATE TABLE parent(key integer, ...);
@@ -2228,17 +2216,37 @@ SELECT * FROM parent WHERE key = 2400;
        </para>
 
        <para>
-        Currently, <varname>constraint_exclusion</> is disabled by
-        default because the constraint checks are relatively
-        expensive, and in many circumstances will yield no savings.
-        It is recommended to turn this on only if you are actually
-        using partitioned tables designed to take advantage of the
-        feature.
+        Currently, constraint exclusion is enabled by default
+        only for cases that are often used to implement table partitioning.
+        Turning it on for all tables imposes extra planning overhead that is
+        quite noticeable on simple queries, and most often will yield no
+        benefit for simple queries.  If you have no partitioned tables
+        you might prefer to turn it off entirely.
        </para>
 
        <para>
-        Refer to <xref linkend="ddl-partitioning"> for more information
-        on using constraint exclusion and partitioning.
+        Refer to <xref linkend="ddl-partitioning-constraint-exclusion"> for
+        more information on using constraint exclusion and partitioning.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-cursor-tuple-fraction" xreflabel="cursor_tuple_fraction">
+      <term><varname>cursor_tuple_fraction</varname> (<type>floating point</type>)</term>
+      <indexterm>
+       <primary><varname>cursor_tuple_fraction</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Sets the planner's estimate of the fraction of a cursor's rows that
+        will be retrieved.  The default is 0.1.  Smaller values of this
+        setting bias the planner towards using <quote>fast start</> plans
+        for cursors, which will retrieve the first few rows quickly while
+        perhaps taking a long time to fetch all rows.  Larger values
+        put more emphasis on the total estimated time.  At the maximum
+        setting of 1.0, cursors are planned exactly like regular queries,
+        considering only the total estimated time and not how soon the
+        first rows might be delivered.
        </para>
       </listitem>
      </varlistentry>
@@ -2253,9 +2261,14 @@ SELECT * FROM parent WHERE key = 2400;
         The planner will merge sub-queries into upper queries if the
         resulting <literal>FROM</literal> list would have no more than
         this many items.  Smaller values reduce planning time but might
-        yield inferior query plans.  The default is eight.  It is usually
-        wise to keep this less than <xref linkend="guc-geqo-threshold">.
+        yield inferior query plans.  The default is eight.
         For more information see <xref linkend="explicit-joins">.
+       </para>
+
+       <para>
+        Setting this value to <xref linkend="guc-geqo-threshold"> or more
+        may trigger use of the GEQO planner, resulting in nondeterministic
+        plans.  See <xref linkend="runtime-config-query-geqo">.
        </para>
       </listitem>
      </varlistentry>
@@ -2285,6 +2298,12 @@ SELECT * FROM parent WHERE key = 2400;
         temporarily set this variable to 1, and then specify the join
         order they desire explicitly.
         For more information see <xref linkend="explicit-joins">.
+       </para>
+
+       <para>
+        Setting this value to <xref linkend="guc-geqo-threshold"> or more
+        may trigger use of the GEQO planner, resulting in nondeterministic
+        plans.  See <xref linkend="runtime-config-query-geqo">.
        </para>
       </listitem>
      </varlistentry>
@@ -2406,15 +2425,19 @@ local0.*    /var/log/postgresql
         so <literal>%</literal>-escapes can be used to specify time-varying
         file names.  (Note that if there are
         any time-zone-dependent <literal>%</literal>-escapes, the computation
-        is done in the zone specified by <xref linkend="guc-log-timezone">.)
-        If no <literal>%</literal>-escapes are present,
-        <productname>PostgreSQL</productname> will append the epoch of the new
-        log file's creation time.  For example, if
-        <varname>log_filename</varname> were <literal>server_log</literal>,
-        then the chosen file name would be <literal>server_log.1093827753</>
-        for a log starting at Sun Aug 29 19:02:33 2004 MST.
-        This parameter can only be set in the <filename>postgresql.conf</>
-        file or on the server command line.
+        is done in the zone specified
+        by <xref linkend="guc-log-timezone">.)
+        Note that the system's <systemitem>strftime</systemitem> is not used
+        directly, so platform-specific (nonstandard) extensions do not work.
+       </para>
+       <para>
+        If you specify a file name without escapes, you should plan to
+        use a log rotation utility to avoid eventually filling the
+        entire disk.  In releases prior to 8.4, if
+        no <literal>%</literal> escapes were
+        present, <productname>PostgreSQL</productname> would append
+        the epoch of the new log file's creation time, but this is no
+        longer the case.
        </para>
        <para>
         If CSV-format output is enabled in <varname>log_destination</>,
@@ -2424,6 +2447,10 @@ local0.*    /var/log/postgresql
         replaced instead.)
         In the case of the example above, the CSV
         file name will be <literal>server_log.1093827753.csv</literal>.
+       </para>
+       <para>
+        This parameter can only be set in the <filename>postgresql.conf</>
+        file or on the server command line.
        </para>
       </listitem>
      </varlistentry>
@@ -2507,7 +2534,7 @@ local0.*    /var/log/postgresql
      </varlistentry>
 
      <varlistentry id="guc-syslog-facility" xreflabel="syslog_facility">
-      <term><varname>syslog_facility</varname> (<type>string</type>)</term>
+      <term><varname>syslog_facility</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>syslog_facility</> configuration parameter</primary>
       </indexterm>
@@ -2545,7 +2572,37 @@ local0.*    /var/log/postgresql
         </para>
        </listitem>
       </varlistentry>
-      
+
+     <varlistentry id="guc-silent-mode" xreflabel="silent_mode">
+      <term><varname>silent_mode</varname> (<type>boolean</type>)</term>
+      <indexterm>
+       <primary><varname>silent_mode</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Runs the server silently. If this parameter is set, the server
+        will automatically run in background and disassociate from the
+        controlling terminal.
+        This parameter can only be set at server start.
+       </para>
+
+       <caution>
+       <para>
+        When this parameter is set,
+        the server's standard output and standard error are redirected
+        to the file <filename>postmaster.log</> within the data directory.
+        There is no provision for rotating this file, so it will grow
+        indefinitely unless server log output is redirected elsewhere
+        by other settings.  It is recommended that <varname>log_destination</>
+        be set to <literal>syslog</> or that <varname>logging_collector</> be
+        enabled when using this option.  Even with those measures, errors
+        reported early during startup may appear in
+        <filename>postmaster.log</> rather than the normal log destination.
+       </para>
+       </caution>
+      </listitem>
+     </varlistentry>
+
       </variablelist>
     </sect2>
      <sect2 id="runtime-config-logging-when">
@@ -2554,7 +2611,7 @@ local0.*    /var/log/postgresql
      <variablelist>
 
      <varlistentry id="guc-client-min-messages" xreflabel="client_min_messages">
-      <term><varname>client_min_messages</varname> (<type>string</type>)</term>
+      <term><varname>client_min_messages</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>client_min_messages</> configuration parameter</primary>
       </indexterm>
@@ -2575,7 +2632,7 @@ local0.*    /var/log/postgresql
      </varlistentry>
 
      <varlistentry id="guc-log-min-messages" xreflabel="log_min_messages">
-      <term><varname>log_min_messages</varname> (<type>string</type>)</term>
+      <term><varname>log_min_messages</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>log_min_messages</> configuration parameter</primary>
       </indexterm>
@@ -2588,7 +2645,7 @@ local0.*    /var/log/postgresql
         <literal>ERROR</>, <literal>LOG</>, <literal>FATAL</>, and
         <literal>PANIC</>.  Each level includes all the levels that
         follow it.  The later the level, the fewer messages are sent
-        to the log.  The default is <literal>NOTICE</>.  Note that
+        to the log.  The default is <literal>WARNING</>.  Note that
         <literal>LOG</> has a different rank here than in
         <varname>client_min_messages</>.
         Only superusers can change this setting.
@@ -2597,7 +2654,7 @@ local0.*    /var/log/postgresql
      </varlistentry>
 
      <varlistentry id="guc-log-error-verbosity" xreflabel="log_error_verbosity">
-      <term><varname>log_error_verbosity</varname> (<type>string</type>)</term>
+      <term><varname>log_error_verbosity</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>log_error_verbosity</> configuration parameter</primary>
       </indexterm>
@@ -2613,7 +2670,7 @@ local0.*    /var/log/postgresql
      </varlistentry>
 
      <varlistentry id="guc-log-min-error-statement" xreflabel="log_min_error_statement">
-      <term><varname>log_min_error_statement</varname> (<type>string</type>)</term>
+      <term><varname>log_min_error_statement</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>log_min_error_statement</> configuration parameter</primary>
       </indexterm>
@@ -2678,26 +2735,6 @@ local0.*    /var/log/postgresql
        </note>
        </listitem>
       </varlistentry>
-
-     <varlistentry id="guc-silent-mode" xreflabel="silent_mode">
-      <term><varname>silent_mode</varname> (<type>boolean</type>)</term>
-      <indexterm>
-       <primary><varname>silent_mode</> configuration parameter</primary>
-      </indexterm>
-      <listitem>
-       <para>
-        Runs the server silently. If this parameter is set, the server
-        will automatically run in background and any controlling
-        terminals are disassociated.
-        The server's standard output and standard error are redirected
-        to <literal>/dev/null</>, so any messages sent to them will be lost.
-        Unless <application>syslog</> logging is selected or
-        <varname>logging_collector</> is enabled, using this parameter
-        is discouraged because it makes it impossible to see error messages.
-        This parameter can only be set at server start.
-       </para>
-      </listitem>
-     </varlistentry>
 
      </variablelist>
 
@@ -2798,7 +2835,6 @@ local0.*    /var/log/postgresql
       <term><varname>debug_print_parse</varname> (<type>boolean</type>)</term>
       <term><varname>debug_print_rewritten</varname> (<type>boolean</type>)</term>
       <term><varname>debug_print_plan</varname> (<type>boolean</type>)</term>
-      <term><varname>debug_pretty_print</varname> (<type>boolean</type>)</term>
       <indexterm>
        <primary><varname>debug_print_parse</> configuration parameter</primary>
       </indexterm>
@@ -2808,21 +2844,34 @@ local0.*    /var/log/postgresql
       <indexterm>
        <primary><varname>debug_print_plan</> configuration parameter</primary>
       </indexterm>
+      <listitem>
+       <para>
+        These parameters enable various debugging output to be emitted.
+        When set, they print the resulting parse tree, the query rewriter
+        output, or the execution plan for each executed query.
+        These messages are emitted at <literal>LOG</> message level, so by
+        default they will appear in the server log but will not be sent to the
+        client.  You can change that by adjusting
+        <xref linkend="guc-client-min-messages"> and/or
+        <xref linkend="guc-log-min-messages">.
+        These parameters are off by default.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><varname>debug_pretty_print</varname> (<type>boolean</type>)</term>
       <indexterm>
        <primary><varname>debug_pretty_print</> configuration parameter</primary>
       </indexterm>
       <listitem>
        <para>
-        These parameters enable various debugging output to be emitted.
-        For each executed query, they print
-        the resulting parse tree, the query rewriter output, or the
-        execution plan.  <varname>debug_pretty_print</varname> indents
-        these displays to produce a more readable but much longer
-        output format.  <varname>client_min_messages</varname> or
-        <varname>log_min_messages</varname> must be
-        <literal>DEBUG1</literal> or lower to actually send this output
-        to the client or the server log, respectively.
-        These parameters are off by default.
+        When set, <varname>debug_pretty_print</varname> indents the messages
+        produced by <varname>debug_print_parse</varname>,
+        <varname>debug_print_rewritten</varname>, or
+        <varname>debug_print_plan</varname>.  This results in more readable
+        but much longer output than the <quote>compact</> format used when
+        it is off.  It is on by default.
        </para>
       </listitem>
      </varlistentry>
@@ -3049,7 +3098,14 @@ local0.*    /var/log/postgresql
          consisting of two 4-byte hexadecimal numbers (without leading zeros)
          separated by a dot.  The numbers are the process start time and the
          process ID, so <literal>%c</> can also be used as a space saving way
-         of printing those items.
+         of printing those items.  For example, to generate the session
+         identifier from <literal>pg_stat_activity</>, use this query:
+<programlisting>
+SELECT to_hex(EXTRACT(EPOCH FROM backend_start)::integer) || '.' ||
+       to_hex(procpid)
+FROM pg_stat_activity;
+</programlisting>
+
        </para>
 
        <tip>
@@ -3087,7 +3143,7 @@ local0.*    /var/log/postgresql
      </varlistentry>
 
      <varlistentry id="guc-log-statement" xreflabel="log_statement">
-      <term><varname>log_statement</varname> (<type>string</type>)</term>
+      <term><varname>log_statement</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>log_statement</> configuration parameter</primary>
       </indexterm>
@@ -3124,7 +3180,7 @@ local0.*    /var/log/postgresql
          query protocol, this setting likewise does not log statements that
          fail before the Execute phase (i.e., during parse analysis or
          planning).  Set <varname>log_min_error_statement</> to
-         <literal>ERROR</> (or lower) to log such statements.      
+         <literal>ERROR</> (or lower) to log such statements.
         </para>
        </note>
       </listitem>
@@ -3137,13 +3193,15 @@ local0.*    /var/log/postgresql
       </indexterm>
       <listitem>
        <para>
-        Controls whether temporary files are logged when deleted.
+        Controls logging of use of temporary files.
         Temporary files can be
         created for sorts, hashes, and temporary query results.
-        A value of zero logs all temporary files, and positive
-        values log only files whose size is equal or greater than
+        A log entry is made for each temporary file when it is deleted.
+        A value of zero logs all temporary files, while positive
+        values log only files whose size is greater than or equal to
         the specified number of kilobytes.  The
-        default is <literal>-1</>, which disables this logging.
+        default setting is <literal>-1</>, which disables such logging.
+        Only superusers can change this setting.
        </para>
       </listitem>
      </varlistentry>
@@ -3312,6 +3370,22 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-track-activity-query-size" xreflabel="track_activity_query_size">
+      <term><varname>track_activity_query_size</varname> (<type>integer</type>)</term>
+      <indexterm>
+       <primary><varname>track_activity_query_size</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+       Specifies the number of bytes reserved to track the currently
+       executing command for each active session, for the
+       <structname>pg_stat_activity</>.<structfield>current_query</> field.
+       The default value is 1024. This parameter can only be set at server
+       start.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-counts" xreflabel="track_counts">
       <term><varname>track_counts</varname> (<type>boolean</type>)</term>
       <indexterm>
@@ -3327,6 +3401,30 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-track-functions" xreflabel="track_functions">
+      <term><varname>track_functions</varname> (<type>enum</type>)</term>
+      <indexterm>
+       <primary><varname>track_functions</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Enables tracking of function call counts and time used. Specify
+        <literal>pl</literal> to track only procedural-language functions,
+        <literal>all</literal> to also track SQL and C language functions.
+        The default is <literal>none</literal>, which disables function
+        statistics tracking.  Only superusers can change this setting.
+       </para>
+
+       <note>
+        <para>
+         SQL-language functions that are simple enough to be <quote>inlined</>
+         into the calling query will not be tracked, regardless of this
+         setting.
+        </para>
+       </note>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-update-process-title" xreflabel="update_process_title">
       <term><varname>update_process_title</varname> (<type>boolean</type>)</term>
       <indexterm>
@@ -3339,6 +3437,24 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         by the <command>ps</> command,
         or in Windows by using the <application>Process Explorer</>.
         Only superusers can change this setting.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-stats-temp-directory" xreflabel="stats_temp_directory">
+      <term><varname>stats_temp_directory</varname> (<type>string</type>)</term>
+      <indexterm>
+       <primary><varname>stats_temp_directory</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Sets the directory to store temporary statistics data in. This can be
+        a path relative to the data directory or an absolute path. The default
+        is <filename>pg_stat_tmp</filename>. Pointing this at a RAM based
+        filesystem will decrease physical I/O requirements and can lead to
+        improved performance.
+        This parameter can only be set in the <filename>postgresql.conf</>
+        file or on the server command line.
        </para>
       </listitem>
      </varlistentry>
@@ -3488,8 +3604,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         The default is 50 tuples.
         This parameter can only be set in the <filename>postgresql.conf</>
         file or on the server command line.
-        This setting can be overridden for individual tables by entries in
-        <structname>pg_autovacuum</>.
+        This setting can be overridden for individual tables by
+        changing storage parameters.
        </para>
       </listitem>
      </varlistentry>
@@ -3506,8 +3622,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         The default is 50 tuples.
         This parameter can only be set in the <filename>postgresql.conf</>
         file or on the server command line.
-        This setting can be overridden for individual tables by entries in
-        <structname>pg_autovacuum</>.
+        This setting can be overridden for individual tables by
+        changing storage parameters.
        </para>
       </listitem>
      </varlistentry>
@@ -3525,8 +3641,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         The default is 0.2 (20% of table size).
         This parameter can only be set in the <filename>postgresql.conf</>
         file or on the server command line.
-        This setting can be overridden for individual tables by entries in
-        <structname>pg_autovacuum</>.
+        This setting can be overridden for individual tables by
+        changing storage parameters.
        </para>
       </listitem>
      </varlistentry>
@@ -3544,8 +3660,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         The default is 0.1 (10% of table size).
         This parameter can only be set in the <filename>postgresql.conf</>
         file or on the server command line.
-        This setting can be overridden for individual tables by entries in
-        <structname>pg_autovacuum</>.
+        This setting can be overridden for individual tables by
+        changing storage parameters.
        </para>
       </listitem>
      </varlistentry>
@@ -3565,8 +3681,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         autovacuum is otherwise disabled.
         The default is 200 million transactions.
         This parameter can only be set at server start, but the setting
-        can be reduced for individual tables by entries in
-        <structname>pg_autovacuum</>.
+        can be reduced for individual tables by
+        changing storage parameters.
         For more information see <xref linkend="vacuum-for-wraparound">.
        </para>
       </listitem>
@@ -3586,8 +3702,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         The default value is 20 milliseconds.
         This parameter can only be set in the <filename>postgresql.conf</>
         file or on the server command line.
-        This setting can be overridden for individual tables by entries in
-        <structname>pg_autovacuum</>.
+        This setting can be overridden for individual tables by
+        changing storage parameters.
        </para>
       </listitem>
      </varlistentry>
@@ -3608,8 +3724,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         each worker never exceeds the limit on this variable.
         This parameter can only be set in the <filename>postgresql.conf</>
         file or on the server command line.
-        This setting can be overridden for individual tables by entries in
-        <structname>pg_autovacuum</>.
+        This setting can be overridden for individual tables by
+        changing storage parameters.
        </para>
       </listitem>
      </varlistentry>
@@ -3808,7 +3924,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       <indexterm>
        <primary><varname>default_transaction_isolation</> configuration parameter</primary>
       </indexterm>
-      <term><varname>default_transaction_isolation</varname> (<type>string</type>)</term>
+      <term><varname>default_transaction_isolation</varname> (<type>enum</type>)</term>
       <listitem>
        <para>
         Each SQL transaction has an isolation level, which can be
@@ -3851,7 +3967,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
      </varlistentry>
 
      <varlistentry id="guc-session-replication-role" xreflabel="session_replication_role">
-      <term><varname>session_replication_role</varname> (<type>string</type>)</term>
+      <term><varname>session_replication_role</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>session_replication_role</> configuration parameter</primary>
       </indexterm>
@@ -3891,6 +4007,27 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-vacuum-freeze-table-age" xreflabel="vacuum_freeze_table_age">
+      <term><varname>vacuum_freeze_table_age</varname> (<type>integer</type>)</term>
+      <indexterm>
+       <primary><varname>vacuum_freeze_table_age</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        <command>VACUUM</> performs a whole-table scan if the table's
+        <structname>pg_class</>.<structfield>relfrozenxid</> field has reached
+        the age specified by this setting.  The default is 150 million
+        transactions.  Although users can set this value anywhere from zero to
+        one billion, <command>VACUUM</> will silently limit the effective value
+        to 95% of <xref linkend="guc-autovacuum-freeze-max-age">, so that a
+        periodical manual <command>VACUUM</> has a chance to run before an
+        anti-wraparound autovacuum is launched for the table. For more
+        information see
+        <xref linkend="vacuum-for-wraparound">.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-vacuum-freeze-min-age" xreflabel="vacuum_freeze_min_age">
       <term><varname>vacuum_freeze_min_age</varname> (<type>integer</type>)</term>
       <indexterm>
@@ -3901,7 +4038,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         Specifies the cutoff age (in transactions) that <command>VACUUM</>
         should use to decide whether to replace transaction IDs with
         <literal>FrozenXID</> while scanning a table.
-        The default is 100 million transactions.  Although
+        The default is 50 million transactions.  Although
         users can set this value anywhere from zero to one billion,
         <command>VACUUM</> will silently limit the effective value to half
         the value of <xref linkend="guc-autovacuum-freeze-max-age">, so
@@ -3913,7 +4050,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
      </varlistentry>
 
      <varlistentry id="guc-xmlbinary" xreflabel="xmlbinary">
-      <term><varname>xmlbinary</varname> (<type>string</type>)</term>
+      <term><varname>xmlbinary</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>xmlbinary</> configuration parameter</primary>
       </indexterm>
@@ -3940,7 +4077,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
      </varlistentry>
 
      <varlistentry id="guc-xmloption" xreflabel="xmloption">
-      <term><varname>xmloption</varname> (<type>string</type>)</term>
+      <term><varname>xmloption</varname> (<type>enum</type>)</term>
       <indexterm>
        <primary><varname>xmloption</> configuration parameter</primary>
       </indexterm>
@@ -4001,6 +4138,36 @@ SET XML OPTION { DOCUMENT | CONTENT };
         <application>initdb</application> will initialize the
         configuration file with a setting that corresponds to the
         behavior of the chosen <varname>lc_time</varname> locale.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-intervalstyle" xreflabel="IntervalStyle">
+      <term><varname>IntervalStyle</varname> (<type>enum</type>)</term>
+      <indexterm>
+       <primary><varname>IntervalStyle</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Sets the display format for interval values.
+        The value <literal>sql_standard</> will produce
+        output matching <acronym>SQL</acronym> standard interval literals.
+        The value <literal>postgres</> (which is the default) will produce
+        output matching <productname>PostgreSQL</> releases prior to 8.4
+        when the <xref linkend="guc-datestyle">
+        parameter was set to <literal>ISO</>.
+        The value <literal>postgres_verbose</> will produce output
+        matching <productname>PostgreSQL</> releases prior to 8.4
+        when the <varname>DateStyle</>
+        parameter was set to non-<literal>ISO</> output.
+        The value <literal>iso_8601</> will produce output matching the time
+        interval <quote>format with designators</> defined in section
+        4.4.3.2 of ISO 8601.
+       </para>
+       <para>
+        The <varname>IntervalStyle</> parameter also affects the
+        interpretation of ambiguous interval input.  See
+        <xref linkend="datatype-interval-input"> for more information.
        </para>
       </listitem>
      </varlistentry>
@@ -4153,9 +4320,9 @@ SET XML OPTION { DOCUMENT | CONTENT };
       </indexterm>
       <listitem>
        <para>
-        Sets the locale to use for formatting date and time values.
-        (Currently, this setting does nothing, but it might in the
-        future.)  Acceptable values are system-dependent; see <xref
+        Sets the locale to use for formatting dates and times, for example
+        with the <function>to_char</function> family of
+        functions. Acceptable values are system-dependent; see <xref
         linkend="locale"> for more information.  If this variable is
         set to the empty string (which is the default) then the value
         is inherited from the execution environment of the server in a
@@ -4192,20 +4359,6 @@ SET XML OPTION { DOCUMENT | CONTENT };
 
      <variablelist>
 
-     <varlistentry id="guc-explain-pretty-print" xreflabel="explain_pretty_print">
-      <term><varname>explain_pretty_print</varname> (<type>boolean</type>)</term>
-      <indexterm>
-       <primary><varname>explain_pretty_print</> configuration parameter</primary>
-      </indexterm>
-      <listitem>
-       <para>
-        Determines whether <command>EXPLAIN VERBOSE</> uses the
-        indented or non-indented format for displaying detailed
-        query-tree dumps. The default is <literal>on</>.
-       </para>
-      </listitem>
-     </varlistentry>
-
      <varlistentry id="guc-dynamic-library-path" xreflabel="dynamic_library_path">
       <term><varname>dynamic_library_path</varname> (<type>string</type>)</term>
       <indexterm>
@@ -4217,7 +4370,7 @@ SET XML OPTION { DOCUMENT | CONTENT };
         If a dynamically loadable module needs to be opened and the
         file name specified in the <command>CREATE FUNCTION</command> or
         <command>LOAD</command> command
-        does not have a directory component (i.e. the
+        does not have a directory component (i.e., the
         name does not contain a slash), the system will search this
         path for the required file.
        </para>
@@ -4387,7 +4540,7 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
         The shared lock table is created to track locks on
         <varname>max_locks_per_transaction</varname> * (<xref
         linkend="guc-max-connections"> + <xref
-        linkend="guc-max-prepared-transactions">) objects (e.g.  tables);
+        linkend="guc-max-prepared-transactions">) objects (e.g.,  tables);
         hence, no more than this many distinct objects can be locked at
         any one time.  This parameter controls the average number of object
         locks allocated for each transaction;  individual transactions
@@ -4478,7 +4631,7 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
      </varlistentry>
 
      <varlistentry id="guc-backslash-quote" xreflabel="backslash_quote">
-      <term><varname>backslash_quote</varname> (<type>string</type>)</term>
+      <term><varname>backslash_quote</varname> (<type>enum</type>)</term>
       <indexterm><primary>strings</><secondary>backslash quotes</></>
       <indexterm>
        <primary><varname>backslash_quote</> configuration parameter</primary>
@@ -4566,7 +4719,7 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
      </varlistentry>
 
      <varlistentry id="guc-regex-flavor" xreflabel="regex_flavor">
-      <term><varname>regex_flavor</varname> (<type>string</type>)</term>
+      <term><varname>regex_flavor</varname> (<type>enum</type>)</term>
       <indexterm><primary>regular expressions</></>
       <indexterm>
        <primary><varname>regex_flavor</> configuration parameter</primary>
@@ -4745,11 +4898,11 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
       </indexterm>
       <listitem>
        <para>
-        Reports whether <productname>PostgreSQL</productname> was built
-        with support for 64-bit-integer dates and times.  It is set by
-        configuring with <literal>--enable-integer-datetimes</literal>
-        when building <productname>PostgreSQL</productname>.  The
-        default value is <literal>off</literal>.
+        Reports whether <productname>PostgreSQL</> was built with
+        support for 64-bit-integer dates and times.  This can be
+        disabled by configuring with <literal>--disable-integer-datetimes</>
+        when building <productname>PostgreSQL</>.  The default value is
+        <literal>on</literal>.
        </para>
       </listitem>
      </varlistentry>
@@ -4763,7 +4916,7 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
        <para>
         Reports the locale in which sorting of textual data is done.
         See <xref linkend="locale"> for more information.
-        The value is determined when the database cluster is initialized.
+        This value is determined when a database is created.
        </para>
       </listitem>
      </varlistentry>
@@ -4777,7 +4930,7 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
        <para>
         Reports the locale that determines character classifications.
         See <xref linkend="locale"> for more information.
-        The value is determined when the database cluster is initialized.
+        This value is determined when a database is created.
         Ordinarily this will be the same as <varname>lc_collate</varname>,
         but for special applications it might be set differently.
        </para>
@@ -4828,6 +4981,22 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-segment-size" xreflabel="segment_size">
+      <term><varname>segment_size</varname> (<type>integer</type>)</term>
+      <indexterm>
+       <primary><varname>segment_size</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Reports the number of blocks (pages) that can be stored within a file
+        segment.  It is determined by the value of <literal>RELSEG_SIZE</>
+        when building the server.  The maximum size of a segment file in bytes
+        is equal to <varname>segment_size</> multiplied by
+        <varname>block_size</>; by default this is 1GB.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-server-encoding" xreflabel="server_encoding">
       <term><varname>server_encoding</varname> (<type>string</type>)</term>
       <indexterm>
@@ -4864,8 +5033,38 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
       </indexterm>
       <listitem>
        <para>
-        Reports the version number of the server as an integer. It is determined 
+        Reports the version number of the server as an integer. It is determined
         by the value of <literal>PG_VERSION_NUM</> when building the server.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wal-block-size" xreflabel="wal_block_size">
+      <term><varname>wal_block_size</varname> (<type>integer</type>)</term>
+      <indexterm>
+       <primary><varname>wal_block_size</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Reports the size of a WAL disk block.  It is determined by the value
+        of <literal>XLOG_BLCKSZ</> when building the server. The default value
+        is 8192 bytes.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wal-segment-size" xreflabel="wal_segment_size">
+      <term><varname>wal_segment_size</varname> (<type>integer</type>)</term>
+      <indexterm>
+       <primary><varname>wal_segment_size</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Reports the number of blocks (pages) in a WAL segment file.
+        The total size of a WAL segment file in bytes is equal to
+        <varname>wal_segment_size</> multiplied by <varname>wal_block_size</>;
+        by default this is 16MB.  See <xref linkend="wal-configuration"> for
+        more information.
        </para>
       </listitem>
      </varlistentry>
@@ -5067,15 +5266,161 @@ plruby.use_strict = true        # generates error: unknown class name
 
      <varlistentry>
       <term><varname>trace_locks</varname> (<type>boolean</type>)</term>
-      <term><varname>trace_lwlocks</varname> (<type>boolean</type>)</term>
-      <term><varname>trace_userlocks</varname> (<type>boolean</type>)</term>
-      <term><varname>trace_lock_oidmin</varname> (<type>boolean</type>)</term>
-      <term><varname>trace_lock_table</varname> (<type>boolean</type>)</term>
-      <term><varname>debug_deadlocks</varname> (<type>boolean</type>)</term>
-      <term><varname>log_btree_build_stats</varname> (<type>boolean</type>)</term>
+      <indexterm>
+       <primary><varname>trace_locks</> configuration parameter</primary>
+      </indexterm>
       <listitem>
        <para>
-        Various other code tracing and debugging options.
+        If on, emit information about lock usage.  Information dumped
+        includes the type of lock operation, the type of lock and the unique
+        identifier of the object being locked or unlocked.  Also included
+        are bitmasks for the lock types already granted on this object as
+        well as for the lock types awaited on this object.  For each lock
+        type a count of the number of granted locks and waiting locks is
+        also dumped as well as the totals.  An example of the log file output
+        is shown here:
+       </para>
+       <para>
+        LOG:  LockAcquire: new: lock(0xb7acd844) id(24688,24696,0,0,0,1)
+              grantMask(0) req(0,0,0,0,0,0,0)=0 grant(0,0,0,0,0,0,0)=0
+              wait(0) type(AccessShareLock)
+       </para>
+       <para>
+        LOG:  GrantLock: lock(0xb7acd844) id(24688,24696,0,0,0,1)
+              grantMask(2) req(1,0,0,0,0,0,0)=1 grant(1,0,0,0,0,0,0)=1
+              wait(0) type(AccessShareLock)
+
+       </para>
+       <para>
+        LOG:  UnGrantLock: updated: lock(0xb7acd844) id(24688,24696,0,0,0,1)
+              grantMask(0) req(0,0,0,0,0,0,0)=0 grant(0,0,0,0,0,0,0)=0
+              wait(0) type(AccessShareLock)
+       </para>
+       <para>
+        LOG:  CleanUpLock: deleting: lock(0xb7acd844) id(24688,24696,0,0,0,1)
+              grantMask(0) req(0,0,0,0,0,0,0)=0 grant(0,0,0,0,0,0,0)=0
+              wait(0) type(INVALID)
+       </para>
+       <para>
+        Details of the structure being dumped may be found in
+        src/include/storage/lock.h
+       </para>
+       <para>
+        This parameter is only available if the <symbol>LOCK_DEBUG</symbol>
+        macro was defined when <productname>PostgreSQL</productname> was
+        compiled.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><varname>trace_lwlocks</varname> (<type>boolean</type>)</term>
+      <indexterm>
+       <primary><varname>trace_lwlocks</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        If on, emit information about lightweight lock usage.  Lightweight
+        locks are intended primarily to provide mutual exclusion of access
+        to shared-memory data structures.
+       </para>
+       <para>
+        This parameter is only available if the <symbol>LOCK_DEBUG</symbol>
+        macro was defined when <productname>PostgreSQL</productname> was
+        compiled.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><varname>trace_userlocks</varname> (<type>boolean</type>)</term>
+      <indexterm>
+       <primary><varname>trace_userlocks</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        If on, emit information about user lock usage.  Output is the same
+        as for <symbol>trace_locks</symbol>, only for user locks.
+       </para>
+       <para>
+        User locks were removed as of PostgreSQL version 8.2.  This option
+        currently has no effect.
+       </para>
+       <para>
+        This parameter is only available if the <symbol>LOCK_DEBUG</symbol>
+        macro was defined when <productname>PostgreSQL</productname> was
+        compiled.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><varname>trace_lock_oidmin</varname> (<type>integer</type>)</term>
+      <indexterm>
+       <primary><varname>trace_lock_oidmin</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        If set, do not trace locks for tables below this OID. (use to avoid
+        output on system tables)
+       </para>
+       <para>
+        This parameter is only available if the <symbol>LOCK_DEBUG</symbol>
+        macro was defined when <productname>PostgreSQL</productname> was
+        compiled.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><varname>trace_lock_table</varname> (<type>integer</type>)</term>
+      <indexterm>
+       <primary><varname>trace_lock_table</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Unconditionally trace locks on this table (OID).
+       </para>
+       <para>
+        This parameter is only available if the <symbol>LOCK_DEBUG</symbol>
+        macro was defined when <productname>PostgreSQL</productname> was
+        compiled.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><varname>debug_deadlocks</varname> (<type>boolean</type>)</term>
+      <indexterm>
+       <primary><varname>debug_deadlocks</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        If set, dumps information about all current locks when a
+        DeadLockTimeout occurs.
+       </para>
+       <para>
+        This parameter is only available if the <symbol>LOCK_DEBUG</symbol>
+        macro was defined when <productname>PostgreSQL</productname> was
+        compiled.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><varname>log_btree_build_stats</varname> (<type>boolean</type>)</term>
+      <indexterm>
+       <primary><varname>log_btree_build_stats</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        If set, logs system resource usage statistics (memory and CPU) on
+        various btree operations.
+       </para>
+       <para>
+        This parameter is only available if the <symbol>BTREE_BUILD_STATS</symbol>
+        macro was defined when <productname>PostgreSQL</productname> was
+        compiled.
        </para>
       </listitem>
      </varlistentry>

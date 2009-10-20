@@ -3,7 +3,7 @@
  * globals.c
  *	  global variable declarations
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -33,9 +33,10 @@ volatile uint32 InterruptHoldoffCount = 0;
 volatile uint32 CritSectionCount = 0;
 
 int			MyProcPid;
-time_t		MyStartTime;
+pg_time_t	MyStartTime;
 struct Port *MyProcPort;
 long		MyCancelKey;
+int			MyPMChildSlot;
 
 /*
  * DataDir is the absolute path to the top level of the PGDATA directory tree.
@@ -88,6 +89,7 @@ bool		ExitOnAnyError = false;
 
 int			DateStyle = USE_ISO_DATES;
 int			DateOrder = DATEORDER_MDY;
+int			IntervalStyle = INTSTYLE_POSTGRES;
 bool		HasCTZSet = false;
 int			CTimeZone = 0;
 

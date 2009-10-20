@@ -12,6 +12,17 @@
 
 #include "cubedata.h"
 
+/*
+ * Bison doesn't allocate anything that needs to live across parser calls,
+ * so we can easily have it use palloc instead of malloc.  This prevents
+ * memory leaks if we error out during parsing.  Note this only works with
+ * bison >= 2.0.  However, in bison 1.875 the default is to use alloca()
+ * if possible, so there's not really much problem anyhow, at least if
+ * you're building with gcc.
+ */
+#define YYMALLOC palloc
+#define YYFREE   pfree
+
 extern int cube_yylex(void);
 
 static char *scanbuf;
@@ -27,6 +38,7 @@ static NDBOX * write_point_as_box(char *s, int dim);
 %}
 
 /* BISON Declarations */
+%expect 0
 %name-prefix="cube_yy"
 
 %token CUBEFLOAT O_PAREN C_PAREN O_BRACKET C_BRACKET COMMA

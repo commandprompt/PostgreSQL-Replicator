@@ -1,6 +1,5 @@
 /* Processed by ecpg (regression mode) */
 /* These include files are added by the preprocessor */
-#include <ecpgtype.h>
 #include <ecpglib.h>
 #include <ecpgerrno.h>
 #include <sqlca.h>
@@ -36,16 +35,16 @@ main(void)
 		 
 	
 #line 14 "dt_test.pgc"
- date  date1    ;
+ date date1 ;
  
 #line 15 "dt_test.pgc"
- timestamp  ts1    ;
+ timestamp ts1 ;
  
 #line 16 "dt_test.pgc"
- interval * iv1    ,  iv2    ;
+ interval * iv1 , iv2 ;
  
 #line 17 "dt_test.pgc"
- char * text    ;
+ char * text ;
 /* exec sql end declare section */
 #line 18 "dt_test.pgc"
 
@@ -57,53 +56,59 @@ main(void)
 	int i;
 
         ECPGdebug(1, stderr);
-        /* exec sql whenever sqlerror  do sqlprint (  ) ; */
+        /* exec sql whenever sqlerror  do sqlprint ( ) ; */
 #line 27 "dt_test.pgc"
 
         { ECPGconnect(__LINE__, 0, "regress1" , NULL, NULL , NULL, 0); 
 #line 28 "dt_test.pgc"
 
-if (sqlca.sqlcode < 0) sqlprint (  );}
+if (sqlca.sqlcode < 0) sqlprint ( );}
 #line 28 "dt_test.pgc"
 
-        { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create  table date_test ( d date    , ts timestamp    )    ", ECPGt_EOIT, ECPGt_EORT);
+        { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create table date_test ( d date , ts timestamp )", ECPGt_EOIT, ECPGt_EORT);
 #line 29 "dt_test.pgc"
 
-if (sqlca.sqlcode < 0) sqlprint (  );}
+if (sqlca.sqlcode < 0) sqlprint ( );}
 #line 29 "dt_test.pgc"
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "set datestyle to iso", ECPGt_EOIT, ECPGt_EORT);
 #line 30 "dt_test.pgc"
 
-if (sqlca.sqlcode < 0) sqlprint (  );}
+if (sqlca.sqlcode < 0) sqlprint ( );}
 #line 30 "dt_test.pgc"
+
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "set intervalstyle to postgres_verbose", ECPGt_EOIT, ECPGt_EORT);
+#line 31 "dt_test.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint ( );}
+#line 31 "dt_test.pgc"
 
 
 	date1 = PGTYPESdate_from_asc(d1, NULL); 
 	ts1 = PGTYPEStimestamp_from_asc(t1, NULL); 
 
-	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "insert into date_test ( d  , ts  ) values (  $1  ,  $2  ) ", 
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "insert into date_test ( d , ts ) values ( $1  , $2  )", 
 	ECPGt_date,&(date1),(long)1,(long)1,sizeof(date), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_timestamp,&(ts1),(long)1,(long)1,sizeof(timestamp), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 35 "dt_test.pgc"
+#line 36 "dt_test.pgc"
 
-if (sqlca.sqlcode < 0) sqlprint (  );}
-#line 35 "dt_test.pgc"
+if (sqlca.sqlcode < 0) sqlprint ( );}
+#line 36 "dt_test.pgc"
 
 
-	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select  *  from date_test where d =  $1   ", 
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select * from date_test where d = $1 ", 
 	ECPGt_date,&(date1),(long)1,(long)1,sizeof(date), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, 
 	ECPGt_date,&(date1),(long)1,(long)1,sizeof(date), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_timestamp,&(ts1),(long)1,(long)1,sizeof(timestamp), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
-#line 37 "dt_test.pgc"
+#line 38 "dt_test.pgc"
 
-if (sqlca.sqlcode < 0) sqlprint (  );}
-#line 37 "dt_test.pgc"
+if (sqlca.sqlcode < 0) sqlprint ( );}
+#line 38 "dt_test.pgc"
 
 
 	text = PGTYPESdate_to_asc(date1);
@@ -417,17 +422,24 @@ if (sqlca.sqlcode < 0) sqlprint (  );}
 	printf("timestamp_defmt_asc(%s, %s) = %s, error: %d\n", in, fmt, text, i);
 	free(text);
 
-	{ ECPGtrans(__LINE__, NULL, "rollback");
-#line 350 "dt_test.pgc"
+	in = "1234567890";
+	fmt = "%s";
+	i = PGTYPEStimestamp_defmt_asc(in, fmt, &ts1);
+	text = PGTYPEStimestamp_to_asc(ts1);
+	printf("timestamp_defmt_asc(%s, %s) = %s, error: %d\n", in, fmt, text, i);
+	free(text);
 
-if (sqlca.sqlcode < 0) sqlprint (  );}
-#line 350 "dt_test.pgc"
+	{ ECPGtrans(__LINE__, NULL, "rollback");
+#line 358 "dt_test.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint ( );}
+#line 358 "dt_test.pgc"
 
         { ECPGdisconnect(__LINE__, "CURRENT");
-#line 351 "dt_test.pgc"
+#line 359 "dt_test.pgc"
 
-if (sqlca.sqlcode < 0) sqlprint (  );}
-#line 351 "dt_test.pgc"
+if (sqlca.sqlcode < 0) sqlprint ( );}
+#line 359 "dt_test.pgc"
 
 
 	return (0);

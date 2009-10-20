@@ -4,6 +4,7 @@
 #define _ECPG_PREPROC_EXTERN_H
 
 #include "type.h"
+#include "parser/keywords.h"
 
 #include <errno.h>
 #ifndef CHAR_BIT
@@ -38,8 +39,7 @@ extern char *yytext,
 #ifdef YYDEBUG
 extern int	yydebug;
 #endif
-extern int	yylineno,
-			yyleng;
+extern int	yylineno;
 extern FILE *yyin,
 		   *yyout;
 extern char *output_filename;
@@ -73,8 +73,10 @@ extern int	base_yylex(void);
 extern void base_yyerror(const char *);
 extern void *mm_alloc(size_t), *mm_realloc(void *, size_t);
 extern char *mm_strdup(const char *);
-extern void mmerror(int, enum errortype, char *,...);
-extern const ScanKeyword *ScanCKeywordLookup(char *);
+extern void
+mmerror(int, enum errortype, const char *,...)
+/* This extension allows gcc to check the format string */
+__attribute__((format(printf, 3, 4)));
 extern void output_get_descr_header(char *);
 extern void output_get_descr(char *, char *);
 extern void output_set_descr_header(char *);
@@ -96,8 +98,9 @@ extern void check_indicator(struct ECPGtype *);
 extern void remove_typedefs(int);
 extern void remove_variables(int);
 extern struct variable *new_variable(const char *, struct ECPGtype *, int);
-extern const ScanKeyword *ScanKeywordLookup(char *text);
-extern const ScanKeyword *DoLookup(char *, const ScanKeyword *, const ScanKeyword *);
+extern const ScanKeyword *ScanCKeywordLookup(const char *);
+extern const ScanKeyword *ScanECPGKeywordLookup(const char *text);
+extern const ScanKeyword *DoLookup(const char *, const ScanKeyword *, const ScanKeyword *);
 extern void scanner_init(const char *);
 extern void parser_init(void);
 extern void scanner_finish(void);

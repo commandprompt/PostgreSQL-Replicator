@@ -6,6 +6,7 @@ PostgreSQL documentation
 <refentry id="SQL-SET">
  <refmeta>
   <refentrytitle id="SQL-SET-TITLE">SET</refentrytitle>
+  <manvolnum>7</manvolnum>
   <refmiscinfo>SQL - Language Statements</refmiscinfo>
  </refmeta>
 
@@ -151,6 +152,17 @@ SET [ SESSION | LOCAL ] TIME ZONE { <replaceable class="PARAMETER">timezone</rep
 
    <variablelist>
     <varlistentry>
+     <term><literal>SCHEMA</literal></term>
+     <listitem>
+      <para>
+       <literal>SET SCHEMA '<replaceable>value</>'</> is an alias for
+       <literal>SET search_path TO <replaceable>value</></>.  Only one
+       schema can be specified using this syntax.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
      <term><literal>NAMES</literal></term>
      <listitem>
       <para>
@@ -166,7 +178,7 @@ SET [ SESSION | LOCAL ] TIME ZONE { <replaceable class="PARAMETER">timezone</rep
       <para>
        Sets the internal seed for the random number generator (the
        function <function>random</function>).  Allowed values are
-       floating-point numbers between 0 and 1, which are then
+       floating-point numbers between -1 and 1, which are then
        multiplied by 2<superscript>31</>-1.
       </para>
 

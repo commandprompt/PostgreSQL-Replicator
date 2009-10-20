@@ -22,6 +22,11 @@ sub new
         strver   => '',
     };
     bless $self;
+	# integer_datetimes is now the default
+	$options->{integer_datetimes} = 1 
+		unless exists $options->{integer_datetimes};
+    $options->{float4byval} = 1
+        unless exists $options->{float4byval};
     if ($options->{xml})
     {
         if (!($options->{xslt} && $options->{iconv}))
@@ -29,6 +34,23 @@ sub new
             die "XML requires both XSLT and ICONV\n";
         }
     }
+	$options->{blocksize} = 8
+		unless $options->{blocksize}; # undef or 0 means default
+	die "Bad blocksize $options->{blocksize}"
+		unless grep {$_ == $options->{blocksize}} (1,2,4,8,16,32);
+	$options->{segsize} = 1
+		unless $options->{segsize}; # undef or 0 means default
+	# only allow segsize 1 for now, as we can't do large files yet in windows
+	die "Bad segsize $options->{segsize}"
+		unless $options->{segsize} == 1;
+	$options->{wal_blocksize} = 8
+		unless $options->{wal_blocksize}; # undef or 0 means default
+	die "Bad wal_blocksize $options->{wal_blocksize}"
+		unless grep {$_ == $options->{wal_blocksize}} (1,2,4,8,16,32,64);
+	$options->{wal_segsize} = 16
+		unless $options->{wal_segsize}; # undef or 0 means default
+	die "Bad wal_segsize $options->{wal_segsize}"
+		unless grep {$_ == $options->{wal_segsize}} (1,2,4,8,16,32,64);
     return $self;
 }
 
@@ -100,9 +122,11 @@ sub GenerateFiles
         {
             s{PG_VERSION "[^"]+"}{PG_VERSION "$self->{strver}"};
             s{PG_VERSION_NUM \d+}{PG_VERSION_NUM $self->{numver}};
-s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY(z)\n#define PG_VERSION_STR "PostgreSQL $self->{strver}, compiled by Visual C++ build " __STRINGIFY2(_MSC_VER)};
+            # XXX: When we support 64-bit, need to remove this hardcoding
+s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY(z)\n#define PG_VERSION_STR "PostgreSQL $self->{strver}, compiled by Visual C++ build " __STRINGIFY2(_MSC_VER) ", 32-bit"};
             print O;
         }
+		print O "#define PG_MAJORVERSION \"$self->{majorver}\"\n";
         print O "#define LOCALEDIR \"/share/locale\"\n" if ($self->{options}->{nls});
         print O "/* defines added by config steps */\n";
         print O "#ifndef IGNORE_CONFIGURED_SETTINGS\n";
@@ -111,7 +135,35 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
         print O "#define USE_LDAP 1\n" if ($self->{options}->{ldap});
         print O "#define HAVE_LIBZ 1\n" if ($self->{options}->{zlib});
         print O "#define USE_SSL 1\n" if ($self->{options}->{openssl});
-        print O "#define ENABLE_NLS 1\n" if ($self->{options}->{nls});
+		print O "#define ENABLE_NLS 1\n" if ($self->{options}->{nls});
+
+		print O "#define BLCKSZ ",1024 * $self->{options}->{blocksize},"\n";
+		print O "#define RELSEG_SIZE ",
+			(1024 / $self->{options}->{blocksize}) * 
+				$self->{options}->{segsize} * 1024, "\n";
+		print O "#define XLOG_BLCKSZ ",
+			1024 * $self->{options}->{wal_blocksize},"\n";
+		print O "#define XLOG_SEG_SIZE (",
+			$self->{options}->{wal_segsize}," * 1024 * 1024)\n";
+        
+        if ($self->{options}->{float4byval}) 
+        {
+            print O "#define USE_FLOAT4_BYVAL 1\n";
+            print O "#define FLOAT4PASSBYVAL true\n";
+        }
+        else
+        {
+            print O "#define FLOAT4PASSBYVAL false\n";
+        }
+        if ($self->{options}->{float8byval})
+        {
+            print O "#define USE_FLOAT8_BYVAL 1\n";
+            print O "#define FLOAT8PASSBYVAL true\n";
+        }
+        else
+        {
+            print O "#define FLOAT8PASSBYVAL false\n";
+        }
 
         if ($self->{options}->{uuid})
         {
@@ -148,62 +200,20 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
     $self->GenerateDefFile("src\\interfaces\\ecpg\\compatlib\\compatlib.def","src\\interfaces\\ecpg\\compatlib\\exports.txt","LIBECPG_COMPAT");
     $self->GenerateDefFile("src\\interfaces\\ecpg\\pgtypeslib\\pgtypeslib.def","src\\interfaces\\ecpg\\pgtypeslib\\exports.txt","LIBPGTYPES");
 
-    if (IsNewer("src\\backend\\utils\\fmgrtab.c","src\\include\\catalog\\pg_proc.h"))
+    if (IsNewer('src\backend\utils\fmgrtab.c','src\include\catalog\pg_proc.h'))
     {
         print "Generating fmgrtab.c and fmgroids.h...\n";
-        open(I,"src\\include\\catalog\\pg_proc.h") || confess "Could not open pg_proc.h";
-        my @fmgr = ();
-        my %seenit;
-        while (<I>)
-        {
-            next unless (/^DATA/);
-            s/^.*OID[^=]*=[^0-9]*//;
-            s/\(//g;
-            s/[ \t]*\).*$//;
-            my @p = split;
-            next if ($p[4] ne "12");
-            push @fmgr,
-              {
-                oid     => $p[0],
-                proname => $p[1],
-                prosrc  => $p[$#p-3],
-                nargs   => $p[12],
-                strict  => $p[9],
-                retset  => $p[10],
-              };
-        }
-        close(I);
-
-        open(H,'>', 'src\include\utils\fmgroids.h')
-          ||confess "Could not open fmgroids.h";
-        print H
-          "/* fmgroids.h generated for Visual C++ */\n#ifndef FMGROIDS_H\n#define FMGROIDS_H\n\n";
-        open(T,">src\\backend\\utils\\fmgrtab.c") || confess "Could not open fmgrtab.c";
-        print T
-"/* fmgrtab.c generated for Visual C++ */\n#include \"postgres.h\"\n#include \"utils/fmgrtab.h\"\n\n";
-        foreach my $s (sort {$a->{oid} <=> $b->{oid}} @fmgr)
-        {
-            next if $seenit{$s->{prosrc}};
-            $seenit{$s->{prosrc}} = 1;
-            print H "#define F_" . uc $s->{prosrc} . " $s->{oid}\n";
-            print T "extern Datum $s->{prosrc} (PG_FUNCTION_ARGS);\n";
-        }
-        print H "\n#endif\n /* FMGROIDS_H */\n";
-        close(H);
-        print T "const FmgrBuiltin fmgr_builtins[] = {\n";
-        my %bmap;
-        $bmap{'t'} = 'true';
-        $bmap{'f'} = 'false';
-        foreach my $s (sort {$a->{oid} <=> $b->{oid}} @fmgr)
-        {
-            print T
-"  { $s->{oid}, \"$s->{prosrc}\", $s->{nargs}, $bmap{$s->{strict}}, $bmap{$s->{retset}}, $s->{prosrc} },\n";
-        }
-
-        print T
-" { 0, NULL, 0, false, false, NULL }\n};\n\nconst int fmgr_nbuiltins = (sizeof(fmgr_builtins) / sizeof(FmgrBuiltin)) - 1;\n";
-        close(T);
+        chdir('src\backend\utils');
+        system("perl Gen_fmgrtab.pl ../../../src/include/catalog/pg_proc.h");
+        chdir('..\..\..');
+        copyFile('src\backend\utils\fmgroids.h','src\include\utils\fmgroids.h');
     }
+
+    if (IsNewer('src\include\utils\probes.h','src\backend\utils\probes.d'))
+    {
+		print "Generating probes.h...\n";
+		system('psed -f src\backend\utils\Gen_dummy_probes.sed src\backend\utils\probes.d > src\include\utils\probes.h'); 
+	}
 
     if (IsNewer('src\interfaces\libpq\libpq.rc','src\interfaces\libpq\libpq.rc.in'))
     {
@@ -227,6 +237,19 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
         chdir('src\bin\psql');
         system("perl create_help.pl ../../../doc/src/sgml/ref sql_help.h");
         chdir('..\..\..');
+    }
+
+    if (
+        IsNewer(
+            'src\interfaces\ecpg\preproc\preproc.y',
+            'src\backend\parser\gram.y'
+        )
+      )
+    {
+        print "Generating preproc.y...\n";
+        chdir('src\interfaces\ecpg\preproc');
+        system('perl parse.pl < ..\..\..\backend\parser\gram.y > preproc.y');
+        chdir('..\..\..\..');
     }
 
     if (
@@ -264,6 +287,7 @@ EOF
 #define PKGLIBDIR "/lib"
 #define LOCALEDIR "/share/locale"
 #define DOCDIR "/doc"
+#define HTMLDIR "/doc"
 #define MANDIR "/man"
 EOF
         close(O);

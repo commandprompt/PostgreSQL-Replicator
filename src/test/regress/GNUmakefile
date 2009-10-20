@@ -3,7 +3,7 @@
 # GNUmakefile--
 #    Makefile for src/test/regress (the regression tests)
 #
-# Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+# Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
 # $PostgreSQL$
@@ -13,11 +13,6 @@
 subdir = src/test/regress
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
-
-contribdir = $(top_builddir)/contrib
-
-# port number for temp-installation test postmaster
-TEMP_PORT = 5$(DEF_PGPORT)
 
 # file with extra config for temp build
 TEMP_CONF =
@@ -67,8 +62,11 @@ pg_regress.o: pg_regress.c $(top_builddir)/src/port/pg_config_paths.h
 $(top_builddir)/src/port/pg_config_paths.h: $(top_builddir)/src/Makefile.global
 	$(MAKE) -C $(top_builddir)/src/port pg_config_paths.h
 
-install: pg_regress$(X)
+install: all installdirs
 	$(INSTALL_PROGRAM) pg_regress$(X) '$(DESTDIR)$(pgxsdir)/$(subdir)/pg_regress$(X)'
+
+installdirs:
+	$(mkinstalldirs) '$(DESTDIR)$(pgxsdir)/$(subdir)'
 
 uninstall:
 	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/pg_regress$(X)'
@@ -77,77 +75,79 @@ uninstall:
 # Build dynamically-loaded object file for CREATE FUNCTION ... LANGUAGE C.
 
 NAME = regress
-SO_MAJOR_VERSION= 0
-SO_MINOR_VERSION= 0
 OBJS = regress.o
-SHLIB_LINK = $(BE_DLLLIBS)
 
 include $(top_srcdir)/src/Makefile.shlib
 
-all: $(NAME)$(DLSUFFIX)
-
-$(NAME)$(DLSUFFIX): $(shlib)
-	rm -f $(NAME)$(DLSUFFIX)
-	$(LN_S) $(shlib) $(NAME)$(DLSUFFIX)
+all: all-lib
 
 # Test input and expected files.  These are created by pg_regress itself, so we
 # don't have a rule to create them.  We do need rules to clean them however.
-ifile_list := $(subst .source,, $(notdir $(wildcard $(top_srcdir)/$(subdir)/input/*.source)))
-input_files  := $(foreach file, $(ifile_list), sql/$(file).sql)
-ofile_list := $(subst .source,, $(notdir $(wildcard $(top_srcdir)/$(subdir)/output/*.source)))
-output_files := $(foreach file, $(ofile_list), expected/$(file).out)
-
-ifneq ($(PORTNAME),win32)
-abs_srcdir := $(shell cd $(srcdir) && pwd)
-abs_builddir := $(shell pwd)
-else
-abs_srcdir := $(shell cd $(srcdir) && pwd -W)
-abs_builddir := $(shell pwd -W)
-endif
-
-# When doing a VPATH build, copy over the remaining .sql and .out
-# files so that the driver script can find them.  We have to use an
-# absolute path for the targets, because otherwise make will try to
-# locate the missing files using VPATH, and will find them in
-# $(srcdir), but the point here is that we want to copy them from
-# $(srcdir) to the build directory.
-
-ifdef VPATH
-remaining_files_src := $(wildcard $(srcdir)/sql/*.sql) $(wildcard $(srcdir)/expected/*.out) $(srcdir)/resultmap
-remaining_files_build := $(patsubst $(srcdir)/%, $(abs_builddir)/%, $(remaining_files_src))
-
-all: $(remaining_files_build)
-$(remaining_files_build): $(abs_builddir)/%: $(srcdir)/%
-	ln -s $< $@
-endif
+input_files = $(patsubst $(srcdir)/input/%.source,sql/%.sql, $(wildcard $(srcdir)/input/*.source))
+output_files := $(patsubst $(srcdir)/output/%.source,expected/%.out, $(wildcard $(srcdir)/output/*.source))
 
 
-# And finally some extra C modules...
+# not installed by default
 
-all: all-spi tablespace-setup
+regress_data_files = \
+	$(filter-out $(addprefix $(srcdir)/,$(output_files)),$(wildcard $(srcdir)/expected/*.out)) \
+	$(wildcard $(srcdir)/input/*.source) \
+	$(wildcard $(srcdir)/output/*.source) \
+	$(filter-out $(addprefix $(srcdir)/,$(input_files)),$(wildcard $(srcdir)/sql/*.sql)) \
+	$(wildcard $(srcdir)/data/*.data) \
+	$(srcdir)/parallel_schedule $(srcdir)/serial_schedule $(srcdir)/resultmap
 
-.PHONY: all-spi
-all-spi:
-	$(MAKE) -C $(contribdir)/spi refint$(DLSUFFIX) autoinc$(DLSUFFIX)
+install-tests: all install install-lib installdirs-tests
+	$(MAKE) -C $(top_builddir)/contrib/spi install
+	for file in $(regress_data_files); do \
+	  $(INSTALL_DATA) $$file '$(DESTDIR)$(pkglibdir)/regress/'$$file; \
+	done
+
+installdirs-tests: installdirs
+	$(mkinstalldirs)  $(patsubst $(srcdir)/%/,'$(DESTDIR)$(pkglibdir)/regress/%',$(sort $(dir $(regress_data_files))))
+
+
+# Get some extra C modules from contrib/spi...
+
+all: refint$(DLSUFFIX) autoinc$(DLSUFFIX)
+
+refint$(DLSUFFIX): $(top_builddir)/contrib/spi/refint$(DLSUFFIX)
+	cp $< $@
+
+autoinc$(DLSUFFIX): $(top_builddir)/contrib/spi/autoinc$(DLSUFFIX)
+	cp $< $@
+
+$(top_builddir)/contrib/spi/refint$(DLSUFFIX): $(top_srcdir)/contrib/spi/refint.c
+	$(MAKE) -C $(top_builddir)/contrib/spi refint$(DLSUFFIX)
+
+$(top_builddir)/contrib/spi/autoinc$(DLSUFFIX): $(top_srcdir)/contrib/spi/autoinc.c
+	$(MAKE) -C $(top_builddir)/contrib/spi autoinc$(DLSUFFIX)
+
 
 # Tablespace setup
+
+all: tablespace-setup
+
 .PHONY: tablespace-setup
 tablespace-setup:
-	-rm -rf ./testtablespace
+	rm -rf ./testtablespace
 	mkdir ./testtablespace
+
 
 ##
 ## Run tests
 ##
 
+pg_regress_call = ./pg_regress --inputdir=$(srcdir) --dlpath=. --multibyte=$(MULTIBYTE) --load-language=plpgsql $(NOLOCALE)
+
 check: all
-	./pg_regress --temp-install=./tmp_check --top-builddir=$(top_builddir) --srcdir=$(abs_srcdir) --temp-port=$(TEMP_PORT) --schedule=$(srcdir)/parallel_schedule --multibyte=$(MULTIBYTE) --load-language=plpgsql $(MAXCONNOPT) $(NOLOCALE) $(TEMP_CONF)
+	$(pg_regress_call) --temp-install=./tmp_check --top-builddir=$(top_builddir) --schedule=$(srcdir)/parallel_schedule $(MAXCONNOPT) $(TEMP_CONF)
 
 installcheck: all
-	./pg_regress --psqldir=$(PSQLDIR) --schedule=$(srcdir)/serial_schedule --srcdir=$(abs_srcdir) --multibyte=$(MULTIBYTE) --load-language=plpgsql $(NOLOCALE)
+	$(pg_regress_call) --psqldir=$(PSQLDIR) --schedule=$(srcdir)/serial_schedule
 
 installcheck-parallel: all
-	./pg_regress --psqldir=$(PSQLDIR) --schedule=$(srcdir)/parallel_schedule --srcdir=$(abs_srcdir) --multibyte=$(MULTIBYTE) --load-language=plpgsql $(MAXCONNOPT) $(NOLOCALE)
+	$(pg_regress_call) --psqldir=$(PSQLDIR) --schedule=$(srcdir)/parallel_schedule $(MAXCONNOPT)
 
 
 # old interfaces follow...
@@ -157,10 +157,10 @@ runtest: installcheck
 runtest-parallel: installcheck-parallel
 
 bigtest: all
-	./pg_regress --psqldir=$(PSQLDIR) --schedule=$(srcdir)/serial_schedule --srcdir=$(abs_srcdir) --multibyte=$(MULTIBYTE) --load-language=plpgsql $(NOLOCALE) numeric_big 
+	$(pg_regress_call) --psqldir=$(PSQLDIR) --schedule=$(srcdir)/serial_schedule numeric_big 
 
 bigcheck: all
-	./pg_regress --temp-install=./tmp_check --top-builddir=$(top_builddir) --srcdir=$(abs_srcdir) --temp-port=$(TEMP_PORT) --schedule=$(srcdir)/parallel_schedule --multibyte=$(MULTIBYTE) --load-language=plpgsql $(MAXCONNOPT) $(NOLOCALE) numeric_big
+	$(pg_regress_call) --temp-install=./tmp_check --top-builddir=$(top_builddir) --schedule=$(srcdir)/parallel_schedule $(MAXCONNOPT) numeric_big
 
 
 ##
@@ -169,16 +169,9 @@ bigcheck: all
 
 clean distclean maintainer-clean: clean-lib
 # things built by `all' target
-	rm -f $(NAME)$(DLSUFFIX) $(OBJS)
-	$(MAKE) -C $(contribdir)/spi clean
-	rm -f $(output_files) $(input_files) pg_regress_main.o pg_regress.o pg_regress$(X)
+	rm -f $(OBJS) refint$(DLSUFFIX) autoinc$(DLSUFFIX) pg_regress_main.o pg_regress.o pg_regress$(X)
 # things created by various check targets
+	rm -f $(output_files) $(input_files)
 	rm -rf testtablespace
 	rm -rf results tmp_check log
 	rm -f regression.diffs regression.out regress.out run_check.out
-ifeq ($(PORTNAME), cygwin)
-	rm -f regress.def
-endif
-ifdef VPATH
-	rm -f $(remaining_files_build)
-endif

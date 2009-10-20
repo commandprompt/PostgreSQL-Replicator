@@ -5,7 +5,7 @@
  *		  Prototypes and macros around system calls, used to help make
  *		  threaded libraries reentrant and safe to use from threaded applications.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
@@ -15,13 +15,6 @@
 #include "c.h"
 
 #include <pwd.h>
-#if defined(FRONTEND) && defined(ENABLE_THREAD_SAFETY)
-#ifdef WIN32
-#include "pthread-win32.h"
-#else
-#include <pthread.h>
-#endif
-#endif
 
 
 /*
@@ -50,7 +43,7 @@
  *	The current setup is to try threading in this order:
  *
  *		use *_r function names if they exit
- *			(*_THREADSAFE=ye)
+ *			(*_THREADSAFE=yes)
  *		use non-*_r functions if they are thread-safe
  *
  *	One thread-safe solution for gethostbyname() might be to use getaddrinfo().

@@ -3,7 +3,7 @@
  * indexcmds.c
  *	  POSTGRES define and remove index code.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,7 +21,6 @@
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
-#include "catalog/dependency.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
@@ -33,11 +32,12 @@
 #include "commands/tablespace.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
@@ -47,7 +47,9 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
 /* non-export function prototypes */
@@ -128,12 +130,14 @@ DefineIndex(RangeVar *heapRelation,
 	int			numberOfAttributes;
 	VirtualTransactionId *old_lockholders;
 	VirtualTransactionId *old_snapshots;
+	int			n_old_snapshots;
 	LockRelId	heaprelid;
 	LOCKTAG		heaplocktag;
 	Snapshot	snapshot;
 	Relation	pg_index;
 	HeapTuple	indexTuple;
 	Form_pg_index indexForm;
+	int			i;
 
 	/*
 	 * count attributes in index
@@ -173,7 +177,7 @@ DefineIndex(RangeVar *heapRelation,
 	/*
 	 * Don't try to CREATE INDEX on temp tables of other backends.
 	 */
-	if (isOtherTempNamespace(namespaceId))
+	if (RELATION_IS_OTHER_TEMP(rel))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot create indexes on temporary tables of other sessions")));
@@ -396,7 +400,7 @@ DefineIndex(RangeVar *heapRelation,
 	/*
 	 * Parse AM-specific options, convert to text array form, validate.
 	 */
-	reloptions = transformRelOptions((Datum) 0, options, false, false);
+	reloptions = transformRelOptions((Datum) 0, options, NULL, NULL, false, false);
 
 	(void) index_reloptions(amoptions, reloptions, true);
 
@@ -481,6 +485,7 @@ DefineIndex(RangeVar *heapRelation,
 	 */
 	LockRelationIdForSession(&heaprelid, ShareUpdateExclusiveLock);
 
+	PopActiveSnapshot();
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
@@ -539,7 +544,7 @@ DefineIndex(RangeVar *heapRelation,
 	indexRelation = index_open(indexRelationId, RowExclusiveLock);
 
 	/* Set ActiveSnapshot since functions in the indexes may need it */
-	ActiveSnapshot = CopySnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(GetTransactionSnapshot());
 
 	/* We have to re-build the IndexInfo struct, since it was lost in commit */
 	indexInfo = BuildIndexInfo(indexRelation);
@@ -578,6 +583,9 @@ DefineIndex(RangeVar *heapRelation,
 
 	heap_close(pg_index, RowExclusiveLock);
 
+	/* we can do away with our snapshot */
+	PopActiveSnapshot();
+
 	/*
 	 * Commit this transaction to make the indisready update visible.
 	 */
@@ -605,7 +613,7 @@ DefineIndex(RangeVar *heapRelation,
 	 * snapshot treats as committed.  If such a recently-committed transaction
 	 * deleted tuples in the table, we will not include them in the index; yet
 	 * those transactions which see the deleting one as still-in-progress will
-	 * expect them to be there once we mark the index as valid.
+	 * expect such tuples to be there once we mark the index as valid.
 	 *
 	 * We solve this by waiting for all endangered transactions to exit before
 	 * we mark the index as valid.
@@ -613,8 +621,8 @@ DefineIndex(RangeVar *heapRelation,
 	 * We also set ActiveSnapshot to this snap, since functions in indexes may
 	 * need a snapshot.
 	 */
-	snapshot = CopySnapshot(GetTransactionSnapshot());
-	ActiveSnapshot = snapshot;
+	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(snapshot);
 
 	/*
 	 * Scan the index and the heap, insert any missing index entries.
@@ -628,27 +636,70 @@ DefineIndex(RangeVar *heapRelation,
 	 * transactions that might have older snapshots.  Obtain a list of VXIDs
 	 * of such transactions, and wait for them individually.
 	 *
-	 * We can exclude any running transactions that have xmin >= the xmax of
-	 * our reference snapshot, since they are clearly not interested in any
-	 * missing older tuples.  Transactions in other DBs aren't a problem
-	 * either, since they'll never even be able to see this index.
+	 * We can exclude any running transactions that have xmin > the xmin of
+	 * our reference snapshot; their oldest snapshot must be newer than ours.
+	 * We can also exclude any transactions that have xmin = zero, since they
+	 * evidently have no live snapshot at all (and any one they might be in
+	 * process of taking is certainly newer than ours).  Transactions in other
+	 * DBs can be ignored too, since they'll never even be able to see this
+	 * index.
 	 *
 	 * We can also exclude autovacuum processes and processes running manual
 	 * lazy VACUUMs, because they won't be fazed by missing index entries
-	 * either.  (Manual ANALYZEs, however, can't be excluded because they
+	 * either.	(Manual ANALYZEs, however, can't be excluded because they
 	 * might be within transactions that are going to do arbitrary operations
 	 * later.)
 	 *
 	 * Also, GetCurrentVirtualXIDs never reports our own vxid, so we need not
 	 * check for that.
+	 *
+	 * If a process goes idle-in-transaction with xmin zero, we do not need to
+	 * wait for it anymore, per the above argument.  We do not have the
+	 * infrastructure right now to stop waiting if that happens, but we can at
+	 * least avoid the folly of waiting when it is idle at the time we would
+	 * begin to wait.  We do this by repeatedly rechecking the output of
+	 * GetCurrentVirtualXIDs.  If, during any iteration, a particular vxid
+	 * doesn't show up in the output, we know we can forget about it.
 	 */
-	old_snapshots = GetCurrentVirtualXIDs(ActiveSnapshot->xmax, false,
-										  PROC_IS_AUTOVACUUM | PROC_IN_VACUUM);
+	old_snapshots = GetCurrentVirtualXIDs(snapshot->xmin, true, false,
+										  PROC_IS_AUTOVACUUM | PROC_IN_VACUUM,
+										  &n_old_snapshots);
 
-	while (VirtualTransactionIdIsValid(*old_snapshots))
+	for (i = 0; i < n_old_snapshots; i++)
 	{
-		VirtualXactLockTableWait(*old_snapshots);
-		old_snapshots++;
+		if (!VirtualTransactionIdIsValid(old_snapshots[i]))
+			continue;			/* found uninteresting in previous cycle */
+
+		if (i > 0)
+		{
+			/* see if anything's changed ... */
+			VirtualTransactionId *newer_snapshots;
+			int			n_newer_snapshots;
+			int			j;
+			int			k;
+
+			newer_snapshots = GetCurrentVirtualXIDs(snapshot->xmin,
+													true, false,
+										 PROC_IS_AUTOVACUUM | PROC_IN_VACUUM,
+													&n_newer_snapshots);
+			for (j = i; j < n_old_snapshots; j++)
+			{
+				if (!VirtualTransactionIdIsValid(old_snapshots[j]))
+					continue;	/* found uninteresting in previous cycle */
+				for (k = 0; k < n_newer_snapshots; k++)
+				{
+					if (VirtualTransactionIdEquals(old_snapshots[j],
+												   newer_snapshots[k]))
+						break;
+				}
+				if (k >= n_newer_snapshots)		/* not there anymore */
+					SetInvalidVirtualTransactionId(old_snapshots[j]);
+			}
+			pfree(newer_snapshots);
+		}
+
+		if (VirtualTransactionIdIsValid(old_snapshots[i]))
+			VirtualXactLockTableWait(old_snapshots[i]);
 	}
 
 	/*
@@ -682,6 +733,12 @@ DefineIndex(RangeVar *heapRelation,
 	 * to replan; relcache flush on the index itself was sufficient.)
 	 */
 	CacheInvalidateRelcacheByRelid(heaprelid.relId);
+
+	/* we can now do away with our active snapshot */
+	PopActiveSnapshot();
+
+	/* And we can remove the validating snapshot too */
+	UnregisterSnapshot(snapshot);
 
 	/*
 	 * Last thing to do is release the session-level lock on the parent table.
@@ -783,7 +840,8 @@ ComputeIndexAttrs(IndexInfo *indexInfo,
 			atttype = attform->atttypid;
 			ReleaseSysCache(atttuple);
 		}
-		else if (attribute->expr && IsA(attribute->expr, Var))
+		else if (attribute->expr && IsA(attribute->expr, Var) &&
+				 ((Var *) attribute->expr)->varattno != InvalidAttrNumber)
 		{
 			/* Tricky tricky, he wrote (column) ... treat as simple attr */
 			Var		   *var = (Var *) attribute->expr;
@@ -1000,7 +1058,7 @@ GetDefaultOpClass(Oid type_id, Oid am_id)
 	ScanKeyData skey[1];
 	SysScanDesc scan;
 	HeapTuple	tup;
-	CATEGORY	tcategory;
+	TYPCATEGORY tcategory;
 
 	/* If it's a domain, look at the base type instead */
 	type_id = getBaseType(type_id);
@@ -1243,33 +1301,6 @@ relationHasPrimaryKey(Relation rel)
 	return result;
 }
 
-
-/*
- * RemoveIndex
- *		Deletes an index.
- */
-void
-RemoveIndex(RangeVar *relation, DropBehavior behavior)
-{
-	Oid			indOid;
-	char		relkind;
-	ObjectAddress object;
-
-	indOid = RangeVarGetRelid(relation, false);
-	relkind = get_rel_relkind(indOid);
-	if (relkind != RELKIND_INDEX)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an index",
-						relation->relname)));
-
-	object.classId = RelationRelationId;
-	object.objectId = indOid;
-	object.objectSubId = 0;
-
-	performDeletion(&object, behavior);
-}
-
 /*
  * ReindexIndex
  *		Recreate a specific index.
@@ -1418,7 +1449,8 @@ ReindexDatabase(const char *databaseName, bool do_system, bool do_user)
 			continue;
 
 		/* Skip temp tables of other backends; we can't reindex them at all */
-		if (isOtherTempNamespace(classtuple->relnamespace))
+		if (classtuple->relistemp &&
+			!isTempNamespace(classtuple->relnamespace))
 			continue;
 
 		/* Check user/system classification, and optionally skip */
@@ -1450,6 +1482,7 @@ ReindexDatabase(const char *databaseName, bool do_system, bool do_user)
 	heap_close(relationRelation, AccessShareLock);
 
 	/* Now reindex each rel in a separate transaction */
+	PopActiveSnapshot();
 	CommitTransactionCommand();
 	foreach(l, relids)
 	{
@@ -1457,11 +1490,12 @@ ReindexDatabase(const char *databaseName, bool do_system, bool do_user)
 
 		StartTransactionCommand();
 		/* functions in indexes may want a snapshot set */
-		ActiveSnapshot = CopySnapshot(GetTransactionSnapshot());
+		PushActiveSnapshot(GetTransactionSnapshot());
 		if (reindex_relation(relid, true))
 			ereport(NOTICE,
 					(errmsg("table \"%s\" was reindexed",
 							get_rel_name(relid))));
+		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
 	StartTransactionCommand();

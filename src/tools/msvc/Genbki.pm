@@ -6,7 +6,7 @@
 #    files.  These .bki files are used to initialize the postgres template
 #    database.
 #
-# Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+# Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
 #
@@ -32,11 +32,6 @@ sub genbki
 
     $version =~ /^(\d+\.\d+)/ || die "Bad format verison $version\n";
     my $majorversion = $1;
-
-    my $pgext = read_file("src/include/pg_config_manual.h");
-    $pgext =~ /^#define\s+NAMEDATALEN\s+(\d+)$/mg
-      || die "Could not read NAMEDATALEN from pg_config_manual.h\n";
-    my $namedatalen = $1;
 
     my $pgauthid = read_file("src/include/catalog/pg_authid.h");
     $pgauthid =~ /^#define\s+BOOTSTRAP_SUPERUSERID\s+(\d+)$/mg
@@ -70,7 +65,6 @@ sub genbki
     $indata =~ s{^TransactionId}{xid}gm;
     $indata =~ s{\(TransactionId}{(xid}g;
     $indata =~ s{PGUID}{$bootstrapsuperuserid}g;
-    $indata =~ s{NAMEDATALEN}{$namedatalen}g;
     $indata =~ s{PGNSP}{$pgcatalognamespace}g;
 
     #print $indata;

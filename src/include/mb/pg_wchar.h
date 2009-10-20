@@ -3,7 +3,7 @@
  * pg_wchar.h
  *	  multibyte-character support
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -202,6 +202,7 @@ typedef enum pg_enc
 	PG_WIN1254,					/* windows-1254 */
 	PG_WIN1255,					/* windows-1255 */
 	PG_WIN1257,					/* windows-1257 */
+	PG_KOI8U,					/* KOI8-U */
 	/* PG_ENCODING_BE_LAST points to the above entry */
 
 	/* followings are for client encoding only */
@@ -216,7 +217,7 @@ typedef enum pg_enc
 
 } pg_enc;
 
-#define PG_ENCODING_BE_LAST PG_WIN1257
+#define PG_ENCODING_BE_LAST PG_KOI8U
 
 /*
  * Please use these tests before access to pg_encconv_tbl[]
@@ -259,6 +260,17 @@ typedef struct pg_enc2name
 } pg_enc2name;
 
 extern pg_enc2name pg_enc2name_tbl[];
+
+/*
+ * Encoding names for gettext
+ */
+typedef struct pg_enc2gettext
+{
+	pg_enc		encoding;
+	const char *name;
+} pg_enc2gettext;
+
+extern pg_enc2gettext pg_enc2gettext_tbl[];
 
 /*
  * pg_wchar stuff
@@ -371,11 +383,17 @@ extern int	pg_mic_mblen(const unsigned char *mbstr);
 extern int	pg_mbstrlen(const char *mbstr);
 extern int	pg_mbstrlen_with_len(const char *mbstr, int len);
 extern int	pg_mbcliplen(const char *mbstr, int len, int limit);
+extern int pg_encoding_mbcliplen(int encoding, const char *mbstr,
+					  int len, int limit);
 extern int	pg_mbcharcliplen(const char *mbstr, int len, int imit);
 extern int	pg_encoding_max_length(int encoding);
 extern int	pg_database_encoding_max_length(void);
 
-extern void SetDefaultClientEncoding(void);
+#ifdef USE_WIDE_UPPER_LOWER
+extern size_t wchar2char(char *to, const wchar_t *from, size_t tolen);
+extern size_t char2wchar(wchar_t *to, size_t tolen, const char *from, size_t fromlen);
+#endif
+
 extern int	SetClientEncoding(int encoding, bool doit);
 extern void InitializeClientEncoding(void);
 extern int	pg_get_client_encoding(void);
@@ -384,10 +402,12 @@ extern const char *pg_get_client_encoding_name(void);
 extern void SetDatabaseEncoding(int encoding);
 extern int	GetDatabaseEncoding(void);
 extern const char *GetDatabaseEncodingName(void);
+extern void pg_bind_textdomain_codeset(const char *domainname);
 
 extern int	pg_valid_client_encoding(const char *name);
 extern int	pg_valid_server_encoding(const char *name);
 
+extern unsigned char *unicode_to_utf8(pg_wchar c, unsigned char *utf8string);
 extern int	pg_utf_mblen(const unsigned char *);
 extern unsigned char *pg_do_encoding_conversion(unsigned char *src, int len,
 						  int src_encoding,
@@ -414,10 +434,10 @@ extern int pg_verify_mbstr_len(int encoding, const char *mbstr, int len,
 					bool noError);
 
 extern void check_encoding_conversion_args(int src_encoding,
-										   int dest_encoding,
-										   int len,
-										   int expected_src_encoding,
-										   int expected_dest_encoding);
+							   int dest_encoding,
+							   int len,
+							   int expected_src_encoding,
+							   int expected_dest_encoding);
 
 extern void report_invalid_encoding(int encoding, const char *mbstr, int len);
 extern void report_untranslatable_char(int src_encoding, int dest_encoding,

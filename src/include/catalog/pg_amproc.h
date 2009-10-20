@@ -19,7 +19,7 @@
  * some don't pay attention to non-default functions at all.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -33,12 +33,7 @@
 #ifndef PG_AMPROC_H
 #define PG_AMPROC_H
 
-/* ----------------
- *		postgres.h contains the system type definitions and the
- *		CATALOG(), BKI_BOOTSTRAP and DATA() sugar words so this file
- *		can be read by both genbki.sh and the C compiler.
- * ----------------
- */
+#include "catalog/genbki.h"
 
 /* ----------------
  *		pg_amproc definition.  cpp turns this into
@@ -116,13 +111,13 @@ DATA(insert (	1986   19 19 1 359 ));
 DATA(insert (	1988   1700 1700 1 1769 ));
 DATA(insert (	1989   26 26 1 356 ));
 DATA(insert (	1991   30 30 1 404 ));
+DATA(insert (	2994   2249 2249 1 2987 ));
 DATA(insert (	1994   25 25 1 360 ));
 DATA(insert (	1996   1083 1083 1 1107 ));
 DATA(insert (	2000   1266 1266 1 1358 ));
 DATA(insert (	2002   1562 1562 1 1672 ));
 DATA(insert (	2095   25 25 1 2166 ));
 DATA(insert (	2097   1042 1042 1 2180 ));
-DATA(insert (	2098   19 19 1 2187 ));
 DATA(insert (	2099   790 790 1  377 ));
 DATA(insert (	2233   703 703 1  380 ));
 DATA(insert (	2234   704 704 1  381 ));
@@ -159,9 +154,8 @@ DATA(insert (	2225   28 28 1 450 ));
 DATA(insert (	2226   29 29 1 450 ));
 DATA(insert (	2227   702 702 1 450 ));
 DATA(insert (	2228   703 703 1 450 ));
-DATA(insert (	2229   25 25 1 456 ));
-DATA(insert (	2231   1042 1042 1 456 ));
-DATA(insert (	2232   19 19 1 455 ));
+DATA(insert (	2229   25 25 1 400 ));
+DATA(insert (	2231   1042 1042 1 1080 ));
 DATA(insert (	2235   1033 1033 1 329 ));
 DATA(insert (	2969   2950 2950 1 2963 ));
 DATA(insert (	3523   3500 3500 1 3515 ));
@@ -326,10 +320,11 @@ DATA(insert (	2745   1025 1025 1 381 ));
 DATA(insert (	2745   1025 1025 2 2743 ));
 DATA(insert (	2745   1025 1025 3 2774 ));
 DATA(insert (	2745   1025 1025 4 2744 ));
-DATA(insert (	3659   3614 3614 1 360 ));
+DATA(insert (	3659   3614 3614 1 3724 ));
 DATA(insert (	3659   3614 3614 2 3656 ));
 DATA(insert (	3659   3614 3614 3 3657 ));
 DATA(insert (	3659   3614 3614 4 3658 ));
+DATA(insert (	3659   3614 3614 5 2700 ));
 DATA(insert (	3626   3614 3614 1 3622 ));
 DATA(insert (	3683   3615 3615 1 3668 ));
 

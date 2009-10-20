@@ -11,7 +11,7 @@
  * LWLocks to protect its shared state.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -455,7 +455,7 @@ LWLockAcquire(LWLockId lockid, LWLockMode mode)
 		block_counts[lockid]++;
 #endif
 
-		PG_TRACE2(lwlock__startwait, lockid, mode);
+		TRACE_POSTGRESQL_LWLOCK_WAIT_START(lockid, mode);
 
 		for (;;)
 		{
@@ -466,7 +466,7 @@ LWLockAcquire(LWLockId lockid, LWLockMode mode)
 			extraWaits++;
 		}
 
-		PG_TRACE2(lwlock__endwait, lockid, mode);
+		TRACE_POSTGRESQL_LWLOCK_WAIT_DONE(lockid, mode);
 
 		LOG_LWDEBUG("LWLockAcquire", lockid, "awakened");
 
@@ -477,7 +477,7 @@ LWLockAcquire(LWLockId lockid, LWLockMode mode)
 	/* We are done updating shared state of the lock itself. */
 	SpinLockRelease(&lock->mutex);
 
-	PG_TRACE2(lwlock__acquire, lockid, mode);
+	TRACE_POSTGRESQL_LWLOCK_ACQUIRE(lockid, mode);
 
 	/* Add lock to list of locks held by this backend */
 	held_lwlocks[num_held_lwlocks++] = lockid;
@@ -548,13 +548,13 @@ LWLockConditionalAcquire(LWLockId lockid, LWLockMode mode)
 		/* Failed to get lock, so release interrupt holdoff */
 		RESUME_INTERRUPTS();
 		LOG_LWDEBUG("LWLockConditionalAcquire", lockid, "failed");
-		PG_TRACE2(lwlock__condacquire__fail, lockid, mode);
+		TRACE_POSTGRESQL_LWLOCK_CONDACQUIRE_FAIL(lockid, mode);
 	}
 	else
 	{
 		/* Add lock to list of locks held by this backend */
 		held_lwlocks[num_held_lwlocks++] = lockid;
-		PG_TRACE2(lwlock__condacquire, lockid, mode);
+		TRACE_POSTGRESQL_LWLOCK_CONDACQUIRE(lockid, mode);
 	}
 
 	return !mustwait;
@@ -639,7 +639,7 @@ LWLockRelease(LWLockId lockid)
 	/* We are done updating shared state of the lock itself. */
 	SpinLockRelease(&lock->mutex);
 
-	PG_TRACE1(lwlock__release, lockid);
+	TRACE_POSTGRESQL_LWLOCK_RELEASE(lockid);
 
 	/*
 	 * Awaken any waiters I removed from the queue.

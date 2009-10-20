@@ -37,6 +37,13 @@
 #define oidge(x,y) ( (x) >= (y) )
 #define oidzero(x) ( (x) == 0 )
 
+enum trivalue
+{
+	TRI_DEFAULT,
+	TRI_NO,
+	TRI_YES
+};
+
 typedef enum _archiveFormat
 {
 	archUnknown = 0,
@@ -52,6 +59,14 @@ typedef enum _archiveMode
 	archModeWrite,
 	archModeRead
 } ArchiveMode;
+
+typedef enum _teSection
+{
+	SECTION_NONE = 1,			/* COMMENTs, ACLs, etc; can be anywhere */
+	SECTION_PRE_DATA,			/* stuff to be processed before data */
+	SECTION_DATA,				/* TABLE DATA, BLOBS, BLOB COMMENTS */
+	SECTION_POST_DATA			/* stuff to be processed after data */
+} teSection;
 
 /*
  *	We may want to have some more user-readable data, but in the mean
@@ -83,11 +98,13 @@ typedef struct _restoreOptions
 {
 	int			create;			/* Issue commands to create the database */
 	int			noOwner;		/* Don't try to match original object owner */
+	int			noTablespace;	/* Don't issue tablespace-related commands */
 	int			disable_triggers;		/* disable triggers during data-only
 										 * restore */
 	int			use_setsessauth;/* Use SET SESSION AUTHORIZATION commands
 								 * instead of OWNER TO */
 	char	   *superuser;		/* Username to use as superuser */
+	char	   *use_role;		/* Issue SET ROLE to this */
 	int			dataOnly;
 	int			dropSchema;
 	char	   *filename;
@@ -115,14 +132,14 @@ typedef struct _restoreOptions
 	char	   *pgport;
 	char	   *pghost;
 	char	   *username;
-	int			ignoreVersion;
 	int			noDataForFailedTables;
-	int			requirePassword;
+	enum trivalue promptPassword;
 	int			exit_on_error;
 	int			compression;
 	int			suppressDumpWarnings;	/* Suppress output of WARNING entries
 										 * to stderr */
 	bool		single_txn;
+	int			number_of_jobs;
 
 	bool	   *idWanted;		/* array showing which dump IDs to emit */
 } RestoreOptions;
@@ -143,9 +160,7 @@ PGconn *ConnectDatabase(Archive *AH,
 				const char *pghost,
 				const char *pgport,
 				const char *username,
-				const int reqPwd,
-				const int ignoreVersion);
-
+				enum trivalue prompt_password);
 
 /* Called to add a TOC entry */
 extern void ArchiveEntry(Archive *AHX,
@@ -153,7 +168,8 @@ extern void ArchiveEntry(Archive *AHX,
 			 const char *tag,
 			 const char *namespace, const char *tablespace,
 			 const char *owner, bool withOids,
-			 const char *desc, const char *defn,
+			 const char *desc, teSection section,
+			 const char *defn,
 			 const char *dropStmt, const char *copyStmt,
 			 const DumpId *deps, int nDeps,
 			 DataDumperPtr dumpFn, void *dumpArg);

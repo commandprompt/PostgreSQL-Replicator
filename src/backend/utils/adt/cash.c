@@ -24,6 +24,7 @@
 #include <locale.h>
 
 #include "libpq/pqformat.h"
+#include "utils/builtins.h"
 #include "utils/cash.h"
 #include "utils/pg_locale.h"
 
@@ -32,14 +33,6 @@
 #define TERMINATOR		(CASH_BUFSZ - 1)
 #define LAST_PAREN		(TERMINATOR - 1)
 #define LAST_DIGIT		(LAST_PAREN - 1)
-
-/*
- * Cash is a pass-by-ref SQL type, so we must pass and return pointers.
- * These macros and support routine hide the pass-by-refness.
- */
-#define PG_GETARG_CASH(n)  (* ((Cash *) PG_GETARG_POINTER(n)))
-#define PG_RETURN_CASH(x)  return CashGetDatum(x)
-
 
 
 /*************************************************************************
@@ -97,15 +90,6 @@ num_word(Cash value)
 
 	return buf;
 }	/* num_word() */
-
-static Datum
-CashGetDatum(Cash value)
-{
-	Cash	   *result = (Cash *) palloc(sizeof(Cash));
-
-	*result = value;
-	return PointerGetDatum(result);
-}
 
 
 /* cash_in()
@@ -336,9 +320,8 @@ cash_out(PG_FUNCTION_ARGS)
 	count -= strlen(csymbol) - 1;
 
 	/*
-	 *	If points == 0 and the number of digits % mon_group == 0,
-	 *	the code above adds a trailing ssymbol on the far right,
-	 *	so remove it.
+	 * If points == 0 and the number of digits % mon_group == 0, the code
+	 * above adds a trailing ssymbol on the far right, so remove it.
 	 */
 	if (buf[LAST_DIGIT] == ssymbol)
 		buf[LAST_DIGIT] = '\0';
@@ -794,7 +777,6 @@ cash_words(PG_FUNCTION_ARGS)
 	Cash		m4;
 	Cash		m5;
 	Cash		m6;
-	text	   *result;
 
 	/* work with positive numbers */
 	if (value < 0)
@@ -809,13 +791,13 @@ cash_words(PG_FUNCTION_ARGS)
 	/* Now treat as unsigned, to avoid trouble at INT_MIN */
 	val = (uint64) value;
 
-	m0 = val % INT64CONST(100);							/* cents */
-	m1 = (val / INT64CONST(100)) % 1000;				/* hundreds */
-	m2 = (val / INT64CONST(100000)) % 1000;				/* thousands */
-	m3 = (val / INT64CONST(100000000)) % 1000;			/* millions */
+	m0 = val % INT64CONST(100); /* cents */
+	m1 = (val / INT64CONST(100)) % 1000;		/* hundreds */
+	m2 = (val / INT64CONST(100000)) % 1000;		/* thousands */
+	m3 = (val / INT64CONST(100000000)) % 1000;	/* millions */
 	m4 = (val / INT64CONST(100000000000)) % 1000;		/* billions */
 	m5 = (val / INT64CONST(100000000000000)) % 1000;	/* trillions */
-	m6 = (val / INT64CONST(100000000000000000)) % 1000;	/* quadrillions */
+	m6 = (val / INT64CONST(100000000000000000)) % 1000; /* quadrillions */
 
 	if (m6)
 	{
@@ -860,10 +842,6 @@ cash_words(PG_FUNCTION_ARGS)
 	/* capitalize output */
 	buf[0] = pg_toupper((unsigned char) buf[0]);
 
-	/* make a text type for output */
-	result = (text *) palloc(strlen(buf) + VARHDRSZ);
-	SET_VARSIZE(result, strlen(buf) + VARHDRSZ);
-	memcpy(VARDATA(result), buf, strlen(buf));
-
-	PG_RETURN_TEXT_P(result);
+	/* return as text datum */
+	PG_RETURN_TEXT_P(cstring_to_text(buf));
 }

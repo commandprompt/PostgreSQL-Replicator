@@ -4,7 +4,7 @@
  *	  per-process shared memory data structures
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -128,9 +128,9 @@ extern PGDLLIMPORT PGPROC *MyProc;
 typedef struct PROC_HDR
 {
 	/* Head of list of free PGPROC structures */
-	SHMEM_OFFSET freeProcs;
+	PGPROC	   *freeProcs;
 	/* Head of list of autovacuum's free PGPROC structures */
-	SHMEM_OFFSET autovacFreeProcs;
+	PGPROC	   *autovacFreeProcs;
 	/* Current shared estimate of appropriate spins_per_delay value */
 	int			spins_per_delay;
 } PROC_HDR;
@@ -138,6 +138,11 @@ typedef struct PROC_HDR
 /*
  * We set aside some extra PGPROC structures for auxiliary processes,
  * ie things that aren't full-fledged backends but need shmem access.
+ *
+ * Background writer, WAL writer, and autovacuum launcher run during
+ * normal operation. Startup process also consumes one slot, but WAL
+ * writer and autovacuum launcher are launched only after it has
+ * exited.
  */
 #define NUM_AUXILIARY_PROCS		4
 

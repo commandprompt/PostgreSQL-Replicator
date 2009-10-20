@@ -4,7 +4,7 @@
  *	  interface routines for the postgres GiST index access method.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -18,6 +18,8 @@
 #include "access/gist_private.h"
 #include "catalog/index.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
+#include "storage/indexfsm.h"
 #include "utils/memutils.h"
 
 const XLogRecPtr XLogRecPtrForTemp = {1, 1};
@@ -338,7 +340,7 @@ gistplacetopage(GISTInsertState *state, GISTSTATE *giststate)
 			 * we must create temporary page to operate
 			 */
 			dist->buffer = state->stack->buffer;
-			dist->page = PageGetTempPage(BufferGetPage(dist->buffer), sizeof(GISTPageOpaqueData));
+			dist->page = PageGetTempPageCopySpecial(BufferGetPage(dist->buffer));
 
 			/* clean all flags except F_LEAF */
 			GistPageGetOpaque(dist->page)->flags = (is_leaf) ? F_LEAF : 0;
@@ -461,7 +463,7 @@ gistplacetopage(GISTInsertState *state, GISTSTATE *giststate)
 
 		if (!is_leaf)
 			PageIndexTupleDelete(state->stack->page, state->stack->childoffnum);
-		gistfillbuffer(state->r, state->stack->page, state->itup, state->ituplen, InvalidOffsetNumber);
+		gistfillbuffer(state->stack->page, state->itup, state->ituplen, InvalidOffsetNumber);
 
 		MarkBufferDirty(state->stack->buffer);
 
@@ -1007,7 +1009,7 @@ gistnewroot(Relation r, Buffer buffer, IndexTuple *itup, int len, ItemPointer ke
 	START_CRIT_SECTION();
 
 	GISTInitBuffer(buffer, 0);
-	gistfillbuffer(r, page, itup, len, FirstOffsetNumber);
+	gistfillbuffer(page, itup, len, FirstOffsetNumber);
 
 	MarkBufferDirty(buffer);
 

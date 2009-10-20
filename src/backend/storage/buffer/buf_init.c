@@ -3,7 +3,7 @@
  * buf_init.c
  *	  buffer manager initialization routines
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -29,6 +29,8 @@ long int	BufferHitCount;
 long int	LocalBufferHitCount;
 long int	BufferFlushCount;
 long int	LocalBufferFlushCount;
+long int	BufFileReadCount;
+long int	BufFileWriteCount;
 
 
 /*

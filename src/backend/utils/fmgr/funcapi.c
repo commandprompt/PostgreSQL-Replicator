@@ -4,7 +4,7 @@
  *	  Utility and convenience functions for fmgr functions that return
  *	  sets and/or composite types.
  *
- * Copyright (c) 2002-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -18,8 +18,8 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -64,8 +64,8 @@ init_MultiFuncCall(PG_FUNCTION_ARGS)
 		/*
 		 * First call
 		 */
-		ReturnSetInfo  *rsi = (ReturnSetInfo *) fcinfo->resultinfo;
-		MemoryContext	multi_call_ctx;
+		ReturnSetInfo *rsi = (ReturnSetInfo *) fcinfo->resultinfo;
+		MemoryContext multi_call_ctx;
 
 		/*
 		 * Create a suitably long-lived context to hold cross-call data
@@ -549,7 +549,7 @@ resolve_polymorphic_argtypes(int numargs, Oid *argtypes, char *argmodes,
 			case ANYELEMENTOID:
 			case ANYNONARRAYOID:
 			case ANYENUMOID:
-				if (argmode == PROARGMODE_OUT)
+				if (argmode == PROARGMODE_OUT || argmode == PROARGMODE_TABLE)
 					have_anyelement_result = true;
 				else
 				{
@@ -564,7 +564,7 @@ resolve_polymorphic_argtypes(int numargs, Oid *argtypes, char *argmodes,
 				}
 				break;
 			case ANYARRAYOID:
-				if (argmode == PROARGMODE_OUT)
+				if (argmode == PROARGMODE_OUT || argmode == PROARGMODE_TABLE)
 					have_anyarray_result = true;
 				else
 				{
@@ -581,7 +581,7 @@ resolve_polymorphic_argtypes(int numargs, Oid *argtypes, char *argmodes,
 			default:
 				break;
 		}
-		if (argmode != PROARGMODE_OUT)
+		if (argmode != PROARGMODE_OUT && argmode != PROARGMODE_TABLE)
 			inargno++;
 	}
 
@@ -740,8 +740,7 @@ get_func_arg_info(HeapTuple procTup,
 			elog(ERROR, "proargnames must have the same number of elements as the function has arguments");
 		*p_argnames = (char **) palloc(sizeof(char *) * numargs);
 		for (i = 0; i < numargs; i++)
-			(*p_argnames)[i] = DatumGetCString(DirectFunctionCall1(textout,
-																   elems[i]));
+			(*p_argnames)[i] = TextDatumGetCString(elems[i]);
 	}
 
 	/* Get argument modes, if available */
@@ -844,18 +843,19 @@ get_func_result_name(Oid functionId)
 		numoutargs = 0;
 		for (i = 0; i < numargs; i++)
 		{
-			if (argmodes[i] == PROARGMODE_IN)
+			if (argmodes[i] == PROARGMODE_IN ||
+				argmodes[i] == PROARGMODE_VARIADIC)
 				continue;
 			Assert(argmodes[i] == PROARGMODE_OUT ||
-				   argmodes[i] == PROARGMODE_INOUT);
+				   argmodes[i] == PROARGMODE_INOUT ||
+				   argmodes[i] == PROARGMODE_TABLE);
 			if (++numoutargs > 1)
 			{
 				/* multiple out args, so forget it */
 				result = NULL;
 				break;
 			}
-			result = DatumGetCString(DirectFunctionCall1(textout,
-														 argnames[i]));
+			result = TextDatumGetCString(argnames[i]);
 			if (result == NULL || result[0] == '\0')
 			{
 				/* Parameter is not named, so forget it */
@@ -995,13 +995,15 @@ build_function_result_tupdesc_d(Datum proallargtypes,
 	{
 		char	   *pname;
 
-		if (argmodes[i] == PROARGMODE_IN)
+		if (argmodes[i] == PROARGMODE_IN ||
+			argmodes[i] == PROARGMODE_VARIADIC)
 			continue;
 		Assert(argmodes[i] == PROARGMODE_OUT ||
-			   argmodes[i] == PROARGMODE_INOUT);
+			   argmodes[i] == PROARGMODE_INOUT ||
+			   argmodes[i] == PROARGMODE_TABLE);
 		outargtypes[numoutargs] = argtypes[i];
 		if (argnames)
-			pname = DatumGetCString(DirectFunctionCall1(textout, argnames[i]));
+			pname = TextDatumGetCString(argnames[i]);
 		else
 			pname = NULL;
 		if (pname == NULL || pname[0] == '\0')

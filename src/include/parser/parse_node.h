@@ -4,7 +4,7 @@
  *		Internal definitions for parser
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -15,7 +15,7 @@
 #define PARSE_NODE_H
 
 #include "nodes/parsenodes.h"
-#include "utils/rel.h"
+#include "utils/relcache.h"
 
 /*
  * State information used during parse analysis
@@ -32,6 +32,10 @@
  * p_rtable: list of RTEs that will become the rangetable of the query.
  * Note that neither relname nor refname of these entries are necessarily
  * unique; searching the rtable by name is a bad idea.
+ *
+ * p_joinexprs: list of JoinExpr nodes associated with p_rtable entries.
+ * This is one-for-one with p_rtable, but contains NULLs for non-join
+ * RTEs, and may be shorter than p_rtable if the last RTE(s) aren't joins.
  *
  * p_joinlist: list of join items (RangeTblRef and JoinExpr nodes) that
  * will become the fromlist of the query's top-level FromExpr node.
@@ -50,6 +54,22 @@
  * implicit RTEs into p_relnamespace but not p_varnamespace, so that they
  * do not affect the set of columns available for unqualified references.
  *
+ * p_ctenamespace: list of CommonTableExprs (WITH items) that are visible
+ * at the moment.  This is different from p_relnamespace because you have
+ * to make an RTE before you can access a CTE.
+ *
+ * p_future_ctes: list of CommonTableExprs (WITH items) that are not yet
+ * visible due to scope rules.	This is used to help improve error messages.
+ *
+ * p_parent_cte: CommonTableExpr that immediately contains the current query,
+ * if any.
+ *
+ * p_windowdefs: list of WindowDefs representing WINDOW and OVER clauses.
+ * We collect these while transforming expressions and then transform them
+ * afterwards (so that any resjunk tlist items needed for the sort/group
+ * clauses end up at the end of the query tlist).  A WindowDef's location in
+ * this list, counting from 1, is the winref number to use to reference it.
+ *
  * p_paramtypes: an array of p_numparams type OIDs for $n parameter symbols
  * (zeroth entry in array corresponds to $1).  If p_variableparams is true, the
  * set of param types is not predetermined; in that case, a zero array entry
@@ -64,10 +84,15 @@ typedef struct ParseState
 	struct ParseState *parentParseState;		/* stack link */
 	const char *p_sourcetext;	/* source text, or NULL if not available */
 	List	   *p_rtable;		/* range table so far */
+	List	   *p_joinexprs;	/* JoinExprs for RTE_JOIN p_rtable entries */
 	List	   *p_joinlist;		/* join items so far (will become FromExpr
 								 * node's fromlist) */
 	List	   *p_relnamespace; /* current namespace for relations */
 	List	   *p_varnamespace; /* current namespace for columns */
+	List	   *p_ctenamespace; /* current namespace for common table exprs */
+	List	   *p_future_ctes;	/* common table exprs not yet in namespace */
+	CommonTableExpr *p_parent_cte;		/* this query's containing CTE */
+	List	   *p_windowdefs;	/* raw representations of window clauses */
 	Oid		   *p_paramtypes;	/* OIDs of types for $n parameter symbols */
 	int			p_numparams;	/* allocated size of p_paramtypes[] */
 	int			p_next_resno;	/* next targetlist resno to assign */
@@ -75,6 +100,7 @@ typedef struct ParseState
 	Node	   *p_value_substitute;		/* what to replace VALUE with, if any */
 	bool		p_variableparams;
 	bool		p_hasAggs;
+	bool		p_hasWindowFuncs;
 	bool		p_hasSubLinks;
 	bool		p_is_insert;
 	bool		p_is_update;
@@ -82,11 +108,25 @@ typedef struct ParseState
 	RangeTblEntry *p_target_rangetblentry;
 } ParseState;
 
+/* Support for parser_errposition_callback function */
+typedef struct ParseCallbackState
+{
+	ParseState *pstate;
+	int			location;
+	ErrorContextCallback errcontext;
+} ParseCallbackState;
+
+
 extern ParseState *make_parsestate(ParseState *parentParseState);
 extern void free_parsestate(ParseState *pstate);
 extern int	parser_errposition(ParseState *pstate, int location);
 
-extern Var *make_var(ParseState *pstate, RangeTblEntry *rte, int attrno);
+extern void setup_parser_errposition_callback(ParseCallbackState *pcbstate,
+								  ParseState *pstate, int location);
+extern void cancel_parser_errposition_callback(ParseCallbackState *pcbstate);
+
+extern Var *make_var(ParseState *pstate, RangeTblEntry *rte, int attrno,
+		 int location);
 extern Oid	transformArrayType(Oid arrayType);
 extern ArrayRef *transformArraySubscripts(ParseState *pstate,
 						 Node *arrayBase,
@@ -95,6 +135,6 @@ extern ArrayRef *transformArraySubscripts(ParseState *pstate,
 						 int32 elementTypMod,
 						 List *indirection,
 						 Node *assignFrom);
-extern Const *make_const(Value *value);
+extern Const *make_const(ParseState *pstate, Value *value, int location);
 
 #endif   /* PARSE_NODE_H */

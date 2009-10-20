@@ -89,11 +89,6 @@
      </row>
 
      <row>
-      <entry><link linkend="catalog-pg-autovacuum"><structname>pg_autovacuum</structname></link></entry>
-      <entry>per-relation autovacuum configuration parameters</entry>
-     </row>
-
-     <row>
       <entry><link linkend="catalog-pg-cast"><structname>pg_cast</structname></link></entry>
       <entry>casts (data type conversions)</entry>
      </row>
@@ -131,6 +126,16 @@
      <row>
       <entry><link linkend="catalog-pg-enum"><structname>pg_enum</structname></link></entry>
       <entry>enum label and value definitions</entry>
+     </row>
+
+     <row>
+      <entry><link linkend="catalog-pg-foreign-data-wrapper"><structname>pg_foreign_data_wrapper</structname></link></entry>
+      <entry>foreign-data wrapper definitions</entry>
+     </row>
+
+     <row>
+      <entry><link linkend="catalog-pg-foreign-server"><structname>pg_foreign_server</structname></link></entry>
+      <entry>foreign server definitions</entry>
      </row>
 
      <row>
@@ -247,6 +252,11 @@
       <entry><link linkend="catalog-pg-type"><structname>pg_type</structname></link></entry>
       <entry>data types</entry>
      </row>
+
+     <row>
+      <entry><link linkend="catalog-pg-user-mapping"><structname>pg_user_mapping</structname></link></entry>
+      <entry>mappings of users to foreign servers</entry>
+     </row>
     </tbody>
    </tgroup>
   </table>
@@ -277,7 +287,7 @@
   <table>
    <title><structname>pg_aggregate</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -360,7 +370,7 @@
   <table>
    <title><structname>pg_am</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -399,6 +409,13 @@
       <entry><type>bool</type></entry>
       <entry></entry>
       <entry>Does the access method support ordered scans?</entry>
+     </row>
+
+     <row>
+      <entry><structfield>amcanbackward</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>Does the access method support backward scanning?</entry>
      </row>
 
      <row>
@@ -452,6 +469,13 @@
      </row>
 
      <row>
+      <entry><structfield>amkeytype</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-type"><structname>pg_type</structname></link>.oid</literal></entry>
+      <entry>Type of data stored in index, or zero if not a fixed type</entry>
+     </row>
+
+     <row>
       <entry><structfield>aminsert</structfield></entry>
       <entry><type>regproc</type></entry>
       <entry><literal><link linkend="catalog-pg-proc"><structname>pg_proc</structname></link>.oid</literal></entry>
@@ -469,14 +493,14 @@
       <entry><structfield>amgettuple</structfield></entry>
       <entry><type>regproc</type></entry>
       <entry><literal><link linkend="catalog-pg-proc"><structname>pg_proc</structname></link>.oid</literal></entry>
-      <entry><quote>Next valid tuple</quote> function</entry>
+      <entry><quote>Next valid tuple</quote> function, or zero if none</entry>
      </row>
 
      <row>
-      <entry><structfield>amgetmulti</structfield></entry>
+      <entry><structfield>amgetbitmap</structfield></entry>
       <entry><type>regproc</type></entry>
       <entry><literal><link linkend="catalog-pg-proc"><structname>pg_proc</structname></link>.oid</literal></entry>
-      <entry><quote>Fetch multiple tuples</quote> function</entry>
+      <entry><quote>Fetch all valid tuples</quote> function, or zero if none</entry>
      </row>
 
      <row>
@@ -567,7 +591,7 @@
   <table>
    <title><structname>pg_amop</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -604,13 +628,6 @@
       <entry><type>int2</type></entry>
       <entry></entry>
       <entry>Operator strategy number</entry>
-     </row>
-
-     <row>
-      <entry><structfield>amopreqcheck</structfield></entry>
-      <entry><type>bool</type></entry>
-      <entry></entry>
-      <entry>Index hit must be rechecked</entry>
      </row>
 
      <row>
@@ -660,7 +677,7 @@
   <table>
    <title><structname>pg_amproc</structname> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -743,7 +760,7 @@
   <table>
    <title><structname>pg_attrdef</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -820,7 +837,7 @@
   <table>
    <title><structname>pg_attribute</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -1001,8 +1018,18 @@
       <entry><type>int4</type></entry>
       <entry></entry>
       <entry>
-       The number of direct ancestors this column has.  A column with a 
+       The number of direct ancestors this column has.  A column with a
        nonzero number of ancestors cannot be dropped nor renamed
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>attacl</structfield></entry>
+      <entry><type>aclitem[]</type></entry>
+      <entry></entry>
+      <entry>
+       Column-level access privileges, if any have been granted specifically
+       on this column
       </entry>
      </row>
 
@@ -1012,7 +1039,7 @@
 
   <para>
    In a dropped column's <structname>pg_attribute</structname> entry,
-   <structfield>atttypid</structfield> is reset to zero, but 
+   <structfield>atttypid</structfield> is reset to zero, but
    <structfield>attlen</structfield> and the other fields copied from
    <structname>pg_type</> are still valid.  This arrangement is needed
    to cope with the situation where the dropped column's data type was
@@ -1062,7 +1089,7 @@
   <table>
    <title><structname>pg_authid</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -1125,7 +1152,7 @@
       <entry><structfield>rolconnlimit</structfield></entry>
       <entry><type>int4</type></entry>
       <entry>
-       For roles that can log in, this sets maximum number of concurrent 
+       For roles that can log in, this sets maximum number of concurrent
        connections this role can make.  -1 means no limit
       </entry>
      </row>
@@ -1178,7 +1205,7 @@
   <table>
    <title><structname>pg_auth_members</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -1224,171 +1251,6 @@
  </sect1>
 
 
- <sect1 id="catalog-pg-autovacuum">
-  <title><structname>pg_autovacuum</structname></title>
-
-  <indexterm zone="catalog-pg-autovacuum">
-   <primary>pg_autovacuum</primary>
-  </indexterm>
-
-  <indexterm zone="catalog-pg-autovacuum">
-   <primary>autovacuum</primary>
-   <secondary>table-specific configuration</secondary>
-  </indexterm>
-
-  <para>
-   The catalog <structname>pg_autovacuum</structname> stores optional
-   per-relation configuration parameters for the autovacuum daemon.
-   If there is an entry here for a particular relation, the given
-   parameters will be used for autovacuuming that table.  If no entry
-   is present, the system-wide defaults will be used. For more information
-   about the autovacuum daemon, see <xref linkend="autovacuum">.
-  </para>
-
-  <note>
-   <para>
-    It is likely that <structname>pg_autovacuum</structname> will disappear
-    in a future release, with the information instead being kept in
-    <structname>pg_class</>.<structfield>reloptions</> entries.
-   </para>
-  </note>
-
-  <table>
-   <title><structname>pg_autovacuum</> Columns</title>
-
-   <tgroup cols=4>
-    <thead>
-     <row>
-      <entry>Name</entry>
-      <entry>Type</entry>
-      <entry>References</entry>
-      <entry>Description</entry>
-     </row>
-    </thead>
-
-    <tbody>
-     <row>
-      <entry><structfield>vacrelid</structfield></entry>
-      <entry><type>oid</type></entry>
-      <entry><literal><link linkend="catalog-pg-class"><structname>pg_class</structname></link>.oid</literal></entry>
-      <entry>The table this entry is for</entry>
-     </row>
-
-     <row>
-      <entry><structfield>enabled</structfield></entry>
-      <entry><type>bool</type></entry>
-      <entry></entry>
-      <entry>If false, this table will not be autovacuumed, except
-       to prevent transaction ID wraparound</entry>
-     </row>
-
-     <row>
-      <entry><structfield>vac_base_thresh</structfield></entry>
-      <entry><type>integer</type></entry>
-      <entry></entry>
-      <entry>Minimum number of modified tuples before vacuum</entry>
-     </row>
-
-     <row>
-      <entry><structfield>vac_scale_factor</structfield></entry>
-      <entry><type>float4</type></entry>
-      <entry></entry>
-      <entry>Multiplier for <structfield>reltuples</> to add to
-       <structfield>vac_base_thresh</></entry>
-     </row>
-
-     <row>
-      <entry><structfield>anl_base_thresh</structfield></entry>
-      <entry><type>integer</type></entry>
-      <entry></entry>
-      <entry>Minimum number of modified tuples before analyze</entry>
-     </row>
-
-     <row>
-      <entry><structfield>anl_scale_factor</structfield></entry>
-      <entry><type>float4</type></entry>
-      <entry></entry>
-      <entry>Multiplier for <structfield>reltuples</> to add to
-       <structfield>anl_base_thresh</></entry>
-     </row>
-
-     <row>
-      <entry><structfield>vac_cost_delay</structfield></entry>
-      <entry><type>integer</type></entry>
-      <entry></entry>
-      <entry>Custom <varname>vacuum_cost_delay</> parameter</entry>
-     </row>
-
-     <row>
-      <entry><structfield>vac_cost_limit</structfield></entry>
-      <entry><type>integer</type></entry>
-      <entry></entry>
-      <entry>Custom <varname>vacuum_cost_limit</> parameter</entry>
-     </row>
-
-     <row>
-      <entry><structfield>freeze_min_age</structfield></entry>
-      <entry><type>integer</type></entry>
-      <entry></entry>
-      <entry>Custom <varname>vacuum_freeze_min_age</> parameter</entry>
-     </row>
-
-     <row>
-      <entry><structfield>freeze_max_age</structfield></entry>
-      <entry><type>integer</type></entry>
-      <entry></entry>
-      <entry>Custom <varname>autovacuum_freeze_max_age</> parameter</entry>
-     </row>
-    </tbody>
-   </tgroup>
-  </table>
-
-  <para>
-   The autovacuum daemon will initiate a <command>VACUUM</> operation
-   on a particular table when the number of updated or deleted tuples
-   exceeds <structfield>vac_base_thresh</structfield> plus
-   <structfield>vac_scale_factor</structfield> times the number of
-   live tuples currently estimated to be in the relation.
-   Similarly, it will initiate an <command>ANALYZE</> operation
-   when the number of inserted, updated or deleted tuples
-   exceeds <structfield>anl_base_thresh</structfield> plus
-   <structfield>anl_scale_factor</structfield> times the number of
-   live tuples currently estimated to be in the relation.
-  </para>
-
-  <para>
-   Also, the autovacuum daemon will perform a <command>VACUUM</> operation
-   to prevent transaction ID wraparound if the table's
-   <structname>pg_class</>.<structfield>relfrozenxid</> field attains an age
-   of more than <structfield>freeze_max_age</> transactions, whether the table
-   has been changed or not, even if
-   <structname>pg_autovacuum</>.<structfield>enabled</> is set to
-   <literal>false</> for it.  The system will launch autovacuum to perform
-   such <command>VACUUM</>s even if autovacuum is otherwise disabled.
-   See <xref linkend="vacuum-for-wraparound"> for more about wraparound
-   prevention.
-  </para>
-
-  <para>
-   Any of the numerical fields can contain <literal>-1</> (or indeed
-   any negative value) to indicate that the system-wide default should
-   be used for this particular value.  Observe that the
-   <structfield>vac_cost_delay</> variable inherits its default value from the
-   <xref linkend="guc-autovacuum-vacuum-cost-delay"> configuration parameter,
-   or from <xref linkend="guc-vacuum-cost-delay"> if the former is set to a
-   negative value.  The same applies to <structfield>vac_cost_limit</>.
-   Also, autovacuum will ignore attempts to set a per-table
-   <structfield>freeze_max_age</> larger than the system-wide setting (it can
-   only be set smaller), and the <structfield>freeze_min_age</> value will be
-   limited to half the system-wide <xref
-   linkend="guc-autovacuum-freeze-max-age"> setting.  Note that while you
-   can set <structfield>freeze_max_age</> very small, or even zero, this
-   is usually unwise since it will force frequent vacuuming.
-  </para>
-
- </sect1>
-
-
  <sect1 id="catalog-pg-cast">
   <title><structname>pg_cast</structname></title>
 
@@ -1408,15 +1270,16 @@
    cannot be deduced from some generic rule.  For example, casting between a
    domain and its base type is not explicitly represented in
    <structname>pg_cast</structname>.  Another important exception is that
-   <quote>I/O conversion casts</>, those performed using a data type's own
-   I/O functions to convert to or from <type>text</> or other string types,
-   are not explicitly represented in <structname>pg_cast</structname>.
+   <quote>automatic I/O conversion casts</>, those performed using a data
+   type's own I/O functions to convert to or from <type>text</> or other
+   string types, are not explicitly represented in
+   <structname>pg_cast</structname>.
   </para>
 
   <table>
    <title><structname>pg_cast</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -1447,8 +1310,7 @@
       <entry><literal><link linkend="catalog-pg-proc"><structname>pg_proc</structname></link>.oid</literal></entry>
       <entry>
        The OID of the function to use to perform this cast.  Zero is
-       stored if the data types are binary compatible (that is, no
-       run-time operation is needed to perform the cast)
+       stored if the cast method doesn't require a function.
       </entry>
      </row>
 
@@ -1464,6 +1326,17 @@
        to a target column, as well as explicitly.
        <literal>i</> means implicitly in expressions, as well as the
        other cases
+      </entry>
+     </row>
+     <row>
+      <entry><structfield>castmethod</structfield></entry>
+      <entry><type>char</type></entry>
+      <entry></entry>
+      <entry>
+       Indicates how the cast is performed.
+       <literal>f</> means that the function specified in the <structfield>castfunc</> field is used.
+       <literal>i</> means that the input/output functions are used.
+       <literal>b</> means that the types are binary-coercible, thus no conversion is required
       </entry>
      </row>
     </tbody>
@@ -1521,7 +1394,7 @@
   <table>
    <title><structname>pg_class</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -1660,6 +1533,16 @@
      </row>
 
      <row>
+      <entry><structfield>relistemp</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>
+       True if this table is a temporary relation.  If so, only the creating
+       session can safely access its contents
+      </entry>
+     </row>
+
+     <row>
       <entry><structfield>relkind</structfield></entry>
       <entry><type>char</type></entry>
       <entry></entry>
@@ -1688,40 +1571,9 @@
       <entry><type>int2</type></entry>
       <entry></entry>
       <entry>
-       Number of check constraints on the table; see
+       Number of <literal>CHECK</> constraints on the table; see
        <link linkend="catalog-pg-constraint"><structname>pg_constraint</structname></link> catalog
       </entry>
-     </row>
-
-     <row>
-      <entry><structfield>reltriggers</structfield></entry>
-      <entry><type>int2</type></entry>
-      <entry></entry>
-      <entry>
-       Number of triggers on the table; see
-       <link linkend="catalog-pg-trigger"><structname>pg_trigger</structname></link> catalog
-      </entry>
-     </row>
-
-     <row>
-      <entry><structfield>relukeys</structfield></entry>
-      <entry><type>int2</type></entry>
-      <entry></entry>
-      <entry>Unused  (<emphasis>not</emphasis> the number of unique keys)</entry>
-     </row>
-
-     <row>
-      <entry><structfield>relfkeys</structfield></entry>
-      <entry><type>int2</type></entry>
-      <entry></entry>
-      <entry>Unused  (<emphasis>not</emphasis> the number of foreign keys on the table)</entry>
-     </row>
-
-     <row>
-      <entry><structfield>relrefs</structfield></entry>
-      <entry><type>int2</type></entry>
-      <entry></entry>
-      <entry>Unused</entry>
      </row>
 
      <row>
@@ -1747,8 +1599,18 @@
       <entry><type>bool</type></entry>
       <entry></entry>
       <entry>
-       True if table has rules; see
+       True if table has (or once had) rules; see
        <link linkend="catalog-pg-rewrite"><structname>pg_rewrite</structname></link> catalog
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>relhastriggers</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>
+       True if table has (or once had) triggers; see
+       <link linkend="catalog-pg-trigger"><structname>pg_trigger</structname></link> catalog
       </entry>
      </row>
 
@@ -1819,7 +1681,7 @@
   <table>
    <title><structname>pg_constraint</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -1897,28 +1759,64 @@
       <entry><structfield>confupdtype</structfield></entry>
       <entry><type>char</type></entry>
       <entry></entry>
-      <entry>Foreign key update action code</entry>
+      <entry>Foreign key update action code:
+            <literal>a</> = no action,
+            <literal>r</> = restrict,
+            <literal>c</> = cascade,
+            <literal>n</> = set null,
+            <literal>d</> = set default
+          </entry>
      </row>
 
      <row>
       <entry><structfield>confdeltype</structfield></entry>
       <entry><type>char</type></entry>
       <entry></entry>
-      <entry>Foreign key deletion action code</entry>
+      <entry>Foreign key deletion action code:
+            <literal>a</> = no action,
+            <literal>r</> = restrict,
+            <literal>c</> = cascade,
+            <literal>n</> = set null,
+            <literal>d</> = set default
+          </entry>
      </row>
 
      <row>
       <entry><structfield>confmatchtype</structfield></entry>
       <entry><type>char</type></entry>
       <entry></entry>
-      <entry>Foreign key match type</entry>
+      <entry>Foreign key match type:
+            <literal>f</> = full,
+            <literal>p</> = partial,
+            <literal>u</> = simple (unspecified)
+          </entry>
+     </row>
+
+     <row>
+      <entry><structfield>conislocal</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>
+       This constraint is defined locally in the relation.  Note that a
+       constraint can be locally defined and inherited simultaneously
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>coninhcount</structfield></entry>
+      <entry><type>int4</type></entry>
+      <entry></entry>
+      <entry>
+       The number of direct ancestors this constraint has.  A constraint with
+       a nonzero number of ancestors cannot be dropped nor renamed
+      </entry>
      </row>
 
      <row>
       <entry><structfield>conkey</structfield></entry>
       <entry><type>int2[]</type></entry>
       <entry><literal><link linkend="catalog-pg-attribute"><structname>pg_attribute</structname></link>.attnum</></entry>
-      <entry>If a table constraint, list of columns which the constraint constrains</entry>
+      <entry>If a table constraint (including a foreign key), list of the constrained columns</entry>
      </row>
 
      <row>
@@ -2002,7 +1900,7 @@
   <table>
    <title><structname>pg_conversion</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2095,7 +1993,7 @@
   <table>
    <title><structname>pg_database</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2130,6 +2028,20 @@
      </row>
 
      <row>
+      <entry><structfield>datcollate</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry></entry>
+      <entry>LC_COLLATE for this database</entry>
+     </row>
+
+     <row>
+      <entry><structfield>datctype</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry></entry>
+      <entry>LC_CTYPE for this database</entry>
+     </row>
+
+     <row>
       <entry><structfield>datistemplate</structfield></entry>
       <entry><type>bool</type></entry>
       <entry></entry>
@@ -2156,7 +2068,7 @@
       <entry><type>int4</type></entry>
       <entry></entry>
       <entry>
-       Sets maximum number of concurrent connections that can be made 
+       Sets maximum number of concurrent connections that can be made
        to this database.  -1 means no limit
       </entry>
      </row>
@@ -2246,7 +2158,7 @@
   <table>
    <title><structname>pg_depend</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2421,7 +2333,7 @@
   <table>
    <title><structname>pg_description</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2491,7 +2403,7 @@
   <table>
    <title><structname>pg_enum</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2521,6 +2433,176 @@
  </sect1>
 
 
+ <sect1 id="catalog-pg-foreign-data-wrapper">
+  <title><structname>pg_foreign_data_wrapper</structname></title>
+
+  <indexterm zone="catalog-pg-foreign-data-wrapper">
+   <primary>pg_foreign_data_wrapper</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_foreign_data_wrapper</structname> stores
+   foreign-data wrapper definitions.  A foreign-data wrapper is the
+   mechanism by which external data, residing on foreign servers, is
+   accessed.
+  </para>
+
+  <table>
+   <title><structname>pg_foreign_data_wrapper</> Columns</title>
+
+   <tgroup cols="4">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Type</entry>
+      <entry>References</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><structfield>fdwname</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry></entry>
+      <entry>Name of the foreign-data wrapper</entry>
+     </row>
+
+     <row>
+      <entry><structfield>fdwowner</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-authid"><structname>pg_authid</structname></link>.oid</literal></entry>
+      <entry>Owner of the foreign-data wrapper</entry>
+     </row>
+
+     <row>
+      <entry><structfield>fdwvalidator</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-proc"><structname>pg_proc</structname></link>.oid</literal></entry>
+      <entry>
+       References a validator function that is responsible for
+       checking the validity of the generic options given to the
+       foreign-data wrapper, as well as to foreign servers and user
+       mappings using the foreign-data wrapper.  Zero if no validator
+       is provided.
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>fdwacl</structfield></entry>
+      <entry><type>aclitem[]</type></entry>
+      <entry></entry>
+      <entry>
+       Access privileges; see
+       <xref linkend="sql-grant" endterm="sql-grant-title"> and
+       <xref linkend="sql-revoke" endterm="sql-revoke-title">
+       for details
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>fdwoptions</structfield></entry>
+      <entry><type>text[]</type></entry>
+      <entry></entry>
+      <entry>
+       Foreign-data wrapper specific options, as <quote>keyword=value</> strings
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-foreign-server">
+  <title><structname>pg_foreign_server</structname></title>
+
+  <indexterm zone="catalog-pg-foreign-server">
+   <primary>pg_foreign_server</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_foreign_server</structname> stores
+   foreign server definitions.  A foreign server describes the
+   connection to a remote server, managing external data.  Foreign
+   servers are accessed via foreign-data wrappers.
+  </para>
+
+  <table>
+   <title><structname>pg_foreign_server</> Columns</title>
+
+   <tgroup cols="4">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Type</entry>
+      <entry>References</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><structfield>srvname</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry></entry>
+      <entry>Name of the foreign server</entry>
+     </row>
+
+     <row>
+      <entry><structfield>srvowner</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-authid"><structname>pg_authid</structname></link>.oid</literal></entry>
+      <entry>Owner of the foreign server</entry>
+     </row>
+
+     <row>
+      <entry><structfield>srvfdw</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-foreign-data-wrapper"><structname>pg_foreign_data_wrapper</structname></link>.oid</literal></entry>
+      <entry>The OID of the foreign-data wrapper of this foreign server</entry>
+     </row>
+
+     <row>
+      <entry><structfield>srvtype</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry></entry>
+      <entry>Type of the server (optional)</entry>
+     </row>
+
+     <row>
+      <entry><structfield>srvversion</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry></entry>
+      <entry>Version of the server (optional)</entry>
+     </row>
+
+     <row>
+      <entry><structfield>srvacl</structfield></entry>
+      <entry><type>aclitem[]</type></entry>
+      <entry></entry>
+      <entry>
+       Access privileges; see
+       <xref linkend="sql-grant" endterm="sql-grant-title"> and
+       <xref linkend="sql-revoke" endterm="sql-revoke-title">
+       for details
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>srvoptions</structfield></entry>
+      <entry><type>text[]</type></entry>
+      <entry></entry>
+      <entry>
+       Foreign server specific options, as <quote>keyword=value</> strings.
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
+
  <sect1 id="catalog-pg-index">
   <title><structname>pg_index</structname></title>
 
@@ -2537,7 +2619,7 @@
   <table>
    <title><structname>pg_index</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2705,7 +2787,7 @@
   <table>
    <title><structname>pg_inherits</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2768,7 +2850,7 @@
   <table>
    <title><structname>pg_language</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2879,7 +2961,7 @@
   <table>
    <title><structname>pg_largeobject</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -2948,12 +3030,11 @@
   <table>
    <title><structname>pg_listener</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
       <entry>Type</entry>
-      <entry>References</entry>
       <entry>Description</entry>
      </row>
     </thead>
@@ -3006,7 +3087,7 @@
   <table>
    <title><structname>pg_namespace</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -3074,7 +3155,7 @@
   <table>
    <title><structname>pg_opclass</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -3172,7 +3253,7 @@
   <table>
    <title><structname>pg_operator</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -3322,7 +3403,7 @@
   <table>
    <title><structname>pg_opfamily</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -3403,7 +3484,7 @@
   <table>
    <title><structname>pg_pltemplate</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -3499,7 +3580,7 @@
   <table>
    <title><structname>pg_proc</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -3557,10 +3638,25 @@
      </row>
 
      <row>
+      <entry><structfield>provariadic</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-type"><structname>pg_type</structname></link>.oid</literal></entry>
+      <entry>Data type of the variadic array parameter's elements,
+       or zero if the function does not have a variadic parameter</entry>
+     </row>
+
+     <row>
       <entry><structfield>proisagg</structfield></entry>
       <entry><type>bool</type></entry>
       <entry></entry>
       <entry>Function is an aggregate function</entry>
+     </row>
+
+     <row>
+      <entry><structfield>proiswindow</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>Function is a window function</entry>
      </row>
 
      <row>
@@ -3614,7 +3710,14 @@
       <entry><structfield>pronargs</structfield></entry>
       <entry><type>int2</type></entry>
       <entry></entry>
-      <entry>Number of arguments</entry>
+      <entry>Number of input arguments</entry>
+     </row>
+
+     <row>
+      <entry><structfield>pronargdefaults</structfield></entry>
+      <entry><type>int2</type></entry>
+      <entry></entry>
+      <entry>Number of arguments that have defaults</entry>
      </row>
 
      <row>
@@ -3630,7 +3733,8 @@
       <entry><literal><link linkend="catalog-pg-type"><structname>pg_type</structname></link>.oid</literal></entry>
       <entry>
        An array with the data types of the function arguments.  This includes
-       only input arguments (including <literal>INOUT</literal> arguments), and thus represents
+       only input arguments (including <literal>INOUT</literal> and
+       <literal>VARIADIC</> arguments), and thus represents
        the call signature of the function
       </entry>
      </row>
@@ -3641,8 +3745,9 @@
       <entry><literal><link linkend="catalog-pg-type"><structname>pg_type</structname></link>.oid</literal></entry>
       <entry>
        An array with the data types of the function arguments.  This includes
-       all arguments (including <literal>OUT</literal> and <literal>INOUT</literal> arguments); however, if all the
-       arguments are IN arguments, this field will be null.
+       all arguments (including <literal>OUT</literal> and
+       <literal>INOUT</literal> arguments); however, if all the
+       arguments are <literal>IN</literal> arguments, this field will be null.
        Note that subscripting is 1-based, whereas for historical reasons
        <structfield>proargtypes</> is subscripted from 0
       </entry>
@@ -3656,8 +3761,11 @@
         An array with the modes of the function arguments, encoded as
         <literal>i</literal> for <literal>IN</> arguments,
         <literal>o</literal> for <literal>OUT</> arguments,
-        <literal>b</literal> for <literal>INOUT</> arguments.
-        If all the arguments are <literal>IN</literal> arguments, this field will be null.
+        <literal>b</literal> for <literal>INOUT</> arguments,
+        <literal>v</literal> for <literal>VARIADIC</> arguments,
+        <literal>t</literal> for <literal>TABLE</> arguments.
+        If all the arguments are <literal>IN</literal> arguments,
+        this field will be null.
         Note that subscripts correspond to positions of
         <structfield>proallargtypes</> not <structfield>proargtypes</>
       </entry>
@@ -3673,6 +3781,20 @@
         If none of the arguments have a name, this field will be null.
         Note that subscripts correspond to positions of
         <structfield>proallargtypes</> not <structfield>proargtypes</>
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>proargdefaults</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry></entry>
+      <entry>
+       Expression trees (in <function>nodeToString()</function> representation)
+       for default values.  This is a list with
+       <structfield>pronargdefaults</> elements, corresponding to the last
+       <replaceable>N</> <emphasis>input</> arguments (i.e., the last
+       <replaceable>N</> <structfield>proargtypes</> positions).
+       If none of the arguments have defaults, this field will be null
       </entry>
      </row>
 
@@ -3746,7 +3868,7 @@
   <table>
    <title><structname>pg_rewrite</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -3877,7 +3999,7 @@
   <table>
    <title><structname>pg_shdepend</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -3908,6 +4030,17 @@
       <entry><type>oid</type></entry>
       <entry>any OID column</entry>
       <entry>The OID of the specific dependent object</entry>
+     </row>
+
+     <row>
+      <entry><structfield>objsubid</structfield></entry>
+      <entry><type>int4</type></entry>
+      <entry></entry>
+      <entry>
+       For a table column, this is the column number (the
+       <structfield>objid</> and <structfield>classid</> refer to the
+       table itself).  For all other object types, this column is zero
+      </entry>
      </row>
 
      <row>
@@ -4019,7 +4152,7 @@
   <table>
    <title><structname>pg_shdescription</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4109,7 +4242,7 @@
   <table>
    <title><structname>pg_statistic</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4238,7 +4371,7 @@
   <table>
    <title><structname>pg_tablespace</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4303,7 +4436,7 @@
   <table>
    <title><structname>pg_trigger</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4436,8 +4569,8 @@
 
   <note>
    <para>
-    <literal>pg_class.reltriggers</literal> needs to agree with the
-    number of triggers found in this table for each relation.
+    <literal>pg_class.relhastriggers</literal>
+    must be true if a table has any triggers in this catalog.
    </para>
   </note>
 
@@ -4469,7 +4602,7 @@
   <table>
    <title><structname>pg_ts_config</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4537,7 +4670,7 @@
   <table>
    <title><structname>pg_ts_config_map</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4608,7 +4741,7 @@
   <table>
    <title><structname>pg_ts_dict</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4684,7 +4817,7 @@
   <table>
    <title><structname>pg_ts_parser</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4774,7 +4907,7 @@
   <table>
    <title><structname>pg_ts_template</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4829,7 +4962,7 @@
 
   <para>
    The catalog <structname>pg_type</structname> stores information about data
-   types.  Base types (scalar types) are created with
+   types.  Base types and enum types (scalar types) are created with
    <xref linkend="sql-createtype" endterm="sql-createtype-title">, and
    domains with
    <xref linkend="sql-createdomain" endterm="sql-createdomain-title">.
@@ -4841,7 +4974,7 @@
   <table>
    <title><structname>pg_type</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -4900,8 +5033,7 @@
        where Datum is 8 bytes).
        Variable-length types are always passed by reference. Note that
        <structfield>typbyval</structfield> can be false even if the
-       length would allow pass-by-value; this is currently true for
-       type <type>float4</type>, for example
+       length would allow pass-by-value
       </entry>
      </row>
 
@@ -4918,6 +5050,28 @@
        or <literal>p</literal> for a pseudo-type.
        See also <structfield>typrelid</structfield> and
        <structfield>typbasetype</structfield>
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>typcategory</structfield></entry>
+      <entry><type>char</type></entry>
+      <entry></entry>
+      <entry>
+       <structfield>typcategory</structfield> is an arbitrary classification
+       of data types that is used by the parser to determine which implicit
+       casts should be <quote>preferred</>.
+       See <xref linkend="catalog-typcategory-table">
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>typispreferred</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>
+       True if the type is a preferred cast target within its
+       <structfield>typcategory</structfield>
       </entry>
      </row>
 
@@ -5191,7 +5345,147 @@
     </tbody>
    </tgroup>
   </table>
+
+  <para>
+   <xref linkend="catalog-typcategory-table"> lists the system-defined values
+   of <structfield>typcategory</>.  Any future additions to this list will
+   also be upper-case ASCII letters.  All other ASCII characters are reserved
+   for user-defined categories.
+  </para>
+
+  <table id="catalog-typcategory-table">
+   <title><structfield>typcategory</> Codes</title>
+
+   <tgroup cols="2">
+    <thead>
+     <row>
+      <entry>Code</entry>
+      <entry>Category</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><literal>A</literal></entry>
+      <entry>Array types</entry>
+     </row>
+     <row>
+      <entry><literal>B</literal></entry>
+      <entry>Boolean types</entry>
+     </row>
+     <row>
+      <entry><literal>C</literal></entry>
+      <entry>Composite types</entry>
+     </row>
+     <row>
+      <entry><literal>D</literal></entry>
+      <entry>Date/time types</entry>
+     </row>
+     <row>
+      <entry><literal>E</literal></entry>
+      <entry>Enum types</entry>
+     </row>
+     <row>
+      <entry><literal>G</literal></entry>
+      <entry>Geometric types</entry>
+     </row>
+     <row>
+      <entry><literal>I</literal></entry>
+      <entry>Network address types</entry>
+     </row>
+     <row>
+      <entry><literal>N</literal></entry>
+      <entry>Numeric types</entry>
+     </row>
+     <row>
+      <entry><literal>P</literal></entry>
+      <entry>Pseudo-types</entry>
+     </row>
+     <row>
+      <entry><literal>S</literal></entry>
+      <entry>String types</entry>
+     </row>
+     <row>
+      <entry><literal>T</literal></entry>
+      <entry>Timespan types</entry>
+     </row>
+     <row>
+      <entry><literal>U</literal></entry>
+      <entry>User-defined types</entry>
+     </row>
+     <row>
+      <entry><literal>V</literal></entry>
+      <entry>Bit-string types</entry>
+     </row>
+     <row>
+      <entry><literal>X</literal></entry>
+      <entry><type>unknown</> type</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
  </sect1>
+
+
+ <sect1 id="catalog-pg-user-mapping">
+  <title><structname>pg_user_mapping</structname></title>
+
+  <indexterm zone="catalog-pg-user-mapping">
+   <primary>pg_user_mapping</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_user_mapping</structname> stores
+   the mappings from local user to remote.  Access to this catalog is
+   restricted from normal users, use the view
+   <link linkend="view-pg-user-mappings"><structname>pg_user_mappings</structname></link>
+   instead.
+  </para>
+
+  <table>
+   <title><structname>pg_user_mapping</> Columns</title>
+
+   <tgroup cols="4">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Type</entry>
+      <entry>References</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><structfield>umuser</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-authid"><structname>pg_authid</structname></link>.oid</literal></entry>
+      <entry>OID of the local role being mapped, 0 if the user mapping is public</entry>
+     </row>
+
+     <row>
+      <entry><structfield>umserver</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-foreign-server"><structname>pg_foreign_server</structname></link>.oid</literal></entry>
+      <entry>
+       The OID of the foreign server that contains this mapping
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>umoptions</structfield></entry>
+      <entry><type>text[]</type></entry>
+      <entry></entry>
+      <entry>
+       User mapping specific options, as <quote>keyword=value</> strings.
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
 
  <sect1 id="views-overview">
   <title>System Views</title>
@@ -5374,7 +5668,7 @@
   <table>
    <title><structname>pg_cursors</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -5460,7 +5754,7 @@
   <table>
    <title><structname>pg_group</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -5512,7 +5806,7 @@
   <table>
    <title><structname>pg_indexes</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -5596,7 +5890,7 @@
   <table>
    <title><structname>pg_locks</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -5691,7 +5985,10 @@
       <entry>any OID column</entry>
       <entry>
        OID of the object within its system catalog, or NULL if the
-       object is not a general database object
+       object is not a general database object.
+       For advisory locks it is used to distinguish the two key
+       spaces (<literal>1</> for an int8 key, <literal>2</> for two
+       int4 keys).
       </entry>
      </row>
      <row>
@@ -5758,7 +6055,7 @@
    for another transaction, it does so by attempting to acquire share lock on
    the other transaction ID (either virtual or permanent ID depending on the
    situation). That will succeed only when the other transaction
-   terminates and releases its locks. 
+   terminates and releases its locks.
   </para>
 
   <para>
@@ -5844,7 +6141,7 @@
   <table>
    <title><structname>pg_prepared_statements</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -5931,7 +6228,7 @@
   <table>
    <title><structname>pg_prepared_xacts</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6007,7 +6304,7 @@
   <para>
    The view <structname>pg_roles</structname> provides access to
    information about database roles.  This is simply a publicly
-   readable view of 
+   readable view of
    <link linkend="catalog-pg-authid"><structname>pg_authid</structname></link>
    that blanks out the password field.
   </para>
@@ -6020,7 +6317,7 @@
   <table>
    <title><structname>pg_roles</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6092,7 +6389,7 @@
       <entry><type>int4</type></entry>
       <entry></entry>
       <entry>
-       For roles that can log in, this sets maximum number of concurrent 
+       For roles that can log in, this sets maximum number of concurrent
        connections this role can make.  -1 means no limit
       </entry>
      </row>
@@ -6146,7 +6443,7 @@
   <table>
    <title><structname>pg_rules</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6201,7 +6498,8 @@
   <para>
    The view <structname>pg_settings</structname> provides access to
    run-time parameters of the server.  It is essentially an alternative
-   interface to the <command>SHOW</> and <command>SET</> commands.
+   interface to the <xref linkend="sql-show" endterm="sql-show-title">
+   and <xref linkend="sql-set" endterm="sql-set-title"> commands.
    It also provides access to some facts about each parameter that are
    not directly available from <command>SHOW</>, such as minimum and
    maximum values.
@@ -6210,7 +6508,7 @@
   <table>
    <title><structname>pg_settings</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6247,7 +6545,7 @@
      <row>
       <entry><structfield>extra_desc</structfield></entry>
       <entry><type>text</type></entry>
-      <entry>Additional, more detailed, information about the parameter</entry>
+      <entry>Additional, more detailed, description of the parameter</entry>
      </row>
      <row>
       <entry><structfield>context</structfield></entry>
@@ -6257,8 +6555,8 @@
      <row>
       <entry><structfield>vartype</structfield></entry>
       <entry><type>text</type></entry>
-      <entry>Parameter type (<literal>bool</>, <literal>integer</>,
-       <literal>real</>, or <literal>string</>)
+      <entry>Parameter type (<literal>bool</>, <literal>enum</>,
+       <literal>integer</>, <literal>real</>, or <literal>string</>)
       </entry>
      </row>
      <row>
@@ -6278,10 +6576,44 @@
       <entry>Maximum allowed value of the parameter (NULL for non-numeric
       values)</entry>
      </row>
+     <row>
+      <entry><structfield>enumvals</structfield></entry>
+      <entry><type>text[]</type></entry>
+      <entry>Allowed values of an enum parameter (NULL for non-enum
+      values)</entry>
+     </row>
+     <row>
+      <entry><structfield>boot_val</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry>Parameter value assumed at server startup if the parameter is
+      not otherwise set</entry>
+     </row>
+     <row>
+      <entry><structfield>reset_val</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry>Value that <command>RESET</command> would reset the parameter to
+      in the current session</entry>
+     </row>
+     <row>
+      <entry><structfield>sourcefile</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry>Configuration file the current value was set in (NULL for
+      values set from sources other than configuration files, or when
+      examined by a non-superuser).
+      Helpful when using configuration include directives</entry>
+     </row>
+     <row>
+      <entry><structfield>sourceline</structfield></entry>
+      <entry><type>integer</type></entry>
+      <entry>Line number within the configuration file the current value was
+      set at (NULL for values set from sources other than configuration files,
+      or when examined by a non-superuser)
+      </entry>
+     </row>
     </tbody>
    </tgroup>
   </table>
-  
+
   <para>
    The <structname>pg_settings</structname> view cannot be inserted into or
    deleted from, but it can be updated.  An <command>UPDATE</command> applied
@@ -6324,7 +6656,7 @@
   <table>
    <title><structname>pg_shadow</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6426,7 +6758,7 @@
   <table>
    <title><structname>pg_stats</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6494,6 +6826,8 @@
       <entry>
        A list of the most common values in the column. (NULL if
        no values seem to be more common than any others.)
+       For some datatypes such as <type>tsvector</>, this is a list of
+       the most common element values rather than values of the type itself.
       </entry>
      </row>
 
@@ -6502,10 +6836,13 @@
       <entry><type>real[]</type></entry>
       <entry></entry>
       <entry>
-       A list of the frequencies of the most common values,
+       A list of the frequencies of the most common values or elements,
        i.e., number of occurrences of each divided by total number of rows.
        (NULL when <structfield>most_common_vals</structfield> is.)
-     </entry>
+       For some datatypes such as <type>tsvector</>, it can also store some
+       additional information, making it longer than the
+       <structfield>most_common_vals</> array.
+      </entry>
      </row>
 
      <row>
@@ -6565,7 +6902,7 @@
   <table>
    <title><structname>pg_tables</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6609,13 +6946,13 @@
       <entry><structfield>hasrules</structfield></entry>
       <entry><type>boolean</type></entry>
       <entry><literal><link linkend="catalog-pg-class"><structname>pg_class</structname></link>.relhasrules</literal></entry>
-      <entry>true if table has rules</entry>
+      <entry>true if table has (or once had) rules</entry>
      </row>
      <row>
       <entry><structfield>hastriggers</structfield></entry>
       <entry><type>boolean</type></entry>
-      <entry><literal><link linkend="catalog-pg-class"><structname>pg_class</structname></link>.reltriggers</literal></entry>
-      <entry>true if table has triggers</entry>
+      <entry><literal><link linkend="catalog-pg-class"><structname>pg_class</structname></link>.relhastriggers</literal></entry>
+      <entry>true if table has (or once had) triggers</entry>
      </row>
     </tbody>
    </tgroup>
@@ -6640,7 +6977,7 @@
   <table>
    <title><structname>pg_timezone_abbrevs</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6692,7 +7029,7 @@
   <table>
    <title><structname>pg_timezone_names</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6737,7 +7074,7 @@
   <para>
    The view <structname>pg_user</structname> provides access to
    information about database users.  This is simply a publicly
-   readable view of 
+   readable view of
    <link linkend="view-pg-shadow"><structname>pg_shadow</structname></link>
    that blanks out the password field.
   </para>
@@ -6745,7 +7082,7 @@
   <table>
    <title><structname>pg_user</> Columns</title>
 
-   <tgroup cols=3>
+   <tgroup cols="3">
     <thead>
      <row>
       <entry>Name</entry>
@@ -6810,6 +7147,91 @@
 
  </sect1>
 
+ <sect1 id="view-pg-user-mappings">
+  <title><structname>pg_user_mappings</structname></title>
+
+  <indexterm zone="view-pg-user-mappings">
+   <primary>pg_user_mappings</primary>
+  </indexterm>
+
+  <para>
+   The view <structname>pg_user_mappings</structname> provides access
+   to information about user mappings.  This is essentially a publicly
+   readable view of
+   <link linkend="catalog-pg-user-mapping"><structname>pg_user_mapping</structname></link>
+   that leaves out the options field if the user has no rights to use
+   it.
+  </para>
+
+  <table>
+   <title><structname>pg_user_mappings</> Columns</title>
+
+   <tgroup cols="4">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Type</entry>
+      <entry>References</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><structfield>umid</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-user-mapping"><structname>pg_user_mapping</structname></link>.oid</literal></entry>
+      <entry>OID of the user mapping</entry>
+     </row>
+
+     <row>
+      <entry><structfield>srvid</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-foreign-server"><structname>pg_foreign_server</structname></link>.oid</literal></entry>
+      <entry>
+       The OID of the foreign server that contains this mapping
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>srvname</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry></entry>
+      <entry>
+       Name of the foreign server
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>umuser</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-authid"><structname>pg_authid</structname></link>.oid</literal></entry>
+      <entry>OID of the local role being mapped, 0 if the user mapping is public</entry>
+     </row>
+
+     <row>
+      <entry><structfield>usename</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry></entry>
+      <entry>Name of the local user to be mapped</entry>
+     </row>
+
+     <row>
+      <entry><structfield>umoptions</structfield></entry>
+      <entry><type>text[]</type></entry>
+      <entry></entry>
+      <entry>
+       User mapping specific options, as <quote>keyword=value</>
+       strings, if the current user is the owner of the foreign
+       server, else null.
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
+
+
  <sect1 id="view-pg-views">
   <title><structname>pg_views</structname></title>
 
@@ -6825,7 +7247,7 @@
   <table>
    <title><structname>pg_views</> Columns</title>
 
-   <tgroup cols=4>
+   <tgroup cols="4">
     <thead>
      <row>
       <entry>Name</entry>

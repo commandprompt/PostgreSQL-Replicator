@@ -3,7 +3,7 @@
  * fastpath.c
  *	  routines to handle function requests from the frontend
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -30,6 +30,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
 #include "utils/lsyscache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 
@@ -308,7 +309,7 @@ HandleFunctionRequest(StringInfo msgBuf)
 	 * Now that we know we are in a valid transaction, set snapshot in case
 	 * needed by function itself or one of the datatype I/O routines.
 	 */
-	ActiveSnapshot = CopySnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(GetTransactionSnapshot());
 
 	/*
 	 * Begin parsing the buffer contents.
@@ -394,6 +395,9 @@ HandleFunctionRequest(StringInfo msgBuf)
 	CHECK_FOR_INTERRUPTS();
 
 	SendFunctionResult(retval, fcinfo.isnull, fip->rettype, rformat);
+
+	/* We no longer need the snapshot */
+	PopActiveSnapshot();
 
 	/*
 	 * Emit duration logging if appropriate.

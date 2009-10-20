@@ -52,8 +52,10 @@
  * we log the completed index pages to WAL if and only if WAL archiving is
  * active.
  *
+ * This code isn't concerned about the FSM at all. The caller is responsible
+ * for initializing that.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -68,6 +70,7 @@
 #include "access/nbtree.h"
 #include "miscadmin.h"
 #include "storage/smgr.h"
+#include "utils/rel.h"
 #include "utils/tuplesort.h"
 
 
@@ -158,8 +161,8 @@ _bt_spoolinit(Relation index, bool isunique, bool isdead)
 	 * work_mem.
 	 */
 	btKbytes = isdead ? work_mem : maintenance_work_mem;
-	btspool->sortstate = tuplesort_begin_index(index, isunique,
-											   btKbytes, false);
+	btspool->sortstate = tuplesort_begin_index_btree(index, isunique,
+													 btKbytes, false);
 
 	return btspool;
 }
@@ -266,7 +269,7 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 	if (wstate->btws_use_wal)
 	{
 		/* We use the heap NEWPAGE record type for this */
-		log_newpage(&wstate->index->rd_node, blkno, page);
+		log_newpage(&wstate->index->rd_node, MAIN_FORKNUM, blkno, page);
 	}
 	else
 	{
@@ -285,7 +288,8 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 	{
 		if (!wstate->btws_zeropage)
 			wstate->btws_zeropage = (Page) palloc0(BLCKSZ);
-		smgrextend(wstate->index->rd_smgr, wstate->btws_pages_written++,
+		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM,
+				   wstate->btws_pages_written++,
 				   (char *) wstate->btws_zeropage,
 				   true);
 	}
@@ -298,13 +302,15 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 	if (blkno == wstate->btws_pages_written)
 	{
 		/* extending the file... */
-		smgrextend(wstate->index->rd_smgr, blkno, (char *) page, true);
+		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM, blkno,
+				   (char *) page, true);
 		wstate->btws_pages_written++;
 	}
 	else
 	{
 		/* overwriting a block we zero-filled before */
-		smgrwrite(wstate->index->rd_smgr, blkno, (char *) page, true);
+		smgrwrite(wstate->index->rd_smgr, MAIN_FORKNUM, blkno,
+				  (char *) page, true);
 	}
 
 	pfree(page);
@@ -474,9 +480,10 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 	if (itupsz > BTMaxItemSize(npage))
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("index row size %lu exceeds btree maximum, %lu",
+				 errmsg("index row size %lu exceeds maximum %lu for index \"%s\"",
 						(unsigned long) itupsz,
-						(unsigned long) BTMaxItemSize(npage)),
+						(unsigned long) BTMaxItemSize(npage),
+						RelationGetRelationName(wstate->index)),
 		errhint("Values larger than 1/3 of a buffer page cannot be indexed.\n"
 				"Consider a function index of an MD5 hash of the value, "
 				"or use full text indexing.")));
@@ -808,6 +815,6 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 	if (!wstate->index->rd_istemp)
 	{
 		RelationOpenSmgr(wstate->index);
-		smgrimmedsync(wstate->index->rd_smgr);
+		smgrimmedsync(wstate->index->rd_smgr, MAIN_FORKNUM);
 	}
 }

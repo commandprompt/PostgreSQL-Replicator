@@ -3,7 +3,7 @@
  * hashscan.c
  *	  manage scans on hash tables
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,7 +16,9 @@
 #include "postgres.h"
 
 #include "access/hash.h"
+#include "access/relscan.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/resowner.h"
 
 
@@ -57,8 +59,8 @@ ReleaseResources_hash(void)
 	/*
 	 * Release all HashScanList items belonging to the current ResourceOwner.
 	 * Note that we do not release the underlying IndexScanDesc; that's in
-	 * executor memory and will go away on its own (in fact quite possibly
-	 * has gone away already, so we mustn't try to touch it here).
+	 * executor memory and will go away on its own (in fact quite possibly has
+	 * gone away already, so we mustn't try to touch it here).
 	 *
 	 * Note: this should be a no-op during normal query shutdown. However, in
 	 * an abort situation ExecutorEnd is not called and so there may be open

@@ -1,3 +1,10 @@
+/*
+ * $PostgreSQL$
+ */
+#include "postgres.h"
+
+#include "utils/builtins.h"
+
 #include "_int.h"
 
 PG_FUNCTION_INFO_V1(bqarr_in);
@@ -47,13 +54,13 @@ typedef struct
 	NODE	   *str;
 	/* number in str */
 	int4		num;
-}	WORKSTATE;
+} WORKSTATE;
 
 /*
  * get token from query string
  */
 static int4
-gettoken(WORKSTATE * state, int4 *val)
+gettoken(WORKSTATE *state, int4 *val)
 {
 	char		nnn[16],
 			   *curnnn;
@@ -136,7 +143,7 @@ gettoken(WORKSTATE * state, int4 *val)
  * push new one in polish notation reverse view
  */
 static void
-pushquery(WORKSTATE * state, int4 type, int4 val)
+pushquery(WORKSTATE *state, int4 type, int4 val)
 {
 	NODE	   *tmp = (NODE *) palloc(sizeof(NODE));
 
@@ -153,7 +160,7 @@ pushquery(WORKSTATE * state, int4 type, int4 val)
  * make polish notation of query
  */
 static int4
-makepol(WORKSTATE * state)
+makepol(WORKSTATE *state)
 {
 	int4		val,
 				type;
@@ -232,7 +239,7 @@ typedef struct
  * is there value 'val' in array or not ?
  */
 static bool
-checkcondition_arr(void *checkval, ITEM * item)
+checkcondition_arr(void *checkval, ITEM *item)
 {
 	int4	   *StopLow = ((CHKVAL *) checkval)->arrb;
 	int4	   *StopHigh = ((CHKVAL *) checkval)->arre;
@@ -254,7 +261,7 @@ checkcondition_arr(void *checkval, ITEM * item)
 }
 
 static bool
-checkcondition_bit(void *checkval, ITEM * item)
+checkcondition_bit(void *checkval, ITEM *item)
 {
 	return GETBIT(checkval, HASHVAL(item->val));
 }
@@ -263,7 +270,7 @@ checkcondition_bit(void *checkval, ITEM * item)
  * check for boolean condition
  */
 static bool
-execute(ITEM * curitem, void *checkval, bool calcnot, bool (*chkcond) (void *checkval, ITEM * item))
+execute(ITEM *curitem, void *checkval, bool calcnot, bool (*chkcond) (void *checkval, ITEM *item))
 {
 
 	if (curitem->type == VAL)
@@ -295,7 +302,7 @@ execute(ITEM * curitem, void *checkval, bool calcnot, bool (*chkcond) (void *che
  * signconsistent & execconsistent called by *_consistent
  */
 bool
-signconsistent(QUERYTYPE * query, BITVEC sign, bool calcnot)
+signconsistent(QUERYTYPE *query, BITVEC sign, bool calcnot)
 {
 	return execute(
 				   GETQUERY(query) + query->size - 1,
@@ -305,7 +312,7 @@ signconsistent(QUERYTYPE * query, BITVEC sign, bool calcnot)
 }
 
 bool
-execconsistent(QUERYTYPE * query, ArrayType *array, bool calcnot)
+execconsistent(QUERYTYPE *query, ArrayType *array, bool calcnot)
 {
 	CHKVAL		chkval;
 
@@ -326,7 +333,7 @@ typedef struct
 } GinChkVal;
 
 static bool
-checkcondition_gin(void *checkval, ITEM * item)
+checkcondition_gin(void *checkval, ITEM *item)
 {
 	GinChkVal  *gcv = (GinChkVal *) checkval;
 
@@ -334,7 +341,7 @@ checkcondition_gin(void *checkval, ITEM * item)
 }
 
 bool
-ginconsistent(QUERYTYPE * query, bool *check)
+ginconsistent(QUERYTYPE *query, bool *check)
 {
 	GinChkVal	gcv;
 	ITEM	   *items = GETQUERY(query);
@@ -401,7 +408,7 @@ boolop(PG_FUNCTION_ARGS)
 }
 
 static void
-findoprnd(ITEM * ptr, int4 *pos)
+findoprnd(ITEM *ptr, int4 *pos)
 {
 #ifdef BS_DEBUG
 	elog(DEBUG3, (ptr[*pos].type == OPR) ?
@@ -611,7 +618,7 @@ bqarr_out(PG_FUNCTION_ARGS)
 }
 
 static int4
-countdroptree(ITEM * q, int4 pos)
+countdroptree(ITEM *q, int4 pos)
 {
 	if (q[pos].type == VAL)
 		return 1;
@@ -627,7 +634,7 @@ countdroptree(ITEM * q, int4 pos)
  * we can modify query tree for clearing
  */
 int4
-shorterquery(ITEM * q, int4 len)
+shorterquery(ITEM *q, int4 len)
 {
 	int4		index,
 				posnot,
@@ -765,9 +772,7 @@ querytree(PG_FUNCTION_ARGS)
 
 	if (len == 0)
 	{
-		res = (text *) palloc(1 + VARHDRSZ);
-		SET_VARSIZE(res, 1 + VARHDRSZ);
-		*((char *) VARDATA(res)) = 'T';
+		res = cstring_to_text("T");
 	}
 	else
 	{
@@ -776,12 +781,9 @@ querytree(PG_FUNCTION_ARGS)
 		nrm.cur = nrm.buf = (char *) palloc(sizeof(char) * nrm.buflen);
 		*(nrm.cur) = '\0';
 		infix(&nrm, true);
-
-		res = (text *) palloc(nrm.cur - nrm.buf + VARHDRSZ);
-		SET_VARSIZE(res, nrm.cur - nrm.buf + VARHDRSZ);
-		memcpy(VARDATA(res), nrm.buf, nrm.cur - nrm.buf);
+		res = cstring_to_text_with_len(nrm.buf, nrm.cur - nrm.buf);
 	}
 	pfree(q);
 
-	PG_RETURN_POINTER(res);
+	PG_RETURN_TEXT_P(res);
 }

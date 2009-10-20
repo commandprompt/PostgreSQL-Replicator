@@ -3,10 +3,13 @@
  * Teodor Sigaev <teodor@stack.net>
  * $PostgreSQL$
  */
+#include "postgres.h"
 
-#include "ltree.h"
 #include <ctype.h>
+
 #include "utils/array.h"
+#include "utils/formatting.h"
+#include "ltree.h"
 
 PG_FUNCTION_INFO_V1(ltq_regex);
 PG_FUNCTION_INFO_V1(ltq_rregex);
@@ -24,29 +27,30 @@ typedef struct
 	int			nt;
 	int			posq;
 	int			post;
-}	FieldNot;
+} FieldNot;
 
 static char *
 getlexeme(char *start, char *end, int *len)
 {
 	char	   *ptr;
+	int			charlen;
 
-	while (start < end && *start == '_')
-		start++;
+	while (start < end && (charlen = pg_mblen(start)) == 1 && t_iseq(start, '_'))
+		start += charlen;
 
 	ptr = start;
-	if (ptr == end)
+	if (ptr >= end)
 		return NULL;
 
-	while (ptr < end && *ptr != '_')
-		ptr++;
+	while (ptr < end && !((charlen = pg_mblen(ptr)) == 1 && t_iseq(ptr, '_')))
+		ptr += charlen;
 
 	*len = ptr - start;
 	return start;
 }
 
 bool
-			compare_subnode(ltree_level * t, char *qn, int len, int (*cmpptr) (const char *, const char *, size_t), bool anyend)
+			compare_subnode(ltree_level *t, char *qn, int len, int (*cmpptr) (const char *, const char *, size_t), bool anyend)
 {
 	char	   *endt = t->name + t->len;
 	char	   *endq = qn + len;
@@ -83,8 +87,23 @@ bool
 	return true;
 }
 
+int
+ltree_strncasecmp(const char *a, const char *b, size_t s)
+{
+	char	   *al = str_tolower(a, s);
+	char	   *bl = str_tolower(b, s);
+	int			res;
+
+	res = strncmp(al, bl, s);
+
+	pfree(al);
+	pfree(bl);
+
+	return res;
+}
+
 static bool
-checkLevel(lquery_level * curq, ltree_level * curt)
+checkLevel(lquery_level *curq, ltree_level *curt)
 {
 	int			(*cmpptr) (const char *, const char *, size_t);
 	lquery_variant *curvar = LQL_FIRST(curq);
@@ -92,7 +111,7 @@ checkLevel(lquery_level * curq, ltree_level * curt)
 
 	for (i = 0; i < curq->numvar; i++)
 	{
-		cmpptr = (curvar->flag & LVAR_INCASE) ? pg_strncasecmp : strncmp;
+		cmpptr = (curvar->flag & LVAR_INCASE) ? ltree_strncasecmp : strncmp;
 
 		if (curvar->flag & LVAR_SUBLEXEME)
 		{
@@ -135,7 +154,7 @@ static struct
 };
 
 static bool
-checkCond(lquery_level * curq, int query_numlevel, ltree_level * curt, int tree_numlevel, FieldNot * ptr)
+checkCond(lquery_level *curq, int query_numlevel, ltree_level *curt, int tree_numlevel, FieldNot *ptr)
 {
 	uint32		low_pos = 0,
 				high_pos = 0,

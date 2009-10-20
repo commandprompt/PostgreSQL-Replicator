@@ -3,7 +3,7 @@
  * auth.c
  *	  Routines to handle network authentication
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,6 +21,9 @@
 #include <sys/uio.h>
 #include <sys/ucred.h>
 #endif
+#ifdef HAVE_UCRED_H
+#include <ucred.h>
+#endif
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -32,18 +35,33 @@
 #include "libpq/pqformat.h"
 #include "storage/ipc.h"
 
-
+/*----------------------------------------------------------------
+ * Global authentication functions
+ *----------------------------------------------------------------
+ */
 static void sendAuthRequest(Port *port, AuthRequest areq);
 static void auth_failed(Port *port, int status);
 static char *recv_password_packet(Port *port);
 static int	recv_and_check_password_packet(Port *port);
 
-char	   *pg_krb_server_keyfile;
-char	   *pg_krb_srvnam;
-bool		pg_krb_caseins_users;
-char	   *pg_krb_server_hostname = NULL;
-char	   *pg_krb_realm = NULL;
 
+/*----------------------------------------------------------------
+ * Ident authentication
+ *----------------------------------------------------------------
+ */
+/* Max size of username ident server can return */
+#define IDENT_USERNAME_MAX 512
+
+/* Standard TCP port number for Ident service.	Assigned by IANA */
+#define IDENT_PORT 113
+
+static int	authident(hbaPort *port);
+
+
+/*----------------------------------------------------------------
+ * PAM authentication
+ *----------------------------------------------------------------
+ */
 #ifdef USE_PAM
 #ifdef HAVE_PAM_PAM_APPL_H
 #include <pam/pam_appl.h>
@@ -68,6 +86,11 @@ static Port *pam_port_cludge;	/* Workaround for passing "Port *port" into
 								 * pam_passwd_conv_proc */
 #endif   /* USE_PAM */
 
+
+/*----------------------------------------------------------------
+ * LDAP authentication
+ *----------------------------------------------------------------
+ */
 #ifdef USE_LDAP
 #ifndef WIN32
 /* We use a deprecated function to keep the codepath the same as win32. */
@@ -78,31 +101,48 @@ static Port *pam_port_cludge;	/* Workaround for passing "Port *port" into
 
 /* Correct header from the Platform SDK */
 typedef
-ULONG(*__ldap_start_tls_sA) (
-							 IN PLDAP ExternalHandle,
-							 OUT PULONG ServerReturnValue,
-							 OUT LDAPMessage ** result,
-							 IN PLDAPControlA * ServerControls,
-							 IN PLDAPControlA * ClientControls
+ULONG		(*__ldap_start_tls_sA) (
+												IN PLDAP ExternalHandle,
+												OUT PULONG ServerReturnValue,
+												OUT LDAPMessage **result,
+										   IN PLDAPControlA * ServerControls,
+											IN PLDAPControlA * ClientControls
 );
 #endif
 
 static int	CheckLDAPAuth(Port *port);
+#endif   /* USE_LDAP */
+
+/*----------------------------------------------------------------
+ * Cert authentication
+ *----------------------------------------------------------------
+ */
+#ifdef USE_SSL
+static int	CheckCertAuth(Port *port);
 #endif
 
 
-#ifdef KRB5
+/*----------------------------------------------------------------
+ * Kerberos and GSSAPI GUCs
+ *----------------------------------------------------------------
+ */
+char	   *pg_krb_server_keyfile;
+char	   *pg_krb_srvnam;
+bool		pg_krb_caseins_users;
+
+
 /*----------------------------------------------------------------
  * MIT Kerberos authentication system - protocol version 5
  *----------------------------------------------------------------
  */
+#ifdef KRB5
+static int	pg_krb5_recvauth(Port *port);
 
 #include <krb5.h>
 /* Some old versions of Kerberos do not include <com_err.h> in <krb5.h> */
 #if !defined(__COM_ERR_H) && !defined(__COM_ERR_H__)
 #include <com_err.h>
 #endif
-
 /*
  * Various krb5 state which is not connection specfic, and a flag to
  * indicate whether we have initialised it yet.
@@ -111,10 +151,479 @@ static int	pg_krb5_initialised;
 static krb5_context pg_krb5_context;
 static krb5_keytab pg_krb5_keytab;
 static krb5_principal pg_krb5_server;
+#endif   /* KRB5 */
 
+
+/*----------------------------------------------------------------
+ * GSSAPI Authentication
+ *----------------------------------------------------------------
+ */
+#ifdef ENABLE_GSS
+#if defined(HAVE_GSSAPI_H)
+#include <gssapi.h>
+#else
+#include <gssapi/gssapi.h>
+#endif
+
+static int	pg_GSS_recvauth(Port *port);
+#endif   /* ENABLE_GSS */
+
+
+/*----------------------------------------------------------------
+ * SSPI Authentication
+ *----------------------------------------------------------------
+ */
+#ifdef ENABLE_SSPI
+typedef SECURITY_STATUS
+			(WINAPI * QUERY_SECURITY_CONTEXT_TOKEN_FN) (
+													   PCtxtHandle, void **);
+static int	pg_SSPI_recvauth(Port *port);
+#endif
+
+
+/*
+ * Maximum accepted size of GSS and SSPI authentication tokens.
+ *
+ * Kerberos tickets are usually quite small, but the TGTs issued by Windows
+ * domain controllers include an authorization field known as the Privilege
+ * Attribute Certificate (PAC), which contains the user's Windows permissions
+ * (group memberships etc.). The PAC is copied into all tickets obtained on
+ * the basis of this TGT (even those issued by Unix realms which the Windows
+ * realm trusts), and can be several kB in size. The maximum token size
+ * accepted by Windows systems is determined by the MaxAuthToken Windows
+ * registry setting. Microsoft recommends that it is not set higher than
+ * 65535 bytes, so that seems like a reasonable limit for us as well.
+ */
+#define PG_MAX_AUTH_TOKEN_LENGTH	65535
+
+
+/*----------------------------------------------------------------
+ * Global authentication functions
+ *----------------------------------------------------------------
+ */
+
+
+/*
+ * Tell the user the authentication failed, but not (much about) why.
+ *
+ * There is a tradeoff here between security concerns and making life
+ * unnecessarily difficult for legitimate users.  We would not, for example,
+ * want to report the password we were expecting to receive...
+ * But it seems useful to report the username and authorization method
+ * in use, and these are items that must be presumed known to an attacker
+ * anyway.
+ * Note that many sorts of failure report additional information in the
+ * postmaster log, which we hope is only readable by good guys.
+ */
+static void
+auth_failed(Port *port, int status)
+{
+	const char *errstr;
+
+	/*
+	 * If we failed due to EOF from client, just quit; there's no point in
+	 * trying to send a message to the client, and not much point in logging
+	 * the failure in the postmaster log.  (Logging the failure might be
+	 * desirable, were it not for the fact that libpq closes the connection
+	 * unceremoniously if challenged for a password when it hasn't got one to
+	 * send.  We'll get a useless log entry for every psql connection under
+	 * password auth, even if it's perfectly successful, if we log STATUS_EOF
+	 * events.)
+	 */
+	if (status == STATUS_EOF)
+		proc_exit(0);
+
+	switch (port->hba->auth_method)
+	{
+		case uaReject:
+			errstr = gettext_noop("authentication failed for user \"%s\": host rejected");
+			break;
+		case uaKrb5:
+			errstr = gettext_noop("Kerberos 5 authentication failed for user \"%s\"");
+			break;
+		case uaGSS:
+			errstr = gettext_noop("GSSAPI authentication failed for user \"%s\"");
+			break;
+		case uaSSPI:
+			errstr = gettext_noop("SSPI authentication failed for user \"%s\"");
+			break;
+		case uaTrust:
+			errstr = gettext_noop("\"trust\" authentication failed for user \"%s\"");
+			break;
+		case uaIdent:
+			errstr = gettext_noop("Ident authentication failed for user \"%s\"");
+			break;
+		case uaMD5:
+		case uaPassword:
+			errstr = gettext_noop("password authentication failed for user \"%s\"");
+			break;
+		case uaPAM:
+			errstr = gettext_noop("PAM authentication failed for user \"%s\"");
+			break;
+		case uaLDAP:
+			errstr = gettext_noop("LDAP authentication failed for user \"%s\"");
+			break;
+		default:
+			errstr = gettext_noop("authentication failed for user \"%s\": invalid authentication method");
+			break;
+	}
+
+	ereport(FATAL,
+			(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+			 errmsg(errstr, port->user_name)));
+	/* doesn't return */
+}
+
+
+/*
+ * Client authentication starts here.  If there is an error, this
+ * function does not return and the backend process is terminated.
+ */
+void
+ClientAuthentication(Port *port)
+{
+	int			status = STATUS_ERROR;
+
+	/*
+	 * Get the authentication method to use for this frontend/database
+	 * combination.  Note: a failure return indicates a problem with the hba
+	 * config file, not with the request.  hba.c should have dropped an error
+	 * message into the postmaster logfile if it failed.
+	 */
+	if (hba_getauthmethod(port) != STATUS_OK)
+		ereport(FATAL,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("missing or erroneous pg_hba.conf file"),
+				 errhint("See server log for details.")));
+
+	/*
+	 * This is the first point where we have access to the hba record for the
+	 * current connection, so perform any verifications based on the hba
+	 * options field that should be done *before* the authentication here.
+	 */
+	if (port->hba->clientcert)
+	{
+		/*
+		 * When we parse pg_hba.conf, we have already made sure that we have
+		 * been able to load a certificate store. Thus, if a certificate is
+		 * present on the client, it has been verified against our root
+		 * certificate store, and the connection would have been aborted
+		 * already if it didn't verify ok.
+		 */
+#ifdef USE_SSL
+		if (!port->peer)
+		{
+			ereport(FATAL,
+					(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+				  errmsg("connection requires a valid client certificate")));
+		}
+#else
+
+		/*
+		 * hba.c makes sure hba->clientcert can't be set unless OpenSSL is
+		 * present.
+		 */
+		Assert(false);
+#endif
+	}
+
+	/*
+	 * Now proceed to do the actual authentication check
+	 */
+	switch (port->hba->auth_method)
+	{
+		case uaReject:
+
+			/*
+			 * This could have come from an explicit "reject" entry in
+			 * pg_hba.conf, but more likely it means there was no matching
+			 * entry.  Take pity on the poor user and issue a helpful error
+			 * message.  NOTE: this is not a security breach, because all the
+			 * info reported here is known at the frontend and must be assumed
+			 * known to bad guys. We're merely helping out the less clueful
+			 * good guys.
+			 */
+			{
+				char		hostinfo[NI_MAXHOST];
+
+				pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
+								   hostinfo, sizeof(hostinfo),
+								   NULL, 0,
+								   NI_NUMERICHOST);
+
+#ifdef USE_SSL
+				ereport(FATAL,
+						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+						 errmsg("no pg_hba.conf entry for host \"%s\", user \"%s\", database \"%s\", %s",
+							  hostinfo, port->user_name, port->database_name,
+								port->ssl ? _("SSL on") : _("SSL off"))));
+#else
+				ereport(FATAL,
+						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+						 errmsg("no pg_hba.conf entry for host \"%s\", user \"%s\", database \"%s\"",
+						   hostinfo, port->user_name, port->database_name)));
+#endif
+				break;
+			}
+
+		case uaKrb5:
+#ifdef KRB5
+			sendAuthRequest(port, AUTH_REQ_KRB5);
+			status = pg_krb5_recvauth(port);
+#else
+			Assert(false);
+#endif
+			break;
+
+		case uaGSS:
+#ifdef ENABLE_GSS
+			sendAuthRequest(port, AUTH_REQ_GSS);
+			status = pg_GSS_recvauth(port);
+#else
+			Assert(false);
+#endif
+			break;
+
+		case uaSSPI:
+#ifdef ENABLE_SSPI
+			sendAuthRequest(port, AUTH_REQ_SSPI);
+			status = pg_SSPI_recvauth(port);
+#else
+			Assert(false);
+#endif
+			break;
+
+		case uaIdent:
+
+			/*
+			 * If we are doing ident on unix-domain sockets, use SCM_CREDS
+			 * only if it is defined and SO_PEERCRED isn't.
+			 */
+#if !defined(HAVE_GETPEEREID) && !defined(SO_PEERCRED) && \
+	(defined(HAVE_STRUCT_CMSGCRED) || defined(HAVE_STRUCT_FCRED) || \
+	 (defined(HAVE_STRUCT_SOCKCRED) && defined(LOCAL_CREDS)))
+			if (port->raddr.addr.ss_family == AF_UNIX)
+			{
+#if defined(HAVE_STRUCT_FCRED) || defined(HAVE_STRUCT_SOCKCRED)
+
+				/*
+				 * Receive credentials on next message receipt, BSD/OS,
+				 * NetBSD. We need to set this before the client sends the
+				 * next packet.
+				 */
+				int			on = 1;
+
+				if (setsockopt(port->sock, 0, LOCAL_CREDS, &on, sizeof(on)) < 0)
+					ereport(FATAL,
+							(errcode_for_socket_access(),
+					   errmsg("could not enable credential reception: %m")));
+#endif
+
+				sendAuthRequest(port, AUTH_REQ_SCM_CREDS);
+			}
+#endif
+			status = authident(port);
+			break;
+
+		case uaMD5:
+			if (Db_user_namespace)
+				ereport(FATAL,
+						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+						 errmsg("MD5 authentication is not supported when \"db_user_namespace\" is enabled")));
+			sendAuthRequest(port, AUTH_REQ_MD5);
+			status = recv_and_check_password_packet(port);
+			break;
+
+		case uaPassword:
+			sendAuthRequest(port, AUTH_REQ_PASSWORD);
+			status = recv_and_check_password_packet(port);
+			break;
+
+		case uaPAM:
+#ifdef USE_PAM
+			status = CheckPAMAuth(port, port->user_name, "");
+#else
+			Assert(false);
+#endif   /* USE_PAM */
+			break;
+
+		case uaLDAP:
+#ifdef USE_LDAP
+			status = CheckLDAPAuth(port);
+#else
+			Assert(false);
+#endif
+			break;
+
+		case uaCert:
+#ifdef USE_SSL
+			status = CheckCertAuth(port);
+#else
+			Assert(false);
+#endif
+			break;
+
+		case uaTrust:
+			status = STATUS_OK;
+			break;
+	}
+
+	if (status == STATUS_OK)
+		sendAuthRequest(port, AUTH_REQ_OK);
+	else
+		auth_failed(port, status);
+}
+
+
+/*
+ * Send an authentication request packet to the frontend.
+ */
+static void
+sendAuthRequest(Port *port, AuthRequest areq)
+{
+	StringInfoData buf;
+
+	pq_beginmessage(&buf, 'R');
+	pq_sendint(&buf, (int32) areq, sizeof(int32));
+
+	/* Add the salt for encrypted passwords. */
+	if (areq == AUTH_REQ_MD5)
+		pq_sendbytes(&buf, port->md5Salt, 4);
+
+#if defined(ENABLE_GSS) || defined(ENABLE_SSPI)
+
+	/*
+	 * Add the authentication data for the next step of the GSSAPI or SSPI
+	 * negotiation.
+	 */
+	else if (areq == AUTH_REQ_GSS_CONT)
+	{
+		if (port->gss->outbuf.length > 0)
+		{
+			elog(DEBUG4, "sending GSS token of length %u",
+				 (unsigned int) port->gss->outbuf.length);
+
+			pq_sendbytes(&buf, port->gss->outbuf.value, port->gss->outbuf.length);
+		}
+	}
+#endif
+
+	pq_endmessage(&buf);
+
+	/*
+	 * Flush message so client will see it, except for AUTH_REQ_OK, which need
+	 * not be sent until we are ready for queries.
+	 */
+	if (areq != AUTH_REQ_OK)
+		pq_flush();
+}
+
+/*
+ * Collect password response packet from frontend.
+ *
+ * Returns NULL if couldn't get password, else palloc'd string.
+ */
+static char *
+recv_password_packet(Port *port)
+{
+	StringInfoData buf;
+
+	if (PG_PROTOCOL_MAJOR(port->proto) >= 3)
+	{
+		/* Expect 'p' message type */
+		int			mtype;
+
+		mtype = pq_getbyte();
+		if (mtype != 'p')
+		{
+			/*
+			 * If the client just disconnects without offering a password,
+			 * don't make a log entry.  This is legal per protocol spec and in
+			 * fact commonly done by psql, so complaining just clutters the
+			 * log.
+			 */
+			if (mtype != EOF)
+				ereport(COMMERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					errmsg("expected password response, got message type %d",
+						   mtype)));
+			return NULL;		/* EOF or bad message type */
+		}
+	}
+	else
+	{
+		/* For pre-3.0 clients, avoid log entry if they just disconnect */
+		if (pq_peekbyte() == EOF)
+			return NULL;		/* EOF */
+	}
+
+	initStringInfo(&buf);
+	if (pq_getmessage(&buf, 1000))		/* receive password */
+	{
+		/* EOF - pq_getmessage already logged a suitable message */
+		pfree(buf.data);
+		return NULL;
+	}
+
+	/*
+	 * Apply sanity check: password packet length should agree with length of
+	 * contained string.  Note it is safe to use strlen here because
+	 * StringInfo is guaranteed to have an appended '\0'.
+	 */
+	if (strlen(buf.data) + 1 != buf.len)
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("invalid password packet size")));
+
+	/* Do not echo password to logs, for security. */
+	ereport(DEBUG5,
+			(errmsg("received password packet")));
+
+	/*
+	 * Return the received string.	Note we do not attempt to do any
+	 * character-set conversion on it; since we don't yet know the client's
+	 * encoding, there wouldn't be much point.
+	 */
+	return buf.data;
+}
+
+
+/*----------------------------------------------------------------
+ * MD5 authentication
+ *----------------------------------------------------------------
+ */
+
+/*
+ * Called when we have sent an authorization request for a password.
+ * Get the response and check it.
+ */
+static int
+recv_and_check_password_packet(Port *port)
+{
+	char	   *passwd;
+	int			result;
+
+	passwd = recv_password_packet(port);
+
+	if (passwd == NULL)
+		return STATUS_EOF;		/* client wouldn't send password */
+
+	result = md5_crypt_verify(port, port->user_name, passwd);
+
+	pfree(passwd);
+
+	return result;
+}
+
+
+/*----------------------------------------------------------------
+ * MIT Kerberos authentication system - protocol version 5
+ *----------------------------------------------------------------
+ */
+#ifdef KRB5
 
 static int
-pg_krb5_init(void)
+pg_krb5_init(Port *port)
 {
 	krb5_error_code retval;
 	char	   *khostname;
@@ -148,7 +657,7 @@ pg_krb5_init(void)
 	 * If no hostname was specified, pg_krb_server_hostname is already NULL.
 	 * If it's set to blank, force it to NULL.
 	 */
-	khostname = pg_krb_server_hostname;
+	khostname = port->hba->krb_server_hostname;
 	if (khostname && khostname[0] == '\0')
 		khostname = NULL;
 
@@ -198,7 +707,7 @@ pg_krb5_recvauth(Port *port)
 	if (get_role_line(port->user_name) == NULL)
 		return STATUS_ERROR;
 
-	ret = pg_krb5_init();
+	ret = pg_krb5_init(port);
 	if (ret != STATUS_OK)
 		return ret;
 
@@ -242,22 +751,28 @@ pg_krb5_recvauth(Port *port)
 	cp = strchr(kusername, '@');
 	if (cp)
 	{
-		*cp = '\0';
+		/*
+		 * If we are not going to include the realm in the username that is
+		 * passed to the ident map, destructively modify it here to remove the
+		 * realm. Then advance past the separator to check the realm.
+		 */
+		if (!port->hba->include_realm)
+			*cp = '\0';
 		cp++;
 
-		if (pg_krb_realm != NULL && strlen(pg_krb_realm))
+		if (port->hba->krb_realm != NULL && strlen(port->hba->krb_realm))
 		{
 			/* Match realm against configured */
 			if (pg_krb_caseins_users)
-				ret = pg_strcasecmp(pg_krb_realm, cp);
+				ret = pg_strcasecmp(port->hba->krb_realm, cp);
 			else
-				ret = strcmp(pg_krb_realm, cp);
+				ret = strcmp(port->hba->krb_realm, cp);
 
 			if (ret)
 			{
 				elog(DEBUG2,
 					 "krb5 realm (%s) and configured realm (%s) don't match",
-					 cp, pg_krb_realm);
+					 cp, port->hba->krb_realm);
 
 				krb5_free_ticket(pg_krb5_context, ticket);
 				krb5_auth_con_free(pg_krb5_context, auth_context);
@@ -265,7 +780,7 @@ pg_krb5_recvauth(Port *port)
 			}
 		}
 	}
-	else if (pg_krb_realm && strlen(pg_krb_realm))
+	else if (port->hba->krb_realm && strlen(port->hba->krb_realm))
 	{
 		elog(DEBUG2,
 			 "krb5 did not return realm but realm matching was requested");
@@ -275,19 +790,8 @@ pg_krb5_recvauth(Port *port)
 		return STATUS_ERROR;
 	}
 
-	if (pg_krb_caseins_users)
-		ret = pg_strncasecmp(port->user_name, kusername, SM_DATABASE_USER);
-	else
-		ret = strncmp(port->user_name, kusername, SM_DATABASE_USER);
-	if (ret)
-	{
-		ereport(LOG,
-				(errmsg("unexpected Kerberos user name received from client (received \"%s\", expected \"%s\")",
-						port->user_name, kusername)));
-		ret = STATUS_ERROR;
-	}
-	else
-		ret = STATUS_OK;
+	ret = check_usermap(port->hba->usermap, port->user_name, kusername,
+						pg_krb_caseins_users);
 
 	krb5_free_ticket(pg_krb5_context, ticket);
 	krb5_auth_con_free(pg_krb5_context, auth_context);
@@ -295,30 +799,14 @@ pg_krb5_recvauth(Port *port)
 
 	return ret;
 }
-#else
-
-static int
-pg_krb5_recvauth(Port *port)
-{
-	ereport(LOG,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("Kerberos 5 not implemented on this server")));
-	return STATUS_ERROR;
-}
 #endif   /* KRB5 */
+
 
 /*----------------------------------------------------------------
  * GSSAPI authentication system
  *----------------------------------------------------------------
  */
-
 #ifdef ENABLE_GSS
-
-#if defined(HAVE_GSSAPI_H)
-#include <gssapi.h>
-#else
-#include <gssapi/gssapi.h>
-#endif
 
 #if defined(WIN32) && !defined(WIN32_ONLY_COMPILER)
 /*
@@ -393,8 +881,8 @@ pg_GSS_recvauth(Port *port)
 	/*
 	 * GSS auth is not supported for protocol versions before 3, because it
 	 * relies on the overall message length word to determine the GSS payload
-	 * size in AuthenticationGSSContinue and PasswordMessage messages.
-	 * (This is, in fact, a design error in our GSS support, because protocol
+	 * size in AuthenticationGSSContinue and PasswordMessage messages. (This
+	 * is, in fact, a design error in our GSS support, because protocol
 	 * messages are supposed to be parsable without relying on the length
 	 * word; but it's not worth changing it now.)
 	 */
@@ -413,8 +901,8 @@ pg_GSS_recvauth(Port *port)
 		 */
 		if (getenv("KRB5_KTNAME") == NULL)
 		{
-			size_t	kt_len = strlen(pg_krb_server_keyfile) + 14;
-			char   *kt_path = malloc(kt_len);
+			size_t		kt_len = strlen(pg_krb_server_keyfile) + 14;
+			char	   *kt_path = malloc(kt_len);
 
 			if (!kt_path)
 			{
@@ -463,7 +951,7 @@ pg_GSS_recvauth(Port *port)
 
 		/* Get the actual GSS token */
 		initStringInfo(&buf);
-		if (pq_getmessage(&buf, 2000))
+		if (pq_getmessage(&buf, PG_MAX_AUTH_TOKEN_LENGTH))
 		{
 			/* EOF - pq_getmessage already logged error */
 			pfree(buf.data);
@@ -555,31 +1043,37 @@ pg_GSS_recvauth(Port *port)
 	{
 		char	   *cp = strchr(gbuf.value, '@');
 
-		*cp = '\0';
+		/*
+		 * If we are not going to include the realm in the username that is
+		 * passed to the ident map, destructively modify it here to remove the
+		 * realm. Then advance past the separator to check the realm.
+		 */
+		if (!port->hba->include_realm)
+			*cp = '\0';
 		cp++;
 
-		if (pg_krb_realm != NULL && strlen(pg_krb_realm))
+		if (port->hba->krb_realm != NULL && strlen(port->hba->krb_realm))
 		{
 			/*
 			 * Match the realm part of the name first
 			 */
 			if (pg_krb_caseins_users)
-				ret = pg_strcasecmp(pg_krb_realm, cp);
+				ret = pg_strcasecmp(port->hba->krb_realm, cp);
 			else
-				ret = strcmp(pg_krb_realm, cp);
+				ret = strcmp(port->hba->krb_realm, cp);
 
 			if (ret)
 			{
 				/* GSS realm does not match */
 				elog(DEBUG2,
 				   "GSSAPI realm (%s) and configured realm (%s) don't match",
-					 cp, pg_krb_realm);
+					 cp, port->hba->krb_realm);
 				gss_release_buffer(&lmin_s, &gbuf);
 				return STATUS_ERROR;
 			}
 		}
 	}
-	else if (pg_krb_realm && strlen(pg_krb_realm))
+	else if (port->hba->krb_realm && strlen(port->hba->krb_realm))
 	{
 		elog(DEBUG2,
 			 "GSSAPI did not return realm but realm matching was requested");
@@ -588,57 +1082,28 @@ pg_GSS_recvauth(Port *port)
 		return STATUS_ERROR;
 	}
 
-	if (pg_krb_caseins_users)
-		ret = pg_strcasecmp(port->user_name, gbuf.value);
-	else
-		ret = strcmp(port->user_name, gbuf.value);
-
-	if (ret)
-	{
-		/* GSS name and PGUSER are not equivalent */
-		elog(DEBUG2,
-			 "provided username (%s) and GSSAPI username (%s) don't match",
-			 port->user_name, (char *) gbuf.value);
-
-		gss_release_buffer(&lmin_s, &gbuf);
-		return STATUS_ERROR;
-	}
+	ret = check_usermap(port->hba->usermap, port->user_name, gbuf.value,
+						pg_krb_caseins_users);
 
 	gss_release_buffer(&lmin_s, &gbuf);
 
-	return STATUS_OK;
+	return ret;
 }
-
-#else							/* no ENABLE_GSS */
-
-static int
-pg_GSS_recvauth(Port *port)
-{
-	ereport(LOG,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("GSSAPI not implemented on this server")));
-	return STATUS_ERROR;
-}
-
 #endif   /* ENABLE_GSS */
+
 
 /*----------------------------------------------------------------
  * SSPI authentication system
  *----------------------------------------------------------------
  */
-
 #ifdef ENABLE_SSPI
-
-typedef		SECURITY_STATUS
-			(WINAPI * QUERY_SECURITY_CONTEXT_TOKEN_FN) (
-													   PCtxtHandle, void **);
-
 static void
-pg_SSPI_error(int severity, char *errmsg, SECURITY_STATUS r)
+pg_SSPI_error(int severity, const char *errmsg, SECURITY_STATUS r)
 {
 	char		sysmsg[256];
 
-	if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, r, 0, sysmsg, sizeof(sysmsg), NULL) == 0)
+	if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, r, 0,
+					  sysmsg, sizeof(sysmsg), NULL) == 0)
 		ereport(severity,
 				(errmsg_internal("%s", errmsg),
 				 errdetail("SSPI error %x", (unsigned int) r)));
@@ -677,8 +1142,8 @@ pg_SSPI_recvauth(Port *port)
 	/*
 	 * SSPI auth is not supported for protocol versions before 3, because it
 	 * relies on the overall message length word to determine the SSPI payload
-	 * size in AuthenticationGSSContinue and PasswordMessage messages.
-	 * (This is, in fact, a design error in our SSPI support, because protocol
+	 * size in AuthenticationGSSContinue and PasswordMessage messages. (This
+	 * is, in fact, a design error in our SSPI support, because protocol
 	 * messages are supposed to be parsable without relying on the length
 	 * word; but it's not worth changing it now.)
 	 */
@@ -700,8 +1165,7 @@ pg_SSPI_recvauth(Port *port)
 								 &sspicred,
 								 &expiry);
 	if (r != SEC_E_OK)
-		pg_SSPI_error(ERROR,
-			   gettext_noop("could not acquire SSPI credentials handle"), r);
+		pg_SSPI_error(ERROR, _("could not acquire SSPI credentials"), r);
 
 	/*
 	 * Loop through SSPI message exchange. This exchange can consist of
@@ -725,7 +1189,7 @@ pg_SSPI_recvauth(Port *port)
 
 		/* Get the actual SSPI token */
 		initStringInfo(&buf);
-		if (pq_getmessage(&buf, 2000))
+		if (pq_getmessage(&buf, PG_MAX_AUTH_TOKEN_LENGTH))
 		{
 			/* EOF - pq_getmessage already logged error */
 			pfree(buf.data);
@@ -790,7 +1254,7 @@ pg_SSPI_recvauth(Port *port)
 			}
 			FreeCredentialsHandle(&sspicred);
 			pg_SSPI_error(ERROR,
-				  gettext_noop("could not accept SSPI security context"), r);
+						  _("could not accept SSPI security context"), r);
 		}
 
 		if (sspictx == NULL)
@@ -846,7 +1310,7 @@ pg_SSPI_recvauth(Port *port)
 	{
 		FreeLibrary(secur32);
 		pg_SSPI_error(ERROR,
-			   gettext_noop("could not get security token from context"), r);
+					  _("could not get token from SSPI security context"), r);
 	}
 
 	FreeLibrary(secur32);
@@ -885,13 +1349,13 @@ pg_SSPI_recvauth(Port *port)
 	 * Compare realm/domain if requested. In SSPI, always compare case
 	 * insensitive.
 	 */
-	if (pg_krb_realm && strlen(pg_krb_realm))
+	if (port->hba->krb_realm && strlen(port->hba->krb_realm))
 	{
-		if (pg_strcasecmp(pg_krb_realm, domainname))
+		if (pg_strcasecmp(port->hba->krb_realm, domainname))
 		{
 			elog(DEBUG2,
 				 "SSPI domain (%s) and configured domain (%s) don't match",
-				 domainname, pg_krb_realm);
+				 domainname, port->hba->krb_realm);
 
 			return STATUS_ERROR;
 		}
@@ -900,301 +1364,511 @@ pg_SSPI_recvauth(Port *port)
 	/*
 	 * We have the username (without domain/realm) in accountname, compare to
 	 * the supplied value. In SSPI, always compare case insensitive.
+	 *
+	 * If set to include realm, append it in <username>@<realm> format.
 	 */
-	if (pg_strcasecmp(port->user_name, accountname))
+	if (port->hba->include_realm)
 	{
-		/* GSS name and PGUSER are not equivalent */
-		elog(DEBUG2,
-			 "provided username (%s) and SSPI username (%s) don't match",
-			 port->user_name, accountname);
+		char	   *namebuf;
+		int			retval;
 
-		return STATUS_ERROR;
+		namebuf = palloc(strlen(accountname) + strlen(domainname) + 2);
+		sprintf(namebuf, "%s@%s", accountname, domainname);
+		retval = check_usermap(port->hba->usermap, port->user_name, namebuf, true);
+		pfree(namebuf);
+		return retval;
 	}
-
-	return STATUS_OK;
+	else
+		return check_usermap(port->hba->usermap, port->user_name, accountname, true);
 }
-
-#else							/* no ENABLE_SSPI */
-
-static int
-pg_SSPI_recvauth(Port *port)
-{
-	ereport(LOG,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("SSPI not implemented on this server")));
-	return STATUS_ERROR;
-}
-
 #endif   /* ENABLE_SSPI */
 
 
-/*
- * Tell the user the authentication failed, but not (much about) why.
- *
- * There is a tradeoff here between security concerns and making life
- * unnecessarily difficult for legitimate users.  We would not, for example,
- * want to report the password we were expecting to receive...
- * But it seems useful to report the username and authorization method
- * in use, and these are items that must be presumed known to an attacker
- * anyway.
- * Note that many sorts of failure report additional information in the
- * postmaster log, which we hope is only readable by good guys.
+
+/*----------------------------------------------------------------
+ * Ident authentication system
+ *----------------------------------------------------------------
  */
-static void
-auth_failed(Port *port, int status)
-{
-	const char *errstr;
-
-	/*
-	 * If we failed due to EOF from client, just quit; there's no point in
-	 * trying to send a message to the client, and not much point in logging
-	 * the failure in the postmaster log.  (Logging the failure might be
-	 * desirable, were it not for the fact that libpq closes the connection
-	 * unceremoniously if challenged for a password when it hasn't got one to
-	 * send.  We'll get a useless log entry for every psql connection under
-	 * password auth, even if it's perfectly successful, if we log STATUS_EOF
-	 * events.)
-	 */
-	if (status == STATUS_EOF)
-		proc_exit(0);
-
-	switch (port->auth_method)
-	{
-		case uaReject:
-			errstr = gettext_noop("authentication failed for user \"%s\": host rejected");
-			break;
-		case uaKrb5:
-			errstr = gettext_noop("Kerberos 5 authentication failed for user \"%s\"");
-			break;
-		case uaGSS:
-			errstr = gettext_noop("GSSAPI authentication failed for user \"%s\"");
-			break;
-		case uaSSPI:
-			errstr = gettext_noop("SSPI authentication failed for user \"%s\"");
-			break;
-		case uaTrust:
-			errstr = gettext_noop("\"trust\" authentication failed for user \"%s\"");
-			break;
-		case uaIdent:
-			errstr = gettext_noop("Ident authentication failed for user \"%s\"");
-			break;
-		case uaMD5:
-		case uaCrypt:
-		case uaPassword:
-			errstr = gettext_noop("password authentication failed for user \"%s\"");
-			break;
-#ifdef USE_PAM
-		case uaPAM:
-			errstr = gettext_noop("PAM authentication failed for user \"%s\"");
-			break;
-#endif   /* USE_PAM */
-#ifdef USE_LDAP
-		case uaLDAP:
-			errstr = gettext_noop("LDAP authentication failed for user \"%s\"");
-			break;
-#endif   /* USE_LDAP */
-		default:
-			errstr = gettext_noop("authentication failed for user \"%s\": invalid authentication method");
-			break;
-	}
-
-	ereport(FATAL,
-			(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-			 errmsg(errstr, port->user_name)));
-	/* doesn't return */
-}
-
 
 /*
- * Client authentication starts here.  If there is an error, this
- * function does not return and the backend process is terminated.
+ *	Parse the string "*ident_response" as a response from a query to an Ident
+ *	server.  If it's a normal response indicating a user name, return true
+ *	and store the user name at *ident_user. If it's anything else,
+ *	return false.
  */
-void
-ClientAuthentication(Port *port)
+static bool
+interpret_ident_response(const char *ident_response,
+						 char *ident_user)
 {
-	int			status = STATUS_ERROR;
+	const char *cursor = ident_response;		/* Cursor into *ident_response */
 
 	/*
-	 * Get the authentication method to use for this frontend/database
-	 * combination.  Note: a failure return indicates a problem with the hba
-	 * config file, not with the request.  hba.c should have dropped an error
-	 * message into the postmaster logfile if it failed.
+	 * Ident's response, in the telnet tradition, should end in crlf (\r\n).
 	 */
-	if (hba_getauthmethod(port) != STATUS_OK)
-		ereport(FATAL,
-				(errcode(ERRCODE_CONFIG_FILE_ERROR),
-				 errmsg("missing or erroneous pg_hba.conf file"),
-				 errhint("See server log for details.")));
-
-	switch (port->auth_method)
-	{
-		case uaReject:
-
-			/*
-			 * This could have come from an explicit "reject" entry in
-			 * pg_hba.conf, but more likely it means there was no matching
-			 * entry.  Take pity on the poor user and issue a helpful error
-			 * message.  NOTE: this is not a security breach, because all the
-			 * info reported here is known at the frontend and must be assumed
-			 * known to bad guys. We're merely helping out the less clueful
-			 * good guys.
-			 */
-			{
-				char		hostinfo[NI_MAXHOST];
-
-				pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
-								   hostinfo, sizeof(hostinfo),
-								   NULL, 0,
-								   NI_NUMERICHOST);
-
-#ifdef USE_SSL
-				ereport(FATAL,
-						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-						 errmsg("no pg_hba.conf entry for host \"%s\", user \"%s\", database \"%s\", %s",
-							  hostinfo, port->user_name, port->database_name,
-								port->ssl ? _("SSL on") : _("SSL off"))));
-#else
-				ereport(FATAL,
-						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-						 errmsg("no pg_hba.conf entry for host \"%s\", user \"%s\", database \"%s\"",
-						   hostinfo, port->user_name, port->database_name)));
-#endif
-				break;
-			}
-
-		case uaKrb5:
-			sendAuthRequest(port, AUTH_REQ_KRB5);
-			status = pg_krb5_recvauth(port);
-			break;
-
-		case uaGSS:
-			sendAuthRequest(port, AUTH_REQ_GSS);
-			status = pg_GSS_recvauth(port);
-			break;
-
-		case uaSSPI:
-			sendAuthRequest(port, AUTH_REQ_SSPI);
-			status = pg_SSPI_recvauth(port);
-			break;
-
-		case uaIdent:
-
-			/*
-			 * If we are doing ident on unix-domain sockets, use SCM_CREDS
-			 * only if it is defined and SO_PEERCRED isn't.
-			 */
-#if !defined(HAVE_GETPEEREID) && !defined(SO_PEERCRED) && \
-	(defined(HAVE_STRUCT_CMSGCRED) || defined(HAVE_STRUCT_FCRED) || \
-	 (defined(HAVE_STRUCT_SOCKCRED) && defined(LOCAL_CREDS)))
-			if (port->raddr.addr.ss_family == AF_UNIX)
-			{
-#if defined(HAVE_STRUCT_FCRED) || defined(HAVE_STRUCT_SOCKCRED)
-
-				/*
-				 * Receive credentials on next message receipt, BSD/OS,
-				 * NetBSD. We need to set this before the client sends the
-				 * next packet.
-				 */
-				int			on = 1;
-
-				if (setsockopt(port->sock, 0, LOCAL_CREDS, &on, sizeof(on)) < 0)
-					ereport(FATAL,
-							(errcode_for_socket_access(),
-					   errmsg("could not enable credential reception: %m")));
-#endif
-
-				sendAuthRequest(port, AUTH_REQ_SCM_CREDS);
-			}
-#endif
-			status = authident(port);
-			break;
-
-		case uaMD5:
-			sendAuthRequest(port, AUTH_REQ_MD5);
-			status = recv_and_check_password_packet(port);
-			break;
-
-		case uaCrypt:
-			sendAuthRequest(port, AUTH_REQ_CRYPT);
-			status = recv_and_check_password_packet(port);
-			break;
-
-		case uaPassword:
-			sendAuthRequest(port, AUTH_REQ_PASSWORD);
-			status = recv_and_check_password_packet(port);
-			break;
-
-#ifdef USE_PAM
-		case uaPAM:
-			pam_port_cludge = port;
-			status = CheckPAMAuth(port, port->user_name, "");
-			break;
-#endif   /* USE_PAM */
-
-#ifdef USE_LDAP
-		case uaLDAP:
-			status = CheckLDAPAuth(port);
-			break;
-#endif
-
-		case uaTrust:
-			status = STATUS_OK;
-			break;
-	}
-
-	if (status == STATUS_OK)
-		sendAuthRequest(port, AUTH_REQ_OK);
+	if (strlen(ident_response) < 2)
+		return false;
+	else if (ident_response[strlen(ident_response) - 2] != '\r')
+		return false;
 	else
-		auth_failed(port, status);
-}
-
-
-/*
- * Send an authentication request packet to the frontend.
- */
-static void
-sendAuthRequest(Port *port, AuthRequest areq)
-{
-	StringInfoData buf;
-
-	pq_beginmessage(&buf, 'R');
-	pq_sendint(&buf, (int32) areq, sizeof(int32));
-
-	/* Add the salt for encrypted passwords. */
-	if (areq == AUTH_REQ_MD5)
-		pq_sendbytes(&buf, port->md5Salt, 4);
-	else if (areq == AUTH_REQ_CRYPT)
-		pq_sendbytes(&buf, port->cryptSalt, 2);
-
-#if defined(ENABLE_GSS) || defined(ENABLE_SSPI)
-
-	/*
-	 * Add the authentication data for the next step of the GSSAPI or SSPI
-	 * negotiation.
-	 */
-	else if (areq == AUTH_REQ_GSS_CONT)
 	{
-		if (port->gss->outbuf.length > 0)
-		{
-			elog(DEBUG4, "sending GSS token of length %u",
-				 (unsigned int) port->gss->outbuf.length);
+		while (*cursor != ':' && *cursor != '\r')
+			cursor++;			/* skip port field */
 
-			pq_sendbytes(&buf, port->gss->outbuf.value, port->gss->outbuf.length);
+		if (*cursor != ':')
+			return false;
+		else
+		{
+			/* We're positioned to colon before response type field */
+			char		response_type[80];
+			int			i;		/* Index into *response_type */
+
+			cursor++;			/* Go over colon */
+			while (pg_isblank(*cursor))
+				cursor++;		/* skip blanks */
+			i = 0;
+			while (*cursor != ':' && *cursor != '\r' && !pg_isblank(*cursor) &&
+				   i < (int) (sizeof(response_type) - 1))
+				response_type[i++] = *cursor++;
+			response_type[i] = '\0';
+			while (pg_isblank(*cursor))
+				cursor++;		/* skip blanks */
+			if (strcmp(response_type, "USERID") != 0)
+				return false;
+			else
+			{
+				/*
+				 * It's a USERID response.  Good.  "cursor" should be pointing
+				 * to the colon that precedes the operating system type.
+				 */
+				if (*cursor != ':')
+					return false;
+				else
+				{
+					cursor++;	/* Go over colon */
+					/* Skip over operating system field. */
+					while (*cursor != ':' && *cursor != '\r')
+						cursor++;
+					if (*cursor != ':')
+						return false;
+					else
+					{
+						int			i;	/* Index into *ident_user */
+
+						cursor++;		/* Go over colon */
+						while (pg_isblank(*cursor))
+							cursor++;	/* skip blanks */
+						/* Rest of line is user name.  Copy it over. */
+						i = 0;
+						while (*cursor != '\r' && i < IDENT_USERNAME_MAX)
+							ident_user[i++] = *cursor++;
+						ident_user[i] = '\0';
+						return true;
+					}
+				}
+			}
 		}
 	}
-#endif
-
-	pq_endmessage(&buf);
-
-	/*
-	 * Flush message so client will see it, except for AUTH_REQ_OK, which need
-	 * not be sent until we are ready for queries.
-	 */
-	if (areq != AUTH_REQ_OK)
-		pq_flush();
 }
 
 
+/*
+ *	Talk to the ident server on host "remote_ip_addr" and find out who
+ *	owns the tcp connection from his port "remote_port" to port
+ *	"local_port_addr" on host "local_ip_addr".	Return the user name the
+ *	ident server gives as "*ident_user".
+ *
+ *	IP addresses and port numbers are in network byte order.
+ *
+ *	But iff we're unable to get the information from ident, return false.
+ */
+static bool
+ident_inet(const SockAddr remote_addr,
+		   const SockAddr local_addr,
+		   char *ident_user)
+{
+	int			sock_fd,		/* File descriptor for socket on which we talk
+								 * to Ident */
+				rc;				/* Return code from a locally called function */
+	bool		ident_return;
+	char		remote_addr_s[NI_MAXHOST];
+	char		remote_port[NI_MAXSERV];
+	char		local_addr_s[NI_MAXHOST];
+	char		local_port[NI_MAXSERV];
+	char		ident_port[NI_MAXSERV];
+	char		ident_query[80];
+	char		ident_response[80 + IDENT_USERNAME_MAX];
+	struct addrinfo *ident_serv = NULL,
+			   *la = NULL,
+				hints;
+
+	/*
+	 * Might look a little weird to first convert it to text and then back to
+	 * sockaddr, but it's protocol independent.
+	 */
+	pg_getnameinfo_all(&remote_addr.addr, remote_addr.salen,
+					   remote_addr_s, sizeof(remote_addr_s),
+					   remote_port, sizeof(remote_port),
+					   NI_NUMERICHOST | NI_NUMERICSERV);
+	pg_getnameinfo_all(&local_addr.addr, local_addr.salen,
+					   local_addr_s, sizeof(local_addr_s),
+					   local_port, sizeof(local_port),
+					   NI_NUMERICHOST | NI_NUMERICSERV);
+
+	snprintf(ident_port, sizeof(ident_port), "%d", IDENT_PORT);
+	hints.ai_flags = AI_NUMERICHOST;
+	hints.ai_family = remote_addr.addr.ss_family;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = 0;
+	hints.ai_addrlen = 0;
+	hints.ai_canonname = NULL;
+	hints.ai_addr = NULL;
+	hints.ai_next = NULL;
+	rc = pg_getaddrinfo_all(remote_addr_s, ident_port, &hints, &ident_serv);
+	if (rc || !ident_serv)
+	{
+		if (ident_serv)
+			pg_freeaddrinfo_all(hints.ai_family, ident_serv);
+		return false;			/* we don't expect this to happen */
+	}
+
+	hints.ai_flags = AI_NUMERICHOST;
+	hints.ai_family = local_addr.addr.ss_family;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = 0;
+	hints.ai_addrlen = 0;
+	hints.ai_canonname = NULL;
+	hints.ai_addr = NULL;
+	hints.ai_next = NULL;
+	rc = pg_getaddrinfo_all(local_addr_s, NULL, &hints, &la);
+	if (rc || !la)
+	{
+		if (la)
+			pg_freeaddrinfo_all(hints.ai_family, la);
+		return false;			/* we don't expect this to happen */
+	}
+
+	sock_fd = socket(ident_serv->ai_family, ident_serv->ai_socktype,
+					 ident_serv->ai_protocol);
+	if (sock_fd < 0)
+	{
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not create socket for Ident connection: %m")));
+		ident_return = false;
+		goto ident_inet_done;
+	}
+
+	/*
+	 * Bind to the address which the client originally contacted, otherwise
+	 * the ident server won't be able to match up the right connection. This
+	 * is necessary if the PostgreSQL server is running on an IP alias.
+	 */
+	rc = bind(sock_fd, la->ai_addr, la->ai_addrlen);
+	if (rc != 0)
+	{
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not bind to local address \"%s\": %m",
+						local_addr_s)));
+		ident_return = false;
+		goto ident_inet_done;
+	}
+
+	rc = connect(sock_fd, ident_serv->ai_addr,
+				 ident_serv->ai_addrlen);
+	if (rc != 0)
+	{
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not connect to Ident server at address \"%s\", port %s: %m",
+						remote_addr_s, ident_port)));
+		ident_return = false;
+		goto ident_inet_done;
+	}
+
+	/* The query we send to the Ident server */
+	snprintf(ident_query, sizeof(ident_query), "%s,%s\r\n",
+			 remote_port, local_port);
+
+	/* loop in case send is interrupted */
+	do
+	{
+		rc = send(sock_fd, ident_query, strlen(ident_query), 0);
+	} while (rc < 0 && errno == EINTR);
+
+	if (rc < 0)
+	{
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not send query to Ident server at address \"%s\", port %s: %m",
+						remote_addr_s, ident_port)));
+		ident_return = false;
+		goto ident_inet_done;
+	}
+
+	do
+	{
+		rc = recv(sock_fd, ident_response, sizeof(ident_response) - 1, 0);
+	} while (rc < 0 && errno == EINTR);
+
+	if (rc < 0)
+	{
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not receive response from Ident server at address \"%s\", port %s: %m",
+						remote_addr_s, ident_port)));
+		ident_return = false;
+		goto ident_inet_done;
+	}
+
+	ident_response[rc] = '\0';
+	ident_return = interpret_ident_response(ident_response, ident_user);
+	if (!ident_return)
+		ereport(LOG,
+			(errmsg("invalidly formatted response from Ident server: \"%s\"",
+					ident_response)));
+
+ident_inet_done:
+	if (sock_fd >= 0)
+		closesocket(sock_fd);
+	pg_freeaddrinfo_all(remote_addr.addr.ss_family, ident_serv);
+	pg_freeaddrinfo_all(local_addr.addr.ss_family, la);
+	return ident_return;
+}
+
+/*
+ *	Ask kernel about the credentials of the connecting process and
+ *	determine the symbolic name of the corresponding user.
+ *
+ *	Returns either true and the username put into "ident_user",
+ *	or false if we were unable to determine the username.
+ */
+#ifdef HAVE_UNIX_SOCKETS
+
+static bool
+ident_unix(int sock, char *ident_user)
+{
+#if defined(HAVE_GETPEEREID)
+	/* OpenBSD style:  */
+	uid_t		uid;
+	gid_t		gid;
+	struct passwd *pass;
+
+	errno = 0;
+	if (getpeereid(sock, &uid, &gid) != 0)
+	{
+		/* We didn't get a valid credentials struct. */
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not get peer credentials: %m")));
+		return false;
+	}
+
+	pass = getpwuid(uid);
+
+	if (pass == NULL)
+	{
+		ereport(LOG,
+				(errmsg("local user with ID %d does not exist",
+						(int) uid)));
+		return false;
+	}
+
+	strlcpy(ident_user, pass->pw_name, IDENT_USERNAME_MAX + 1);
+
+	return true;
+#elif defined(SO_PEERCRED)
+	/* Linux style: use getsockopt(SO_PEERCRED) */
+	struct ucred peercred;
+	ACCEPT_TYPE_ARG3 so_len = sizeof(peercred);
+	struct passwd *pass;
+
+	errno = 0;
+	if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &peercred, &so_len) != 0 ||
+		so_len != sizeof(peercred))
+	{
+		/* We didn't get a valid credentials struct. */
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not get peer credentials: %m")));
+		return false;
+	}
+
+	pass = getpwuid(peercred.uid);
+
+	if (pass == NULL)
+	{
+		ereport(LOG,
+				(errmsg("local user with ID %d does not exist",
+						(int) peercred.uid)));
+		return false;
+	}
+
+	strlcpy(ident_user, pass->pw_name, IDENT_USERNAME_MAX + 1);
+
+	return true;
+#elif defined(HAVE_GETPEERUCRED)
+	/* Solaris > 10 */
+	uid_t		uid;
+	struct passwd *pass;
+	ucred_t    *ucred;
+
+	ucred = NULL;				/* must be initialized to NULL */
+	if (getpeerucred(sock, &ucred) == -1)
+	{
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not get peer credentials: %m")));
+		return false;
+	}
+
+	if ((uid = ucred_geteuid(ucred)) == -1)
+	{
+		ereport(LOG,
+				(errcode_for_socket_access(),
+		   errmsg("could not get effective UID from peer credentials: %m")));
+		return false;
+	}
+
+	ucred_free(ucred);
+
+	pass = getpwuid(uid);
+	if (pass == NULL)
+	{
+		ereport(LOG,
+				(errmsg("local user with ID %d does not exist",
+						(int) uid)));
+		return false;
+	}
+
+	strlcpy(ident_user, pass->pw_name, IDENT_USERNAME_MAX + 1);
+
+	return true;
+#elif defined(HAVE_STRUCT_CMSGCRED) || defined(HAVE_STRUCT_FCRED) || (defined(HAVE_STRUCT_SOCKCRED) && defined(LOCAL_CREDS))
+	struct msghdr msg;
+
+/* Credentials structure */
+#if defined(HAVE_STRUCT_CMSGCRED)
+	typedef struct cmsgcred Cred;
+
+#define cruid cmcred_uid
+#elif defined(HAVE_STRUCT_FCRED)
+	typedef struct fcred Cred;
+
+#define cruid fc_uid
+#elif defined(HAVE_STRUCT_SOCKCRED)
+	typedef struct sockcred Cred;
+
+#define cruid sc_uid
+#endif
+	Cred	   *cred;
+
+	/* Compute size without padding */
+	char		cmsgmem[ALIGN(sizeof(struct cmsghdr)) + ALIGN(sizeof(Cred))];	/* for NetBSD */
+
+	/* Point to start of first structure */
+	struct cmsghdr *cmsg = (struct cmsghdr *) cmsgmem;
+
+	struct iovec iov;
+	char		buf;
+	struct passwd *pw;
+
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = (char *) cmsg;
+	msg.msg_controllen = sizeof(cmsgmem);
+	memset(cmsg, 0, sizeof(cmsgmem));
+
+	/*
+	 * The one character which is received here is not meaningful; its
+	 * purposes is only to make sure that recvmsg() blocks long enough for the
+	 * other side to send its credentials.
+	 */
+	iov.iov_base = &buf;
+	iov.iov_len = 1;
+
+	if (recvmsg(sock, &msg, 0) < 0 ||
+		cmsg->cmsg_len < sizeof(cmsgmem) ||
+		cmsg->cmsg_type != SCM_CREDS)
+	{
+		ereport(LOG,
+				(errcode_for_socket_access(),
+				 errmsg("could not get peer credentials: %m")));
+		return false;
+	}
+
+	cred = (Cred *) CMSG_DATA(cmsg);
+
+	pw = getpwuid(cred->cruid);
+
+	if (pw == NULL)
+	{
+		ereport(LOG,
+				(errmsg("local user with ID %d does not exist",
+						(int) cred->cruid)));
+		return false;
+	}
+
+	strlcpy(ident_user, pw->pw_name, IDENT_USERNAME_MAX + 1);
+
+	return true;
+#else
+	ereport(LOG,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("Ident authentication is not supported on local connections on this platform")));
+
+	return false;
+#endif
+}
+#endif   /* HAVE_UNIX_SOCKETS */
+
+
+/*
+ *	Determine the username of the initiator of the connection described
+ *	by "port".	Then look in the usermap file under the usermap
+ *	port->hba->usermap and see if that user is equivalent to Postgres user
+ *	port->user.
+ *
+ *	Return STATUS_OK if yes, STATUS_ERROR if no match (or couldn't get info).
+ */
+static int
+authident(hbaPort *port)
+{
+	char		ident_user[IDENT_USERNAME_MAX + 1];
+
+	if (get_role_line(port->user_name) == NULL)
+		return STATUS_ERROR;
+
+	switch (port->raddr.addr.ss_family)
+	{
+		case AF_INET:
+#ifdef	HAVE_IPV6
+		case AF_INET6:
+#endif
+			if (!ident_inet(port->raddr, port->laddr, ident_user))
+				return STATUS_ERROR;
+			break;
+
+#ifdef HAVE_UNIX_SOCKETS
+		case AF_UNIX:
+			if (!ident_unix(port->sock, ident_user))
+				return STATUS_ERROR;
+			break;
+#endif
+
+		default:
+			return STATUS_ERROR;
+	}
+
+	return check_usermap(port->hba->usermap, port->user_name, ident_user, false);
+}
+
+
+/*----------------------------------------------------------------
+ * PAM authentication system
+ *----------------------------------------------------------------
+ */
 #ifdef USE_PAM
 
 /*
@@ -1205,61 +1879,31 @@ static int
 pam_passwd_conv_proc(int num_msg, const struct pam_message ** msg,
 					 struct pam_response ** resp, void *appdata_ptr)
 {
-	if (num_msg != 1 || msg[0]->msg_style != PAM_PROMPT_ECHO_OFF)
-	{
-		switch (msg[0]->msg_style)
-		{
-			case PAM_ERROR_MSG:
-				ereport(LOG,
-						(errmsg("error from underlying PAM layer: %s",
-								msg[0]->msg)));
-				return PAM_CONV_ERR;
-			default:
-				ereport(LOG,
-						(errmsg("unsupported PAM conversation %d/%s",
-								msg[0]->msg_style, msg[0]->msg)));
-				return PAM_CONV_ERR;
-		}
-	}
+	char	   *passwd;
+	struct pam_response *reply;
+	int			i;
 
-	if (!appdata_ptr)
+	if (appdata_ptr)
+		passwd = (char *) appdata_ptr;
+	else
 	{
 		/*
 		 * Workaround for Solaris 2.6 where the PAM library is broken and does
 		 * not pass appdata_ptr to the conversation routine
 		 */
-		appdata_ptr = pam_passwd;
+		passwd = pam_passwd;
 	}
 
-	/*
-	 * Password wasn't passed to PAM the first time around - let's go ask the
-	 * client to send a password, which we then stuff into PAM.
-	 */
-	if (strlen(appdata_ptr) == 0)
-	{
-		char	   *passwd;
+	*resp = NULL;				/* in case of error exit */
 
-		sendAuthRequest(pam_port_cludge, AUTH_REQ_PASSWORD);
-		passwd = recv_password_packet(pam_port_cludge);
-
-		if (passwd == NULL)
-			return PAM_CONV_ERR;	/* client didn't want to send password */
-
-		if (strlen(passwd) == 0)
-		{
-			ereport(LOG,
-					(errmsg("empty password returned by client")));
-			return PAM_CONV_ERR;
-		}
-		appdata_ptr = passwd;
-	}
+	if (num_msg <= 0 || num_msg > PAM_MAX_NUM_MSG)
+		return PAM_CONV_ERR;
 
 	/*
 	 * Explicitly not using palloc here - PAM will free this memory in
 	 * pam_end()
 	 */
-	*resp = calloc(num_msg, sizeof(struct pam_response));
-	if (!*resp)
+	if ((reply = calloc(num_msg, sizeof(struct pam_response))) == NULL)
 	{
 		ereport(LOG,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -1267,10 +1911,71 @@ pam_passwd_conv_proc(int num_msg, const struct pam_message ** msg,
 		return PAM_CONV_ERR;
 	}
 
-	(*resp)[0].resp = strdup((char *) appdata_ptr);
-	(*resp)[0].resp_retcode = 0;
+	for (i = 0; i < num_msg; i++)
+	{
+		switch (msg[i]->msg_style)
+		{
+			case PAM_PROMPT_ECHO_OFF:
+				if (strlen(passwd) == 0)
+				{
+					/*
+					 * Password wasn't passed to PAM the first time around -
+					 * let's go ask the client to send a password, which we
+					 * then stuff into PAM.
+					 */
+					sendAuthRequest(pam_port_cludge, AUTH_REQ_PASSWORD);
+					passwd = recv_password_packet(pam_port_cludge);
+					if (passwd == NULL)
+					{
+						/*
+						 * Client didn't want to send password.  We
+						 * intentionally do not log anything about this.
+						 */
+						goto fail;
+					}
+					if (strlen(passwd) == 0)
+					{
+						ereport(LOG,
+								(errmsg("empty password returned by client")));
+						goto fail;
+					}
+				}
+				if ((reply[i].resp = strdup(passwd)) == NULL)
+					goto fail;
+				reply[i].resp_retcode = PAM_SUCCESS;
+				break;
+			case PAM_ERROR_MSG:
+				ereport(LOG,
+						(errmsg("error from underlying PAM layer: %s",
+								msg[i]->msg)));
+				/* FALL THROUGH */
+			case PAM_TEXT_INFO:
+				/* we don't bother to log TEXT_INFO messages */
+				if ((reply[i].resp = strdup("")) == NULL)
+					goto fail;
+				reply[i].resp_retcode = PAM_SUCCESS;
+				break;
+			default:
+				elog(LOG, "unsupported PAM conversation %d/\"%s\"",
+					 msg[i]->msg_style,
+					 msg[i]->msg ? msg[i]->msg : "(none)");
+				goto fail;
+		}
+	}
 
-	return ((*resp)[0].resp ? PAM_SUCCESS : PAM_CONV_ERR);
+	*resp = reply;
+	return PAM_SUCCESS;
+
+fail:
+	/* free up whatever we allocated */
+	for (i = 0; i < num_msg; i++)
+	{
+		if (reply[i].resp != NULL)
+			free(reply[i].resp);
+	}
+	free(reply);
+
+	return PAM_CONV_ERR;
 }
 
 
@@ -1284,10 +1989,12 @@ CheckPAMAuth(Port *port, char *user, char *password)
 	pam_handle_t *pamh = NULL;
 
 	/*
-	 * Apparently, Solaris 2.6 is broken, and needs ugly static variable
-	 * workaround
+	 * We can't entirely rely on PAM to pass through appdata --- it appears
+	 * not to work on at least Solaris 2.6.  So use these ugly static
+	 * variables instead.
 	 */
 	pam_passwd = password;
+	pam_port_cludge = port;
 
 	/*
 	 * Set the application data portion of the conversation struct This is
@@ -1298,8 +2005,8 @@ CheckPAMAuth(Port *port, char *user, char *password)
 														 * not allocated */
 
 	/* Optionally, one can set the service name in pg_hba.conf */
-	if (port->auth_arg && port->auth_arg[0] != '\0')
-		retval = pam_start(port->auth_arg, "pgsql@",
+	if (port->hba->pamservice && port->hba->pamservice[0] != '\0')
+		retval = pam_start(port->hba->pamservice, "pgsql@",
 						   &pam_passw_conv, &pamh);
 	else
 		retval = pam_start(PGSQL_PAM_SERVICE, "pgsql@",
@@ -1374,82 +2081,31 @@ CheckPAMAuth(Port *port, char *user, char *password)
 #endif   /* USE_PAM */
 
 
+
+/*----------------------------------------------------------------
+ * LDAP authentication system
+ *----------------------------------------------------------------
+ */
 #ifdef USE_LDAP
 
 static int
 CheckLDAPAuth(Port *port)
 {
 	char	   *passwd;
-	char		server[128];
-	char		basedn[128];
-	char		prefix[128];
-	char		suffix[128];
 	LDAP	   *ldap;
-	bool		ssl = false;
 	int			r;
 	int			ldapversion = LDAP_VERSION3;
-	int			ldapport = LDAP_PORT;
 	char		fulluser[NAMEDATALEN + 256 + 1];
 
-	if (!port->auth_arg || port->auth_arg[0] == '\0')
+	if (!port->hba->ldapserver || port->hba->ldapserver[0] == '\0')
 	{
 		ereport(LOG,
-				(errmsg("LDAP configuration URL not specified")));
+				(errmsg("LDAP server not specified")));
 		return STATUS_ERROR;
 	}
 
-	/*
-	 * Crack the LDAP url. We do a very trivial parse:
-	 *
-	 * ldap[s]://<server>[:<port>]/<basedn>[;prefix[;suffix]]
-	 *
-	 * This code originally used "%127s" for the suffix, but that doesn't
-	 * work for embedded whitespace.  We know that tokens formed by
-	 * hba.c won't include newlines, so we can use a "not newline" scanset
-	 * instead.
-	 */
-
-	server[0] = '\0';
-	basedn[0] = '\0';
-	prefix[0] = '\0';
-	suffix[0] = '\0';
-
-	/* ldap, including port number */
-	r = sscanf(port->auth_arg,
-			   "ldap://%127[^:]:%d/%127[^;];%127[^;];%127[^\n]",
-			   server, &ldapport, basedn, prefix, suffix);
-	if (r < 3)
-	{
-		/* ldaps, including port number */
-		r = sscanf(port->auth_arg,
-				   "ldaps://%127[^:]:%d/%127[^;];%127[^;];%127[^\n]",
-				   server, &ldapport, basedn, prefix, suffix);
-		if (r >= 3)
-			ssl = true;
-	}
-	if (r < 3)
-	{
-		/* ldap, no port number */
-		r = sscanf(port->auth_arg,
-				   "ldap://%127[^/]/%127[^;];%127[^;];%127[^\n]",
-				   server, basedn, prefix, suffix);
-	}
-	if (r < 2)
-	{
-		/* ldaps, no port number */
-		r = sscanf(port->auth_arg,
-				   "ldaps://%127[^/]/%127[^;];%127[^;];%127[^\n]",
-				   server, basedn, prefix, suffix);
-		if (r >= 2)
-			ssl = true;
-	}
-	if (r < 2)
-	{
-		ereport(LOG,
-				(errmsg("invalid LDAP URL: \"%s\"",
-						port->auth_arg)));
-		return STATUS_ERROR;
-	}
+	if (port->hba->ldapport == 0)
+		port->hba->ldapport = LDAP_PORT;
 
 	sendAuthRequest(port, AUTH_REQ_PASSWORD);
 
@@ -1464,7 +2120,7 @@ CheckLDAPAuth(Port *port)
 		return STATUS_ERROR;
 	}
 
-	ldap = ldap_init(server, ldapport);
+	ldap = ldap_init(port->hba->ldapserver, port->hba->ldapport);
 	if (!ldap)
 	{
 #ifndef WIN32
@@ -1487,7 +2143,7 @@ CheckLDAPAuth(Port *port)
 		return STATUS_ERROR;
 	}
 
-	if (ssl)
+	if (port->hba->ldaptls)
 	{
 #ifndef WIN32
 		if ((r = ldap_start_tls_s(ldap, NULL, NULL)) != LDAP_SUCCESS)
@@ -1542,7 +2198,9 @@ CheckLDAPAuth(Port *port)
 	}
 
 	snprintf(fulluser, sizeof(fulluser), "%s%s%s",
-			 prefix, port->user_name, suffix);
+			 port->hba->ldapprefix ? port->hba->ldapprefix : "",
+			 port->user_name,
+			 port->hba->ldapsuffix ? port->hba->ldapsuffix : "");
 	fulluser[sizeof(fulluser) - 1] = '\0';
 
 	r = ldap_simple_bind_s(ldap, fulluser, passwd);
@@ -1552,7 +2210,7 @@ CheckLDAPAuth(Port *port)
 	{
 		ereport(LOG,
 				(errmsg("LDAP login failed for user \"%s\" on server \"%s\": error code %d",
-						fulluser, server, r)));
+						fulluser, port->hba->ldapserver, r)));
 		return STATUS_ERROR;
 	}
 
@@ -1560,94 +2218,29 @@ CheckLDAPAuth(Port *port)
 }
 #endif   /* USE_LDAP */
 
-/*
- * Collect password response packet from frontend.
- *
- * Returns NULL if couldn't get password, else palloc'd string.
+
+/*----------------------------------------------------------------
+ * SSL client certificate authentication
+ *----------------------------------------------------------------
  */
-static char *
-recv_password_packet(Port *port)
-{
-	StringInfoData buf;
-
-	if (PG_PROTOCOL_MAJOR(port->proto) >= 3)
-	{
-		/* Expect 'p' message type */
-		int			mtype;
-
-		mtype = pq_getbyte();
-		if (mtype != 'p')
-		{
-			/*
-			 * If the client just disconnects without offering a password,
-			 * don't make a log entry.  This is legal per protocol spec and in
-			 * fact commonly done by psql, so complaining just clutters the
-			 * log.
-			 */
-			if (mtype != EOF)
-				ereport(COMMERROR,
-						(errcode(ERRCODE_PROTOCOL_VIOLATION),
-					errmsg("expected password response, got message type %d",
-						   mtype)));
-			return NULL;		/* EOF or bad message type */
-		}
-	}
-	else
-	{
-		/* For pre-3.0 clients, avoid log entry if they just disconnect */
-		if (pq_peekbyte() == EOF)
-			return NULL;		/* EOF */
-	}
-
-	initStringInfo(&buf);
-	if (pq_getmessage(&buf, 1000))		/* receive password */
-	{
-		/* EOF - pq_getmessage already logged a suitable message */
-		pfree(buf.data);
-		return NULL;
-	}
-
-	/*
-	 * Apply sanity check: password packet length should agree with length of
-	 * contained string.  Note it is safe to use strlen here because
-	 * StringInfo is guaranteed to have an appended '\0'.
-	 */
-	if (strlen(buf.data) + 1 != buf.len)
-		ereport(COMMERROR,
-				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("invalid password packet size")));
-
-	/* Do not echo password to logs, for security. */
-	ereport(DEBUG5,
-			(errmsg("received password packet")));
-
-	/*
-	 * Return the received string.	Note we do not attempt to do any
-	 * character-set conversion on it; since we don't yet know the client's
-	 * encoding, there wouldn't be much point.
-	 */
-	return buf.data;
-}
-
-
-/*
- * Called when we have sent an authorization request for a password.
- * Get the response and check it.
- */
+#ifdef USE_SSL
 static int
-recv_and_check_password_packet(Port *port)
+CheckCertAuth(Port *port)
 {
-	char	   *passwd;
-	int			result;
+	Assert(port->ssl);
 
-	passwd = recv_password_packet(port);
+	/* Make sure we have received a username in the certificate */
+	if (port->peer_cn == NULL ||
+		strlen(port->peer_cn) <= 0)
+	{
+		ereport(LOG,
+				(errmsg("Certificate login failed for user \"%s\": client certificate contains no username",
+						port->user_name)));
+		return STATUS_ERROR;
+	}
 
-	if (passwd == NULL)
-		return STATUS_EOF;		/* client wouldn't send password */
-
-	result = md5_crypt_verify(port, port->user_name, passwd);
-
-	pfree(passwd);
-
-	return result;
+	/* Just pass the certificate CN to the usermap check */
+	return check_usermap(port->hba->usermap, port->user_name, port->peer_cn, false);
 }
+
+#endif

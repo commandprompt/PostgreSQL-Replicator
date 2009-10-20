@@ -3,15 +3,16 @@
  * Teodor Sigaev <teodor@stack.net>
  * $PostgreSQL$
  */
-
-#include "ltree.h"
+#include "postgres.h"
 
 #include <ctype.h>
 
 #include "catalog/pg_statistic.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
+#include "ltree.h"
 
 PG_MODULE_MAGIC;
 
@@ -57,7 +58,7 @@ Datum		text2ltree(PG_FUNCTION_ARGS);
 Datum		ltreeparentsel(PG_FUNCTION_ARGS);
 
 int
-ltree_compare(const ltree * a, const ltree * b)
+ltree_compare(const ltree *a, const ltree *b)
 {
 	ltree_level *al = LTREE_FIRST(a);
 	ltree_level *bl = LTREE_FIRST(b);
@@ -151,7 +152,7 @@ nlevel(PG_FUNCTION_ARGS)
 }
 
 bool
-inner_isparent(const ltree * c, const ltree * p)
+inner_isparent(const ltree *c, const ltree *p)
 {
 	ltree_level *cl = LTREE_FIRST(c);
 	ltree_level *pl = LTREE_FIRST(p);
@@ -200,7 +201,7 @@ ltree_risparent(PG_FUNCTION_ARGS)
 
 
 static ltree *
-inner_subltree(ltree * t, int4 startpos, int4 endpos)
+inner_subltree(ltree *t, int4 startpos, int4 endpos)
 {
 	char	   *start = NULL,
 			   *end = NULL;
@@ -282,7 +283,7 @@ subpath(PG_FUNCTION_ARGS)
 }
 
 static ltree *
-ltree_concat(ltree * a, ltree * b)
+ltree_concat(ltree *a, ltree *b)
 {
 	ltree	   *r;
 
@@ -314,19 +315,15 @@ Datum
 ltree_addtext(PG_FUNCTION_ARGS)
 {
 	ltree	   *a = PG_GETARG_LTREE(0);
-	text	   *b = PG_GETARG_TEXT_P(1);
+	text	   *b = PG_GETARG_TEXT_PP(1);
 	char	   *s;
 	ltree	   *r,
 			   *tmp;
 
-	s = (char *) palloc(VARSIZE(b) - VARHDRSZ + 1);
-	memcpy(s, VARDATA(b), VARSIZE(b) - VARHDRSZ);
-	s[VARSIZE(b) - VARHDRSZ] = '\0';
+	s = text_to_cstring(b);
 
-	tmp = (ltree *) DatumGetPointer(DirectFunctionCall1(
-														ltree_in,
-														PointerGetDatum(s)
-														));
+	tmp = (ltree *) DatumGetPointer(DirectFunctionCall1(ltree_in,
+														PointerGetDatum(s)));
 
 	pfree(s);
 
@@ -403,19 +400,15 @@ Datum
 ltree_textadd(PG_FUNCTION_ARGS)
 {
 	ltree	   *a = PG_GETARG_LTREE(1);
-	text	   *b = PG_GETARG_TEXT_P(0);
+	text	   *b = PG_GETARG_TEXT_PP(0);
 	char	   *s;
 	ltree	   *r,
 			   *tmp;
 
-	s = (char *) palloc(VARSIZE(b) - VARHDRSZ + 1);
-	memcpy(s, VARDATA(b), VARSIZE(b) - VARHDRSZ);
-	s[VARSIZE(b) - VARHDRSZ] = '\0';
+	s = text_to_cstring(b);
 
-	tmp = (ltree *) DatumGetPointer(DirectFunctionCall1(
-														ltree_in,
-														PointerGetDatum(s)
-														));
+	tmp = (ltree *) DatumGetPointer(DirectFunctionCall1(ltree_in,
+														PointerGetDatum(s)));
 
 	pfree(s);
 
@@ -429,7 +422,7 @@ ltree_textadd(PG_FUNCTION_ARGS)
 }
 
 ltree *
-lca_inner(ltree ** a, int len)
+lca_inner(ltree **a, int len)
 {
 	int			tmp,
 				num = ((*a)->numlevel) ? (*a)->numlevel - 1 : 0;
@@ -517,17 +510,14 @@ lca(PG_FUNCTION_ARGS)
 Datum
 text2ltree(PG_FUNCTION_ARGS)
 {
-	text	   *in = PG_GETARG_TEXT_P(0);
-	char	   *s = (char *) palloc(VARSIZE(in) - VARHDRSZ + 1);
+	text	   *in = PG_GETARG_TEXT_PP(0);
+	char	   *s;
 	ltree	   *out;
 
-	memcpy(s, VARDATA(in), VARSIZE(in) - VARHDRSZ);
-	s[VARSIZE(in) - VARHDRSZ] = '\0';
+	s = text_to_cstring(in);
 
-	out = (ltree *) DatumGetPointer(DirectFunctionCall1(
-														ltree_in,
-														PointerGetDatum(s)
-														));
+	out = (ltree *) DatumGetPointer(DirectFunctionCall1(ltree_in,
+														PointerGetDatum(s)));
 	pfree(s);
 	PG_FREE_IF_COPY(in, 0);
 	PG_RETURN_POINTER(out);
@@ -609,6 +599,7 @@ ltreeparentsel(PG_FUNCTION_ARGS)
 		double		mcvsum;
 		double		mcvsel;
 		double		nullfrac;
+		int			hist_size;
 
 		fmgr_info(get_opcode(operator), &contproc);
 
@@ -626,20 +617,30 @@ ltreeparentsel(PG_FUNCTION_ARGS)
 		 */
 		selec = histogram_selectivity(&vardata, &contproc,
 									  constval, varonleft,
-									  100, 1);
+									  10, 1, &hist_size);
 		if (selec < 0)
 		{
 			/* Nope, fall back on default */
 			selec = DEFAULT_PARENT_SEL;
 		}
-		else
+		else if (hist_size < 100)
 		{
-			/* Yes, but don't believe extremely small or large estimates. */
-			if (selec < 0.0001)
-				selec = 0.0001;
-			else if (selec > 0.9999)
-				selec = 0.9999;
+			/*
+			 * For histogram sizes from 10 to 100, we combine the histogram
+			 * and default selectivities, putting increasingly more trust in
+			 * the histogram for larger sizes.
+			 */
+			double		hist_weight = hist_size / 100.0;
+
+			selec = selec * hist_weight +
+				DEFAULT_PARENT_SEL * (1.0 - hist_weight);
 		}
+
+		/* In any case, don't believe extremely small or large estimates. */
+		if (selec < 0.0001)
+			selec = 0.0001;
+		else if (selec > 0.9999)
+			selec = 0.9999;
 
 		if (HeapTupleIsValid(vardata.statsTuple))
 			nullfrac = ((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac;

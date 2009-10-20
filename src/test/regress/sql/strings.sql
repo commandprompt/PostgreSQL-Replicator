@@ -16,6 +16,33 @@ SELECT 'first line'
 ' - third line'
 	AS "Illegal comment within continuation";
 
+-- Unicode escapes
+SET standard_conforming_strings TO on;
+
+SELECT U&'d\0061t\+000061' AS U&"d\0061t\+000061";
+SELECT U&'d!0061t\+000061' UESCAPE '!' AS U&"d*0061t\+000061" UESCAPE '*';
+
+SELECT U&' \' UESCAPE '!' AS "tricky";
+SELECT 'tricky' AS U&"\" UESCAPE '!';
+
+SELECT U&'wrong: \061';
+SELECT U&'wrong: \+0061';
+SELECT U&'wrong: +0061' UESCAPE '+';
+
+SET standard_conforming_strings TO off;
+
+SELECT U&'d\0061t\+000061' AS U&"d\0061t\+000061";
+SELECT U&'d!0061t\+000061' UESCAPE '!' AS U&"d*0061t\+000061" UESCAPE '*';
+
+SELECT U&' \' UESCAPE '!' AS "tricky";
+SELECT 'tricky' AS U&"\" UESCAPE '!';
+
+SELECT U&'wrong: \061';
+SELECT U&'wrong: \+0061';
+SELECT U&'wrong: +0061' UESCAPE '+';
+
+RESET standard_conforming_strings;
+
 --
 -- test conversions between various string types
 -- E021-10 implicit casting among the character data types
@@ -461,3 +488,41 @@ select 'a\bcd' as f1, 'a\b''cd' as f2, 'a\b''''cd' as f3, 'abcd\'   as f4, 'ab\'
 set standard_conforming_strings = off;
 
 select 'a\\bcd' as f1, 'a\\b\'cd' as f2, 'a\\b\'''cd' as f3, 'abcd\\'   as f4, 'ab\\\'cd' as f5, '\\\\' as f6;
+
+
+--
+-- Additional string functions
+--
+
+SELECT initcap('hi THOMAS');
+
+SELECT lpad('hi', 5, 'xy');
+SELECT lpad('hi', 5);
+SELECT lpad('hi', -5, 'xy');
+SELECT lpad('hello', 2);
+SELECT lpad('hi', 5, '');
+
+SELECT rpad('hi', 5, 'xy');
+SELECT rpad('hi', 5);
+SELECT rpad('hi', -5, 'xy');
+SELECT rpad('hello', 2);
+SELECT rpad('hi', 5, '');
+
+SELECT ltrim('zzzytrim', 'xyz');
+
+SELECT translate('', '14', 'ax');
+SELECT translate('12345', '14', 'ax');
+
+SELECT ascii('x');
+SELECT ascii('');
+
+SELECT chr(65);
+SELECT chr(0);
+
+SELECT repeat('Pg', 4);
+SELECT repeat('Pg', -4);
+
+SELECT trim(E'\\000'::bytea from E'\\000Tom\\000'::bytea);
+SELECT btrim(E'\\000trim\\000'::bytea, E'\\000'::bytea);
+SELECT btrim(''::bytea, E'\\000'::bytea);
+SELECT btrim(E'\\000trim\\000'::bytea, ''::bytea);

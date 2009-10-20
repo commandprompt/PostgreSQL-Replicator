@@ -5,7 +5,7 @@
  *	  commands.  At one time acted as an interface between the Lisp and C
  *	  systems.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,6 +16,7 @@
  */
 #include "postgres.h"
 
+#include "access/reloptions.h"
 #include "access/twophase.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
@@ -59,161 +60,6 @@
 #include "utils/guc.h"
 #include "utils/syscache.h"
 
-
-/*
- * Error-checking support for DROP commands
- */
-
-struct msgstrings
-{
-	char		kind;
-	int			nonexistent_code;
-	const char *nonexistent_msg;
-	const char *skipping_msg;
-	const char *nota_msg;
-	const char *drophint_msg;
-};
-
-static const struct msgstrings msgstringarray[] = {
-	{RELKIND_RELATION,
-		ERRCODE_UNDEFINED_TABLE,
-		gettext_noop("table \"%s\" does not exist"),
-		gettext_noop("table \"%s\" does not exist, skipping"),
-		gettext_noop("\"%s\" is not a table"),
-	gettext_noop("Use DROP TABLE to remove a table.")},
-	{RELKIND_SEQUENCE,
-		ERRCODE_UNDEFINED_TABLE,
-		gettext_noop("sequence \"%s\" does not exist"),
-		gettext_noop("sequence \"%s\" does not exist, skipping"),
-		gettext_noop("\"%s\" is not a sequence"),
-	gettext_noop("Use DROP SEQUENCE to remove a sequence.")},
-	{RELKIND_VIEW,
-		ERRCODE_UNDEFINED_TABLE,
-		gettext_noop("view \"%s\" does not exist"),
-		gettext_noop("view \"%s\" does not exist, skipping"),
-		gettext_noop("\"%s\" is not a view"),
-	gettext_noop("Use DROP VIEW to remove a view.")},
-	{RELKIND_INDEX,
-		ERRCODE_UNDEFINED_OBJECT,
-		gettext_noop("index \"%s\" does not exist"),
-		gettext_noop("index \"%s\" does not exist, skipping"),
-		gettext_noop("\"%s\" is not an index"),
-	gettext_noop("Use DROP INDEX to remove an index.")},
-	{RELKIND_COMPOSITE_TYPE,
-		ERRCODE_UNDEFINED_OBJECT,
-		gettext_noop("type \"%s\" does not exist"),
-		gettext_noop("type \"%s\" does not exist, skipping"),
-		gettext_noop("\"%s\" is not a type"),
-	gettext_noop("Use DROP TYPE to remove a type.")},
-	{'\0', 0, NULL, NULL, NULL}
-};
-
-
-/*
- * Emit the right error message for a "DROP" command issued on a
- * relation of the wrong type
- */
-static void
-DropErrorMsgWrongType(char *relname, char wrongkind, char rightkind)
-{
-	const struct msgstrings *rentry;
-	const struct msgstrings *wentry;
-
-	for (rentry = msgstringarray; rentry->kind != '\0'; rentry++)
-		if (rentry->kind == rightkind)
-			break;
-	Assert(rentry->kind != '\0');
-
-	for (wentry = msgstringarray; wentry->kind != '\0'; wentry++)
-		if (wentry->kind == wrongkind)
-			break;
-	/* wrongkind could be something we don't have in our table... */
-
-	ereport(ERROR,
-			(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-			 errmsg(rentry->nota_msg, relname),
-			 (wentry->kind != '\0') ? errhint(wentry->drophint_msg) : 0));
-}
-
-/*
- * Emit the right error message for a "DROP" command issued on a
- * non-existent relation
- */
-static void
-DropErrorMsgNonExistent(RangeVar *rel, char rightkind, bool missing_ok)
-{
-	const struct msgstrings *rentry;
-
-	for (rentry = msgstringarray; rentry->kind != '\0'; rentry++)
-	{
-		if (rentry->kind == rightkind)
-		{
-			if (!missing_ok)
-			{
-				ereport(ERROR,
-						(errcode(rentry->nonexistent_code),
-						 errmsg(rentry->nonexistent_msg, rel->relname)));
-			}
-			else
-			{
-				ereport(NOTICE, (errmsg(rentry->skipping_msg, rel->relname)));
-				break;
-			}
-		}
-	}
-
-	Assert(rentry->kind != '\0');		/* Should be impossible */
-}
-
-/*
- * returns false if missing_ok is true and the object does not exist,
- * true if object exists and permissions are OK,
- * errors otherwise
- *
- */
-
-static bool
-CheckDropPermissions(RangeVar *rel, char rightkind, bool missing_ok)
-{
-	Oid			relOid;
-	HeapTuple	tuple;
-	Form_pg_class classform;
-
-	relOid = RangeVarGetRelid(rel, true);
-	if (!OidIsValid(relOid))
-	{
-		DropErrorMsgNonExistent(rel, rightkind, missing_ok);
-		return false;
-	}
-
-	tuple = SearchSysCache(RELOID,
-						   ObjectIdGetDatum(relOid),
-						   0, 0, 0);
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for relation %u", relOid);
-
-	classform = (Form_pg_class) GETSTRUCT(tuple);
-
-	if (classform->relkind != rightkind)
-		DropErrorMsgWrongType(rel->relname, classform->relkind,
-							  rightkind);
-
-	/* Allow DROP to either table owner or schema owner */
-	if (!pg_class_ownercheck(relOid, GetUserId()) &&
-		!pg_namespace_ownercheck(classform->relnamespace, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
-					   rel->relname);
-
-	if (!allowSystemTableMods && IsSystemClass(classform))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("permission denied: \"%s\" is a system catalog",
-						rel->relname)));
-
-	ReleaseSysCache(tuple);
-
-	return true;
-}
 
 /*
  * Verify user has ownership of specified relation, else ereport.
@@ -305,7 +151,8 @@ check_xact_readonly(Node *parsetree)
 
 	/*
 	 * Note: Commands that need to do more complicated checking are handled
-	 * elsewhere.
+	 * elsewhere, in particular COPY and plannable statements do their own
+	 * checking.
 	 */
 
 	switch (nodeTag(parsetree))
@@ -361,6 +208,15 @@ check_xact_readonly(Node *parsetree)
 		case T_ReassignOwnedStmt:
 		case T_AlterTSDictionaryStmt:
 		case T_AlterTSConfigurationStmt:
+		case T_CreateFdwStmt:
+		case T_AlterFdwStmt:
+		case T_DropFdwStmt:
+		case T_CreateForeignServerStmt:
+		case T_AlterForeignServerStmt:
+		case T_DropForeignServerStmt:
+		case T_CreateUserMappingStmt:
+		case T_AlterUserMappingStmt:
+		case T_DropUserMappingStmt:
 			ereport(ERROR,
 					(errcode(ERRCODE_READ_ONLY_SQL_TRANSACTION),
 					 errmsg("transaction is read-only")));
@@ -377,12 +233,16 @@ check_xact_readonly(Node *parsetree)
  *		general utility function invoker
  *
  *	parsetree: the parse tree for the utility statement
- *	queryString: original source text of command (NULL if not available)
+ *	queryString: original source text of command
  *	params: parameters to use during execution
  *	isTopLevel: true if executing a "top level" (interactively issued) command
  *	dest: where to send results
  *	completionTag: points to a buffer of size COMPLETION_TAG_BUFSIZE
  *		in which to store a command completion status string.
+ *
+ * Notes: as of PG 8.4, caller MUST supply a queryString; it is not
+ * allowed anymore to pass NULL.  (If you really don't have source text,
+ * you can pass a constant string, perhaps "(query not available)".)
  *
  * completionTag is only set nonempty if we want to return a nondefault status.
  *
@@ -396,6 +256,8 @@ ProcessUtility(Node *parsetree,
 			   DestReceiver *dest,
 			   char *completionTag)
 {
+	Assert(queryString != NULL);	/* required as of 8.4 */
+
 	check_xact_readonly(parsetree);
 
 	if (completionTag)
@@ -565,6 +427,9 @@ ProcessUtility(Node *parsetree,
 
 					if (IsA(stmt, CreateStmt))
 					{
+						Datum		toast_options;
+						static char *validnsps[] = HEAP_RELOPT_NAMESPACES;
+
 						/* Create the table itself */
 						relOid = DefineRelation((CreateStmt *) stmt,
 												RELKIND_RELATION);
@@ -574,7 +439,21 @@ ProcessUtility(Node *parsetree,
 						 * needs a secondary relation too.
 						 */
 						CommandCounterIncrement();
-						AlterTableCreateToastTable(relOid);
+
+						/* parse and validate reloptions for the toast table */
+						toast_options = transformRelOptions((Datum) 0,
+											  ((CreateStmt *) stmt)->options,
+															"toast",
+															validnsps,
+															true, false);
+						(void) heap_reloptions(RELKIND_TOASTVALUE,
+											   toast_options,
+											   true);
+
+						AlterTableCreateToastTable(relOid,
+												   InvalidOid,
+												   toast_options,
+												   false);
 					}
 					else
 					{
@@ -604,99 +483,88 @@ ProcessUtility(Node *parsetree,
 			DropTableSpace((DropTableSpaceStmt *) parsetree);
 			break;
 
+		case T_CreateFdwStmt:
+			CreateForeignDataWrapper((CreateFdwStmt *) parsetree);
+			break;
+
+		case T_AlterFdwStmt:
+			AlterForeignDataWrapper((AlterFdwStmt *) parsetree);
+			break;
+
+		case T_DropFdwStmt:
+			RemoveForeignDataWrapper((DropFdwStmt *) parsetree);
+			break;
+
+		case T_CreateForeignServerStmt:
+			CreateForeignServer((CreateForeignServerStmt *) parsetree);
+			break;
+
+		case T_AlterForeignServerStmt:
+			AlterForeignServer((AlterForeignServerStmt *) parsetree);
+			break;
+
+		case T_DropForeignServerStmt:
+			RemoveForeignServer((DropForeignServerStmt *) parsetree);
+			break;
+
+		case T_CreateUserMappingStmt:
+			CreateUserMapping((CreateUserMappingStmt *) parsetree);
+			break;
+
+		case T_AlterUserMappingStmt:
+			AlterUserMapping((AlterUserMappingStmt *) parsetree);
+			break;
+
+		case T_DropUserMappingStmt:
+			RemoveUserMapping((DropUserMappingStmt *) parsetree);
+			break;
+
 		case T_DropStmt:
 			{
 				DropStmt   *stmt = (DropStmt *) parsetree;
-				ListCell   *arg;
 
-				foreach(arg, stmt->objects)
+				switch (stmt->removeType)
 				{
-					List	   *names = (List *) lfirst(arg);
-					RangeVar   *rel;
+					case OBJECT_TABLE:
+					case OBJECT_SEQUENCE:
+					case OBJECT_VIEW:
+					case OBJECT_INDEX:
+						RemoveRelations(stmt);
+						break;
 
-					switch (stmt->removeType)
-					{
-						case OBJECT_TABLE:
-							rel = makeRangeVarFromNameList(names);
-							if (CheckDropPermissions(rel, RELKIND_RELATION,
-													 stmt->missing_ok))
-								RemoveRelation(rel, stmt->behavior);
-							break;
+					case OBJECT_TYPE:
+					case OBJECT_DOMAIN:
+						RemoveTypes(stmt);
+						break;
 
-						case OBJECT_SEQUENCE:
-							rel = makeRangeVarFromNameList(names);
-							if (CheckDropPermissions(rel, RELKIND_SEQUENCE,
-													 stmt->missing_ok))
-								RemoveRelation(rel, stmt->behavior);
-							break;
+					case OBJECT_CONVERSION:
+						DropConversionsCommand(stmt);
+						break;
 
-						case OBJECT_VIEW:
-							rel = makeRangeVarFromNameList(names);
-							if (CheckDropPermissions(rel, RELKIND_VIEW,
-													 stmt->missing_ok))
-								RemoveView(rel, stmt->behavior);
-							break;
+					case OBJECT_SCHEMA:
+						RemoveSchemas(stmt);
+						break;
 
-						case OBJECT_INDEX:
-							rel = makeRangeVarFromNameList(names);
-							if (CheckDropPermissions(rel, RELKIND_INDEX,
-													 stmt->missing_ok))
-								RemoveIndex(rel, stmt->behavior);
-							break;
+					case OBJECT_TSPARSER:
+						RemoveTSParsers(stmt);
+						break;
 
-						case OBJECT_TYPE:
-							/* RemoveType does its own permissions checks */
-							RemoveType(names, stmt->behavior,
-									   stmt->missing_ok);
-							break;
+					case OBJECT_TSDICTIONARY:
+						RemoveTSDictionaries(stmt);
+						break;
 
-						case OBJECT_DOMAIN:
-							/* RemoveDomain does its own permissions checks */
-							RemoveDomain(names, stmt->behavior,
-										 stmt->missing_ok);
-							break;
+					case OBJECT_TSTEMPLATE:
+						RemoveTSTemplates(stmt);
+						break;
 
-						case OBJECT_CONVERSION:
-							DropConversionCommand(names, stmt->behavior,
-												  stmt->missing_ok);
-							break;
+					case OBJECT_TSCONFIGURATION:
+						RemoveTSConfigurations(stmt);
+						break;
 
-						case OBJECT_SCHEMA:
-							/* RemoveSchema does its own permissions checks */
-							RemoveSchema(names, stmt->behavior,
-										 stmt->missing_ok);
-							break;
-
-						case OBJECT_TSPARSER:
-							RemoveTSParser(names, stmt->behavior,
-										   stmt->missing_ok);
-							break;
-
-						case OBJECT_TSDICTIONARY:
-							RemoveTSDictionary(names, stmt->behavior,
-											   stmt->missing_ok);
-							break;
-
-						case OBJECT_TSTEMPLATE:
-							RemoveTSTemplate(names, stmt->behavior,
-											 stmt->missing_ok);
-							break;
-
-						case OBJECT_TSCONFIGURATION:
-							RemoveTSConfiguration(names, stmt->behavior,
-												  stmt->missing_ok);
-							break;
-
-						default:
-							elog(ERROR, "unrecognized drop object type: %d",
-								 (int) stmt->removeType);
-							break;
-					}
-
-					/*
-					 * We used to need to do CommandCounterIncrement() here,
-					 * but now it's done inside performDeletion().
-					 */
+					default:
+						elog(ERROR, "unrecognized drop object type: %d",
+							 (int) stmt->removeType);
+						break;
 				}
 			}
 			break;
@@ -899,7 +767,7 @@ ProcessUtility(Node *parsetree,
 			break;
 
 		case T_CreateFunctionStmt:		/* CREATE FUNCTION */
-			CreateFunction((CreateFunctionStmt *) parsetree);
+			CreateFunction((CreateFunctionStmt *) parsetree, queryString);
 			break;
 
 		case T_AlterFunctionStmt:		/* ALTER FUNCTION */
@@ -980,7 +848,7 @@ ProcessUtility(Node *parsetree,
 			break;
 
 		case T_AlterDatabaseStmt:
-			AlterDatabase((AlterDatabaseStmt *) parsetree);
+			AlterDatabase((AlterDatabaseStmt *) parsetree, isTopLevel);
 			break;
 
 		case T_AlterDatabaseSetStmt:
@@ -1001,7 +869,7 @@ ProcessUtility(Node *parsetree,
 			{
 				NotifyStmt *stmt = (NotifyStmt *) parsetree;
 
-				Async_Notify(stmt->relation->relname);
+				Async_Notify(stmt->conditionname);
 			}
 			break;
 
@@ -1009,7 +877,7 @@ ProcessUtility(Node *parsetree,
 			{
 				ListenStmt *stmt = (ListenStmt *) parsetree;
 
-				Async_Listen(stmt->relation->relname);
+				Async_Listen(stmt->conditionname);
 			}
 			break;
 
@@ -1017,7 +885,10 @@ ProcessUtility(Node *parsetree,
 			{
 				UnlistenStmt *stmt = (UnlistenStmt *) parsetree;
 
-				Async_Unlisten(stmt->relation->relname);
+				if (stmt->conditionname)
+					Async_Unlisten(stmt->conditionname);
+				else
+					Async_UnlistenAll();
 			}
 			break;
 
@@ -1036,7 +907,8 @@ ProcessUtility(Node *parsetree,
 			break;
 
 		case T_VacuumStmt:
-			vacuum((VacuumStmt *) parsetree, NIL, NULL, false, isTopLevel);
+			vacuum((VacuumStmt *) parsetree, InvalidOid, true, NULL, false,
+				   isTopLevel);
 			break;
 
 		case T_McpStmt:
@@ -1080,7 +952,7 @@ ProcessUtility(Node *parsetree,
 			break;
 
 		case T_CreateTrigStmt:
-			CreateTrigger((CreateTrigStmt *) parsetree, InvalidOid);
+			CreateTrigger((CreateTrigStmt *) parsetree, InvalidOid, true);
 			break;
 
 		case T_DropPropertyStmt:
@@ -1157,6 +1029,12 @@ ProcessUtility(Node *parsetree,
 			break;
 
 		case T_LockStmt:
+
+			/*
+			 * Since the lock would just get dropped immediately, LOCK TABLE
+			 * outside a transaction block is presumed to be user error.
+			 */
+			RequireTransactionChain(isTopLevel, "LOCK TABLE");
 			LockTableCommand((LockStmt *) parsetree);
 			break;
 
@@ -1524,6 +1402,42 @@ CreateCommandTag(Node *parsetree)
 			tag = "DROP TABLESPACE";
 			break;
 
+		case T_CreateFdwStmt:
+			tag = "CREATE FOREIGN DATA WRAPPER";
+			break;
+
+		case T_AlterFdwStmt:
+			tag = "ALTER FOREIGN DATA WRAPPER";
+			break;
+
+		case T_DropFdwStmt:
+			tag = "DROP FOREIGN DATA WRAPPER";
+			break;
+
+		case T_CreateForeignServerStmt:
+			tag = "CREATE SERVER";
+			break;
+
+		case T_AlterForeignServerStmt:
+			tag = "ALTER SERVER";
+			break;
+
+		case T_DropForeignServerStmt:
+			tag = "DROP SERVER";
+			break;
+
+		case T_CreateUserMappingStmt:
+			tag = "CREATE USER MAPPING";
+			break;
+
+		case T_AlterUserMappingStmt:
+			tag = "ALTER USER MAPPING";
+			break;
+
+		case T_DropUserMappingStmt:
+			tag = "DROP USER MAPPING";
+			break;
+
 		case T_DropStmt:
 			switch (((DropStmt *) parsetree)->removeType)
 			{
@@ -1641,6 +1555,9 @@ CreateCommandTag(Node *parsetree)
 				case OBJECT_TSCONFIGURATION:
 					tag = "ALTER TEXT SEARCH CONFIGURATION";
 					break;
+				case OBJECT_TYPE:
+					tag = "ALTER TYPE";
+					break;
 				default:
 					tag = "???";
 					break;
@@ -1679,6 +1596,9 @@ CreateCommandTag(Node *parsetree)
 					break;
 				case OBJECT_TSCONFIGURATION:
 					tag = "ALTER TEXT SEARCH CONFIGURATION";
+					break;
+				case OBJECT_VIEW:
+					tag = "ALTER VIEW";
 					break;
 				default:
 					tag = "???";
@@ -1731,6 +1651,12 @@ CreateCommandTag(Node *parsetree)
 				case OBJECT_TSDICTIONARY:
 					tag = "ALTER TEXT SEARCH DICTIONARY";
 					break;
+				case OBJECT_FDW:
+					tag = "ALTER FOREIGN DATA WRAPPER";
+					break;
+				case OBJECT_FOREIGN_SERVER:
+					tag = "ALTER SERVER";
+					break;
 				default:
 					tag = "???";
 					break;
@@ -1738,19 +1664,23 @@ CreateCommandTag(Node *parsetree)
 			break;
 
 		case T_AlterTableStmt:
+			switch (((AlterTableStmt *) parsetree)->relkind)
 			{
-				AlterTableStmt *stmt = (AlterTableStmt *) parsetree;
-
-				/*
-				 * We might be supporting ALTER INDEX here, so set the
-				 * completion tag appropriately. Catch all other possibilities
-				 * with ALTER TABLE
-				 */
-
-				if (stmt->relkind == OBJECT_INDEX)
-					tag = "ALTER INDEX";
-				else
+				case OBJECT_TABLE:
 					tag = "ALTER TABLE";
+					break;
+				case OBJECT_INDEX:
+					tag = "ALTER INDEX";
+					break;
+				case OBJECT_SEQUENCE:
+					tag = "ALTER SEQUENCE";
+					break;
+				case OBJECT_VIEW:
+					tag = "ALTER VIEW";
+					break;
+				default:
+					tag = "???";
+					break;
 			}
 			break;
 
@@ -2257,10 +2187,6 @@ GetCommandLogLevel(Node *parsetree)
 			lev = LOGSTMT_ALL;
 			break;
 
-		case T_CreateDomainStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
 		case T_CreateSchemaStmt:
 			lev = LOGSTMT_DDL;
 			break;
@@ -2274,6 +2200,18 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_DropTableSpaceStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
+		case T_CreateFdwStmt:
+		case T_AlterFdwStmt:
+		case T_DropFdwStmt:
+		case T_CreateForeignServerStmt:
+		case T_AlterForeignServerStmt:
+		case T_DropForeignServerStmt:
+		case T_CreateUserMappingStmt:
+		case T_AlterUserMappingStmt:
+		case T_DropUserMappingStmt:
 			lev = LOGSTMT_DDL;
 			break;
 
@@ -2296,6 +2234,33 @@ GetCommandLogLevel(Node *parsetree)
 				lev = LOGSTMT_ALL;
 			break;
 
+		case T_PrepareStmt:
+			{
+				PrepareStmt *stmt = (PrepareStmt *) parsetree;
+
+				/* Look through a PREPARE to the contained stmt */
+				lev = GetCommandLogLevel(stmt->query);
+			}
+			break;
+
+		case T_ExecuteStmt:
+			{
+				ExecuteStmt *stmt = (ExecuteStmt *) parsetree;
+				PreparedStatement *ps;
+
+				/* Look through an EXECUTE to the referenced stmt */
+				ps = FetchPreparedStatement(stmt->name, false);
+				if (ps)
+					lev = GetCommandLogLevel(ps->plansource->raw_parse_tree);
+				else
+					lev = LOGSTMT_ALL;
+			}
+			break;
+
+		case T_DeallocateStmt:
+			lev = LOGSTMT_ALL;
+			break;
+
 		case T_RenameStmt:
 			lev = LOGSTMT_DDL;
 			break;
@@ -2313,10 +2278,6 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_AlterDomainStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
-		case T_AlterFunctionStmt:
 			lev = LOGSTMT_DDL;
 			break;
 
@@ -2345,6 +2306,10 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_CreateFunctionStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
+		case T_AlterFunctionStmt:
 			lev = LOGSTMT_DDL;
 			break;
 
@@ -2448,6 +2413,10 @@ GetCommandLogLevel(Node *parsetree)
 			lev = LOGSTMT_DDL;
 			break;
 
+		case T_CreateDomainStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
 		case T_CreateRoleStmt:
 			lev = LOGSTMT_DDL;
 			break;
@@ -2530,33 +2499,6 @@ GetCommandLogLevel(Node *parsetree)
 
 		case T_AlterTSConfigurationStmt:
 			lev = LOGSTMT_DDL;
-			break;
-
-		case T_PrepareStmt:
-			{
-				PrepareStmt *stmt = (PrepareStmt *) parsetree;
-
-				/* Look through a PREPARE to the contained stmt */
-				lev = GetCommandLogLevel(stmt->query);
-			}
-			break;
-
-		case T_ExecuteStmt:
-			{
-				ExecuteStmt *stmt = (ExecuteStmt *) parsetree;
-				PreparedStatement *ps;
-
-				/* Look through an EXECUTE to the referenced stmt */
-				ps = FetchPreparedStatement(stmt->name, false);
-				if (ps)
-					lev = GetCommandLogLevel(ps->plansource->raw_parse_tree);
-				else
-					lev = LOGSTMT_ALL;
-			}
-			break;
-
-		case T_DeallocateStmt:
-			lev = LOGSTMT_ALL;
 			break;
 
 			/* already-planned queries */

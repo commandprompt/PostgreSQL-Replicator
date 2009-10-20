@@ -31,7 +31,7 @@ my $contrib_extrasource = {
     'cube' => ['cubescan.l','cubeparse.y'],
     'seg' => ['segscan.l','segparse.y']
 };
-my @contrib_excludes = ('pgcrypto');
+my @contrib_excludes = ('pgcrypto','intagg');
 
 sub mkvcbuild
 {
@@ -44,10 +44,10 @@ sub mkvcbuild
 
     our @pgportfiles = qw(
       chklocale.c crypt.c fseeko.c getrusage.c inet_aton.c random.c srandom.c
-      unsetenv.c getaddrinfo.c gettimeofday.c kill.c open.c rand.c
+      getaddrinfo.c gettimeofday.c kill.c open.c rand.c
       snprintf.c strlcat.c strlcpy.c copydir.c dirmod.c exec.c noblock.c path.c pipe.c
       pgsleep.c pgstrcasecmp.c qsort.c qsort_arg.c sprompt.c thread.c
-      getopt.c getopt_long.c dirent.c rint.c win32error.c);
+      getopt.c getopt_long.c dirent.c rint.c win32env.c win32error.c);
 
     $libpgport = $solution->AddProject('libpgport','lib','misc');
     $libpgport->AddDefine('FRONTEND');
@@ -105,11 +105,11 @@ sub mkvcbuild
         }
         $plperl->AddReference($postgres);
 		my @perl_libs = grep {/perl\d+.lib$/ }
-		   glob($solution->{options}->{perl} . '\lib\CORE\perl*.lib');
-		if (@perl_libs == 1)
-		{
-			$plperl->AddLibrary($perl_libs[0]);
-		}
+			glob($solution->{options}->{perl} . '\lib\CORE\perl*.lib');
+        if (@perl_libs == 1)
+        {
+            $plperl->AddLibrary($perl_libs[0]);
+        }
 		else
 		{
 			die "could not identify perl library version";
@@ -131,7 +131,14 @@ sub mkvcbuild
         my $pltcl = $solution->AddProject('pltcl','dll','PLs','src\pl\tcl');
         $pltcl->AddIncludeDir($solution->{options}->{tcl} . '\include');
         $pltcl->AddReference($postgres);
-        $pltcl->AddLibrary($solution->{options}->{tcl} . '\lib\tcl84.lib');
+        if (-e $solution->{options}->{tcl} . '\lib\tcl85.lib')
+        {
+            $pltcl->AddLibrary($solution->{options}->{tcl} . '\lib\tcl85.lib');
+        }
+        else
+        {
+            $pltcl->AddLibrary($solution->{options}->{tcl} . '\lib\tcl84.lib');
+        }
     }
 
     $libpq = $solution->AddProject('libpq','dll','interfaces','src\interfaces\libpq');
@@ -176,6 +183,7 @@ sub mkvcbuild
     $ecpg->AddDefine('MAJOR_VERSION=4');
     $ecpg->AddDefine('MINOR_VERSION=2');
     $ecpg->AddDefine('PATCHLEVEL=1');
+    $ecpg->AddDefine('ECPG_COMPILE');
     $ecpg->AddReference($libpgport);
 
     my $pgregress_ecpg = $solution->AddProject('pg_regress_ecpg','exe','misc');
@@ -219,16 +227,22 @@ sub mkvcbuild
     $pgdump->AddFile('src\bin\pg_dump\pg_dump.c');
     $pgdump->AddFile('src\bin\pg_dump\common.c');
     $pgdump->AddFile('src\bin\pg_dump\pg_dump_sort.c');
+    $pgdump->AddFile('src\bin\pg_dump\keywords.c');
+    $pgdump->AddFile('src\backend\parser\kwlookup.c');
 
     my $pgdumpall = AddSimpleFrontend('pg_dump', 1);
     $pgdumpall->{name} = 'pg_dumpall';
     $pgdumpall->AddIncludeDir('src\backend');
     $pgdumpall->AddFile('src\bin\pg_dump\pg_dumpall.c');
+    $pgdumpall->AddFile('src\bin\pg_dump\keywords.c');
+    $pgdumpall->AddFile('src\backend\parser\kwlookup.c');
 
     my $pgrestore = AddSimpleFrontend('pg_dump', 1);
     $pgrestore->{name} = 'pg_restore';
     $pgrestore->AddIncludeDir('src\backend');
     $pgrestore->AddFile('src\bin\pg_dump\pg_restore.c');
+    $pgrestore->AddFile('src\bin\pg_dump\keywords.c');
+    $pgrestore->AddFile('src\backend\parser\kwlookup.c');
 
     my $zic = $solution->AddProject('zic','exe','utils');
     $zic->AddFiles('src\timezone','zic.c','ialloc.c','scheck.c','localtime.c');
@@ -330,26 +344,26 @@ sub mkvcbuild
         my @files = split /\s+/,$1;
         foreach my $f (@files)
         {
-            if ($f =~ /\/keywords\.o$/)
+            $f =~ s/\.o$/\.c/;
+            if ($f eq 'keywords.c')
             {
-                $proj->AddFile('src\backend\parser\keywords.c');
-                $proj->AddIncludeDir('src\backend');
+                $proj->AddFile('src\bin\pg_dump\keywords.c');
+            }
+            elsif ($f eq 'kwlookup.c')
+            {
+                $proj->AddFile('src\backend\parser\kwlookup.c');
+            }
+            elsif ($f eq 'dumputils.c')
+            {
+                $proj->AddFile('src\bin\pg_dump\dumputils.c');
+            }
+            elsif ($f =~ /print\.c$/)
+            { # Also catches mbprint.c
+                $proj->AddFile('src\bin\psql\\' . $f);
             }
             else
             {
-                $f =~ s/\.o$/\.c/;
-                if ($f eq 'dumputils.c')
-                {
-                    $proj->AddFile('src\bin\pg_dump\dumputils.c');
-                }
-                elsif ($f =~ /print\.c$/)
-                { # Also catches mbprint.c
-                    $proj->AddFile('src\bin\psql\\' . $f);
-                }
-                else
-                {
-                    $proj->AddFile('src\bin\scripts\\' . $f);
-                }
+                $proj->AddFile('src\bin\scripts\\' . $f);
             }
         }
         $proj->AddIncludeDir('src\interfaces\libpq');

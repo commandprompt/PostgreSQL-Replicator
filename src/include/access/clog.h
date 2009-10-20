@@ -3,7 +3,7 @@
  *
  * PostgreSQL transaction-commit-log manager
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -32,7 +32,8 @@ typedef int XidStatus;
 #define NUM_CLOG_BUFFERS	8
 
 
-extern void TransactionIdSetStatus(TransactionId xid, XidStatus status, XLogRecPtr lsn);
+extern void TransactionIdSetTreeStatus(TransactionId xid, int nsubxids,
+				   TransactionId *subxids, XidStatus status, XLogRecPtr lsn);
 extern XidStatus TransactionIdGetStatus(TransactionId xid, XLogRecPtr *lsn);
 
 extern Size CLOGShmemSize(void);

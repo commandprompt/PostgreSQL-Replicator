@@ -6,7 +6,7 @@
  * This gives R-tree behavior, with Guttman's poly-time split algorithm.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -86,6 +86,12 @@ gist_box_consistent(PG_FUNCTION_ARGS)
 	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
 	BOX		   *query = PG_GETARG_BOX_P(1);
 	StrategyNumber strategy = (StrategyNumber) PG_GETARG_UINT16(2);
+
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	bool	   *recheck = (bool *) PG_GETARG_POINTER(4);
+
+	/* All cases served by this function are exact */
+	*recheck = false;
 
 	if (DatumGetBoxP(entry->key) == NULL || query == NULL)
 		PG_RETURN_BOOL(FALSE);
@@ -228,9 +234,9 @@ chooseLR(GIST_SPLITVEC *v,
 						  NULL, NULL, InvalidOffsetNumber, FALSE);
 
 			gistentryinit(addon, BoxPGetDatum(union1), NULL, NULL, InvalidOffsetNumber, FALSE);
-			DirectFunctionCall3(gist_box_penalty, PointerGetDatum(&oldUnion), PointerGetDatum(&union1), PointerGetDatum(&p1));
+			DirectFunctionCall3(gist_box_penalty, PointerGetDatum(&oldUnion), PointerGetDatum(&addon), PointerGetDatum(&p1));
 			gistentryinit(addon, BoxPGetDatum(union2), NULL, NULL, InvalidOffsetNumber, FALSE);
-			DirectFunctionCall3(gist_box_penalty, PointerGetDatum(&oldUnion), PointerGetDatum(&union2), PointerGetDatum(&p2));
+			DirectFunctionCall3(gist_box_penalty, PointerGetDatum(&oldUnion), PointerGetDatum(&addon), PointerGetDatum(&p2));
 
 			if ((v->spl_ldatum_exists && p1 > p2) || (v->spl_rdatum_exists && p1 < p2))
 				firstToLeft = false;
@@ -274,11 +280,11 @@ chooseLR(GIST_SPLITVEC *v,
 static void
 fallbackSplit(GistEntryVector *entryvec, GIST_SPLITVEC *v)
 {
-	OffsetNumber	i, 
-					maxoff;
-	BOX			   *unionL = NULL,
-				   *unionR = NULL;
-	int				nbytes;
+	OffsetNumber i,
+				maxoff;
+	BOX		   *unionL = NULL,
+			   *unionR = NULL;
+	int			nbytes;
 
 	maxoff = entryvec->n - 1;
 
@@ -289,7 +295,7 @@ fallbackSplit(GistEntryVector *entryvec, GIST_SPLITVEC *v)
 
 	for (i = FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
 	{
-		BOX * cur = DatumGetBoxP(entryvec->vector[i].key);
+		BOX		   *cur = DatumGetBoxP(entryvec->vector[i].key);
 
 		if (i <= (maxoff - FirstOffsetNumber + 1) / 2)
 		{
@@ -762,13 +768,19 @@ gist_poly_consistent(PG_FUNCTION_ARGS)
 	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
 	POLYGON    *query = PG_GETARG_POLYGON_P(1);
 	StrategyNumber strategy = (StrategyNumber) PG_GETARG_UINT16(2);
+
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	bool	   *recheck = (bool *) PG_GETARG_POINTER(4);
 	bool		result;
+
+	/* All cases served by this function are inexact */
+	*recheck = true;
 
 	if (DatumGetBoxP(entry->key) == NULL || query == NULL)
 		PG_RETURN_BOOL(FALSE);
 
 	/*
-	 * Since the operators are marked lossy anyway, we can just use
+	 * Since the operators require recheck anyway, we can just use
 	 * rtree_internal_consistent even at leaf nodes.  (This works in part
 	 * because the index entries are bounding boxes not polygons.)
 	 */
@@ -833,14 +845,20 @@ gist_circle_consistent(PG_FUNCTION_ARGS)
 	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
 	CIRCLE	   *query = PG_GETARG_CIRCLE_P(1);
 	StrategyNumber strategy = (StrategyNumber) PG_GETARG_UINT16(2);
+
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	bool	   *recheck = (bool *) PG_GETARG_POINTER(4);
 	BOX			bbox;
 	bool		result;
+
+	/* All cases served by this function are inexact */
+	*recheck = true;
 
 	if (DatumGetBoxP(entry->key) == NULL || query == NULL)
 		PG_RETURN_BOOL(FALSE);
 
 	/*
-	 * Since the operators are marked lossy anyway, we can just use
+	 * Since the operators require recheck anyway, we can just use
 	 * rtree_internal_consistent even at leaf nodes.  (This works in part
 	 * because the index entries are bounding boxes not circles.)
 	 */

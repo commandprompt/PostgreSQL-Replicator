@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  */
@@ -26,9 +26,10 @@ int
 MainLoop(FILE *source)
 {
 	PsqlScanState scan_state;	/* lexer working state */
-	PQExpBuffer query_buf;		/* buffer for query being accumulated */
-	PQExpBuffer previous_buf;	/* if there isn't anything in the new buffer
-								 * yet, use this one for \e, etc. */
+	volatile PQExpBuffer query_buf;		/* buffer for query being accumulated */
+	volatile PQExpBuffer previous_buf;	/* if there isn't anything in the new
+										 * buffer yet, use this one for \e,
+										 * etc. */
 	PQExpBuffer history_buf;	/* earlier lines of a multi-line command, not
 								 * yet saved to readline history */
 	char	   *line;			/* current line of input */
@@ -62,7 +63,9 @@ MainLoop(FILE *source)
 	query_buf = createPQExpBuffer();
 	previous_buf = createPQExpBuffer();
 	history_buf = createPQExpBuffer();
-	if (!query_buf || !previous_buf || !history_buf)
+	if (PQExpBufferBroken(query_buf) ||
+		PQExpBufferBroken(previous_buf) ||
+		PQExpBufferBroken(history_buf))
 	{
 		psql_error("out of memory\n");
 		exit(EXIT_FAILURE);
@@ -171,6 +174,23 @@ MainLoop(FILE *source)
 			continue;
 		}
 
+		/* A request for help? Be friendly and give them some guidance */
+		if (pset.cur_cmd_interactive && query_buf->len == 0 &&
+			pg_strncasecmp(line, "help", 4) == 0 &&
+			(line[4] == '\0' || line[4] == ';' || isspace((unsigned char) line[4])))
+		{
+			free(line);
+			puts(_("You are using psql, the command-line interface to PostgreSQL."));
+			printf(_("Type:  \\copyright for distribution terms\n"
+					 "       \\h for help with SQL commands\n"
+					 "       \\? for help with psql commands\n"
+				  "       \\g or terminate with semicolon to execute query\n"
+					 "       \\q to quit\n"));
+
+			fflush(stdout);
+			continue;
+		}
+
 		/* echo back if flag is set */
 		if (pset.echo == PSQL_ECHO_ALL && !pset.cur_cmd_interactive)
 			puts(line);
@@ -203,6 +223,12 @@ MainLoop(FILE *source)
 			scan_result = psql_scan(scan_state, query_buf, &prompt_tmp);
 			prompt_status = prompt_tmp;
 
+			if (PQExpBufferBroken(query_buf))
+			{
+				psql_error("out of memory\n");
+				exit(EXIT_FAILURE);
+			}
+
 			/*
 			 * Send command if semicolon found, or if end of line and we're in
 			 * single-line mode.
@@ -225,9 +251,15 @@ MainLoop(FILE *source)
 				success = SendQuery(query_buf->data);
 				slashCmdStatus = success ? PSQL_CMD_SEND : PSQL_CMD_ERROR;
 
-				resetPQExpBuffer(previous_buf);
-				appendPQExpBufferStr(previous_buf, query_buf->data);
+				/* transfer query to previous_buf by pointer-swapping */
+				{
+					PQExpBuffer swap_buf = previous_buf;
+
+					previous_buf = query_buf;
+					query_buf = swap_buf;
+				}
 				resetPQExpBuffer(query_buf);
+
 				added_nl_pos = -1;
 				/* we need not do psql_scan_reset() here */
 			}
@@ -277,8 +309,13 @@ MainLoop(FILE *source)
 				{
 					success = SendQuery(query_buf->data);
 
-					resetPQExpBuffer(previous_buf);
-					appendPQExpBufferStr(previous_buf, query_buf->data);
+					/* transfer query to previous_buf by pointer-swapping */
+					{
+						PQExpBuffer swap_buf = previous_buf;
+
+						previous_buf = query_buf;
+						query_buf = swap_buf;
+					}
 					resetPQExpBuffer(query_buf);
 
 					/* flush any paren nesting info after forced send */

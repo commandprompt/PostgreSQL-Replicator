@@ -14,12 +14,6 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = ginutil.o gininsert.o ginxlog.o ginentrypage.o gindatapage.o \
 	ginbtree.o ginscan.o ginget.o ginvacuum.o ginarrayproc.o \
-	ginbulk.o
+	ginbulk.o ginfast.o
 
-all: SUBSYS.o
-
-SUBSYS.o: $(OBJS)
-	$(LD) $(LDREL) $(LDOUT) SUBSYS.o $(OBJS)
-
-clean: 
-	rm -f SUBSYS.o $(OBJS)
+include $(top_srcdir)/src/backend/common.mk

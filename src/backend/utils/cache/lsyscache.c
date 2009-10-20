@@ -3,7 +3,7 @@
  * lsyscache.c
  *	  Convenience routines for common queries in the system catalog cache.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -34,6 +34,9 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+
+/* Hook for plugins to get control in get_attavgwidth() */
+get_attavgwidth_hook_type get_attavgwidth_hook = NULL;
 
 
 /*				---------- AMOP CACHES ----------						 */
@@ -80,8 +83,8 @@ get_op_opfamily_strategy(Oid opno, Oid opfamily)
 /*
  * get_op_opfamily_properties
  *
- *		Get the operator's strategy number, input types, and recheck (lossy)
- *		flag within the specified opfamily.
+ *		Get the operator's strategy number and declared input data types
+ *		within the specified opfamily.
  *
  * Caller should already have verified that opno is a member of opfamily,
  * therefore we raise an error if the tuple is not found.
@@ -90,8 +93,7 @@ void
 get_op_opfamily_properties(Oid opno, Oid opfamily,
 						   int *strategy,
 						   Oid *lefttype,
-						   Oid *righttype,
-						   bool *recheck)
+						   Oid *righttype)
 {
 	HeapTuple	tp;
 	Form_pg_amop amop_tup;
@@ -107,7 +109,6 @@ get_op_opfamily_properties(Oid opno, Oid opfamily,
 	*strategy = amop_tup->amopstrategy;
 	*lefttype = amop_tup->amoplefttype;
 	*righttype = amop_tup->amoprighttype;
-	*recheck = amop_tup->amopreqcheck;
 	ReleaseSysCache(tp);
 }
 
@@ -238,6 +239,7 @@ get_compare_function_for_ordering_op(Oid opno, Oid *cmpfunc, bool *reverse)
 									 opcintype,
 									 opcintype,
 									 BTORDER_PROC);
+
 		if (!OidIsValid(*cmpfunc))		/* should not happen */
 			elog(ERROR, "missing support function %d(%u,%u) in opfamily %u",
 				 BTORDER_PROC, opcintype, opcintype, opfamily);
@@ -247,6 +249,7 @@ get_compare_function_for_ordering_op(Oid opno, Oid *cmpfunc, bool *reverse)
 
 	/* ensure outputs are set on failure */
 	*cmpfunc = InvalidOid;
+
 	*reverse = false;
 	return false;
 }
@@ -256,11 +259,14 @@ get_compare_function_for_ordering_op(Oid opno, Oid *cmpfunc, bool *reverse)
  *		Get the OID of the datatype-specific btree equality operator
  *		associated with an ordering operator (a "<" or ">" operator).
  *
+ * If "reverse" isn't NULL, also set *reverse to FALSE if the operator is "<",
+ * TRUE if it's ">"
+ *
  * Returns InvalidOid if no matching equality operator can be found.
  * (This indicates that the operator is not a valid ordering operator.)
  */
 Oid
-get_equality_op_for_ordering_op(Oid opno)
+get_equality_op_for_ordering_op(Oid opno, bool *reverse)
 {
 	Oid			result = InvalidOid;
 	Oid			opfamily;
@@ -276,6 +282,8 @@ get_equality_op_for_ordering_op(Oid opno)
 									 opcintype,
 									 opcintype,
 									 BTEqualStrategyNumber);
+		if (reverse)
+			*reverse = (strategy == BTGreaterStrategyNumber);
 	}
 
 	return result;
@@ -668,16 +676,26 @@ get_op_btree_interpretation(Oid opno, List **opfamilies, List **opstrats)
 }
 
 /*
- * ops_in_same_btree_opfamily
- *		Return TRUE if there exists a btree opfamily containing both operators.
- *		(This implies that they have compatible notions of equality.)
+ * equality_ops_are_compatible
+ *		Return TRUE if the two given equality operators have compatible
+ *		semantics.
+ *
+ * This is trivially true if they are the same operator.  Otherwise,
+ * we look to see if they can be found in the same btree or hash opfamily.
+ * Either finding allows us to assume that they have compatible notions
+ * of equality.  (The reason we need to do these pushups is that one might
+ * be a cross-type operator; for instance int24eq vs int4eq.)
  */
 bool
-ops_in_same_btree_opfamily(Oid opno1, Oid opno2)
+equality_ops_are_compatible(Oid opno1, Oid opno2)
 {
-	bool		result = false;
+	bool		result;
 	CatCList   *catlist;
 	int			i;
+
+	/* Easy if they're the same operator */
+	if (opno1 == opno2)
+		return true;
 
 	/*
 	 * We search through all the pg_amop entries for opno1.
@@ -685,19 +703,22 @@ ops_in_same_btree_opfamily(Oid opno1, Oid opno2)
 	catlist = SearchSysCacheList(AMOPOPID, 1,
 								 ObjectIdGetDatum(opno1),
 								 0, 0, 0);
+
+	result = false;
 	for (i = 0; i < catlist->n_members; i++)
 	{
 		HeapTuple	op_tuple = &catlist->members[i]->tuple;
 		Form_pg_amop op_form = (Form_pg_amop) GETSTRUCT(op_tuple);
 
-		/* must be btree */
-		if (op_form->amopmethod != BTREE_AM_OID)
-			continue;
-
-		if (op_in_opfamily(opno2, op_form->amopfamily))
+		/* must be btree or hash */
+		if (op_form->amopmethod == BTREE_AM_OID ||
+			op_form->amopmethod == HASH_AM_OID)
 		{
-			result = true;
-			break;
+			if (op_in_opfamily(opno2, op_form->amopfamily))
+			{
+				result = true;
+				break;
+			}
 		}
 	}
 
@@ -1971,8 +1992,7 @@ get_typdefault(Oid typid)
 	if (!isNull)
 	{
 		/* We have an expression default */
-		expr = stringToNode(DatumGetCString(DirectFunctionCall1(textout,
-																datum)));
+		expr = stringToNode(TextDatumGetCString(datum));
 	}
 	else
 	{
@@ -1987,8 +2007,7 @@ get_typdefault(Oid typid)
 			char	   *strDefaultVal;
 
 			/* Convert text datum to C string */
-			strDefaultVal = DatumGetCString(DirectFunctionCall1(textout,
-																datum));
+			strDefaultVal = TextDatumGetCString(datum);
 			/* Convert C string to a value of the given type */
 			datum = OidInputFunctionCall(type->typinput, strDefaultVal,
 										 getTypeIOParam(typeTuple), -1);
@@ -2169,6 +2188,29 @@ bool
 type_is_enum(Oid typid)
 {
 	return (get_typtype(typid) == TYPTYPE_ENUM);
+}
+
+/*
+ * get_type_category_preferred
+ *
+ *		Given the type OID, fetch its category and preferred-type status.
+ *		Throws error on failure.
+ */
+void
+get_type_category_preferred(Oid typid, char *typcategory, bool *typispreferred)
+{
+	HeapTuple	tp;
+	Form_pg_type typtup;
+
+	tp = SearchSysCache(TYPEOID,
+						ObjectIdGetDatum(typid),
+						0, 0, 0);
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for type %u", typid);
+	typtup = (Form_pg_type) GETSTRUCT(tp);
+	*typcategory = typtup->typcategory;
+	*typispreferred = typtup->typispreferred;
+	ReleaseSysCache(tp);
 }
 
 /*
@@ -2455,20 +2497,30 @@ get_typmodout(Oid typid)
  *
  *	  Given the table and attribute number of a column, get the average
  *	  width of entries in the column.  Return zero if no data available.
+ *
+ * Calling a hook at this point looks somewhat strange, but is required
+ * because the optimizer calls this function without any other way for
+ * plug-ins to control the result.
  */
 int32
 get_attavgwidth(Oid relid, AttrNumber attnum)
 {
 	HeapTuple	tp;
+	int32		stawidth;
 
+	if (get_attavgwidth_hook)
+	{
+		stawidth = (*get_attavgwidth_hook) (relid, attnum);
+		if (stawidth > 0)
+			return stawidth;
+	}
 	tp = SearchSysCache(STATRELATT,
 						ObjectIdGetDatum(relid),
 						Int16GetDatum(attnum),
 						0, 0);
 	if (HeapTupleIsValid(tp))
 	{
-		int32		stawidth = ((Form_pg_statistic) GETSTRUCT(tp))->stawidth;
-
+		stawidth = ((Form_pg_statistic) GETSTRUCT(tp))->stawidth;
 		ReleaseSysCache(tp);
 		if (stawidth > 0)
 			return stawidth;
@@ -2486,6 +2538,9 @@ get_attavgwidth(Oid relid, AttrNumber attnum)
  * already-looked-up tuple in the pg_statistic cache.  We do this since
  * most callers will want to extract more than one value from the cache
  * entry, and we don't want to repeat the cache lookup unnecessarily.
+ * Also, this API allows this routine to be used with statistics tuples
+ * that have been provided by a stats hook and didn't really come from
+ * pg_statistic.
  *
  * statstuple: pg_statistics tuple to be examined.
  * atttype: type OID of attribute (can be InvalidOid if values == NULL).

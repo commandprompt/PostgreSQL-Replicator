@@ -273,9 +273,9 @@ select * from rtest_admin;
 --
 -- Rule qualification test
 --
-insert into rtest_emp values ('wiech', '5000.00');
+insert into rtest_emp values ('wiecc', '5000.00');
 insert into rtest_emp values ('gates', '80000.00');
-update rtest_emp set ename = 'wiecx' where ename = 'wiech';
+update rtest_emp set ename = 'wiecx' where ename = 'wiecc';
 update rtest_emp set ename = 'wieck', salary = '6000.00' where ename = 'wiecx';
 update rtest_emp set salary = '7000.00' where ename = 'wieck';
 delete from rtest_emp where ename = 'gates';
@@ -850,6 +850,14 @@ create rule rule_and_refint_t3_ins as on insert to rule_and_refint_t3
 
 insert into rule_and_refint_t3 values (1, 11, 13, 'row7');
 insert into rule_and_refint_t3 values (1, 13, 11, 'row8');
+
+--
+-- disallow dropping a view's rule (bug #5072)
+--
+
+create view fooview as select 'foo'::text;
+drop rule "_RETURN" on fooview;
+drop view fooview;
 
 --
 -- check for planner problems with complex inherited UPDATES

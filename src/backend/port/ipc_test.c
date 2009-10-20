@@ -16,7 +16,7 @@
  *	   the parallel regression tests for a more complete test.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -180,6 +180,13 @@ errmsg_internal(const char *fmt,...)
 
 int
 errdetail(const char *fmt,...)
+{
+	fprintf(stderr, "DETAIL: %s\n", fmt);
+	return 0;					/* return value does not matter */
+}
+
+int
+errdetail_log(const char *fmt,...)
 {
 	fprintf(stderr, "DETAIL: %s\n", fmt);
 	return 0;					/* return value does not matter */

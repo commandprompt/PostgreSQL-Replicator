@@ -1,18 +1,22 @@
 /*
+ * $PostgreSQL$
+ *
+ *
  * timetravel.c --	function to get time travel feature
  *		using general triggers.
+ *
+ * Modified by BÖJTHE Zoltán, Hungary, mailto:urdesobt@axelero.hu
  */
+#include "postgres.h"
 
-/* Modified by BÖJTHE Zoltán, Hungary, mailto:urdesobt@axelero.hu */
+#include <ctype.h>
 
-#include "executor/spi.h"		/* this is what you need to work with SPI */
-#include "commands/trigger.h"	/* -"- and triggers */
-#include "miscadmin.h"			/* for GetPgUserName() */
+#include "catalog/pg_type.h"
+#include "commands/trigger.h"
+#include "executor/spi.h"
+#include "miscadmin.h"
+#include "utils/builtins.h"
 #include "utils/nabstime.h"
-
-#include <ctype.h>				/* tolower () */
-
-#define ABSTIMEOID	702			/* it should be in pg_type.h */
 
 PG_MODULE_MAGIC;
 
@@ -25,7 +29,7 @@ typedef struct
 {
 	char	   *ident;
 	SPIPlanPtr	splan;
-}	EPlan;
+} EPlan;
 
 static EPlan *Plans = NULL;		/* for UPDATE/DELETE */
 static int	nPlans = 0;
@@ -34,12 +38,12 @@ typedef struct _TTOffList
 {
 	struct _TTOffList *next;
 	char		name[1];
-}	TTOffList;
+} TTOffList;
 
 static TTOffList TTOff = {NULL, {0}};
 
 static int	findTTStatus(char *name);
-static EPlan *find_plan(char *ident, EPlan ** eplan, int *nplans);
+static EPlan *find_plan(char *ident, EPlan **eplan, int *nplans);
 
 /*
  * timetravel () --
@@ -172,7 +176,7 @@ timetravel(PG_FUNCTION_ARGS)
 	}
 
 	/* create fields containing name */
-	newuser = DirectFunctionCall1(textin, CStringGetDatum(GetUserNameFromId(GetUserId())));
+	newuser = CStringGetTextDatum(GetUserNameFromId(GetUserId()));
 
 	nulltext = (Datum) NULL;
 
@@ -513,7 +517,7 @@ currabstime()
 */
 
 static EPlan *
-find_plan(char *ident, EPlan ** eplan, int *nplans)
+find_plan(char *ident, EPlan **eplan, int *nplans)
 {
 	EPlan	   *newp;
 	int			i;

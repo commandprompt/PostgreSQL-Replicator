@@ -3,7 +3,7 @@
  * ipci.c
  *	  POSTGRES inter-process communication initialization code.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -28,16 +28,18 @@
 #include "postmaster/bgwriter.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/replication.h"
-#include "storage/freespace.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "storage/pmsignal.h"
 #include "storage/procarray.h"
-#include "storage/sinval.h"
+#include "storage/sinvaladt.h"
 #include "storage/spin.h"
 
 
 extern bool ForwarderEnable;
+shmem_startup_hook_type shmem_startup_hook = NULL;
+
 static Size total_addin_request = 0;
 static bool addin_request_allowed = true;
 
@@ -113,7 +115,7 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 		size = add_size(size, ProcArrayShmemSize());
 		size = add_size(size, BackendStatusShmemSize());
 		size = add_size(size, SInvalShmemSize());
-		size = add_size(size, FreeSpaceShmemSize());
+		size = add_size(size, PMSignalShmemSize());
 		size = add_size(size, BgWriterShmemSize());
 		size = add_size(size, AutoVacuumShmemSize());
 		size = add_size(size, BTreeShmemSize());
@@ -215,14 +217,9 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	CreateSharedInvalidationState();
 
 	/*
-	 * Set up free-space map
-	 */
-	InitFreeSpaceMap();
-
-	/*
 	 * Set up interprocess signaling mechanisms
 	 */
-	PMSignalInit();
+	PMSignalShmemInit();
 	BgWriterShmemInit();
 	AutoVacuumShmemInit();
 
@@ -240,4 +237,10 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	if (!IsUnderPostmaster)
 		ShmemBackendArrayAllocation();
 #endif
+
+	/*
+	 * Now give loadable modules a chance to set up their shmem allocations
+	 */
+	if (shmem_startup_hook)
+		shmem_startup_hook();
 }

@@ -2,7 +2,7 @@
  *
  * vacuumdb
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -15,13 +15,13 @@
 
 
 static void vacuum_one_database(const char *dbname, bool full, bool verbose, bool analyze,
-					const char *table,
+					bool freeze, const char *table,
 					const char *host, const char *port,
-					const char *username, bool password,
+					const char *username, enum trivalue prompt_password,
 					const char *progname, bool echo);
-static void vacuum_all_databases(bool full, bool verbose, bool analyze,
+static void vacuum_all_databases(bool full, bool verbose, bool analyze, bool freeze,
 					 const char *host, const char *port,
-					 const char *username, bool password,
+					 const char *username, enum trivalue prompt_password,
 					 const char *progname, bool echo, bool quiet);
 
 static void help(const char *progname);
@@ -34,11 +34,13 @@ main(int argc, char *argv[])
 		{"host", required_argument, NULL, 'h'},
 		{"port", required_argument, NULL, 'p'},
 		{"username", required_argument, NULL, 'U'},
+		{"no-password", no_argument, NULL, 'w'},
 		{"password", no_argument, NULL, 'W'},
 		{"echo", no_argument, NULL, 'e'},
 		{"quiet", no_argument, NULL, 'q'},
 		{"dbname", required_argument, NULL, 'd'},
 		{"analyze", no_argument, NULL, 'z'},
+		{"freeze", no_argument, NULL, 'F'},
 		{"all", no_argument, NULL, 'a'},
 		{"table", required_argument, NULL, 't'},
 		{"full", no_argument, NULL, 'f'},
@@ -54,21 +56,22 @@ main(int argc, char *argv[])
 	char	   *host = NULL;
 	char	   *port = NULL;
 	char	   *username = NULL;
-	bool		password = false;
+	enum trivalue prompt_password = TRI_DEFAULT;
 	bool		echo = false;
 	bool		quiet = false;
 	bool		analyze = false;
+	bool		freeze = false;
 	bool		alldb = false;
 	char	   *table = NULL;
 	bool		full = false;
 	bool		verbose = false;
 
 	progname = get_progname(argv[0]);
-	set_pglocale_pgservice(argv[0], "pgscripts");
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pgscripts"));
 
 	handle_help_version_opts(argc, argv, "vacuumdb", help);
 
-	while ((c = getopt_long(argc, argv, "h:p:U:Weqd:zat:fv", long_options, &optindex)) != -1)
+	while ((c = getopt_long(argc, argv, "h:p:U:wWeqd:zaFt:fv", long_options, &optindex)) != -1)
 	{
 		switch (c)
 		{
@@ -81,8 +84,11 @@ main(int argc, char *argv[])
 			case 'U':
 				username = optarg;
 				break;
+			case 'w':
+				prompt_password = TRI_NO;
+				break;
 			case 'W':
-				password = true;
+				prompt_password = TRI_YES;
 				break;
 			case 'e':
 				echo = true;
@@ -95,6 +101,9 @@ main(int argc, char *argv[])
 				break;
 			case 'z':
 				analyze = true;
+				break;
+			case 'F':
+				freeze = true;
 				break;
 			case 'a':
 				alldb = true;
@@ -145,8 +154,8 @@ main(int argc, char *argv[])
 			exit(1);
 		}
 
-		vacuum_all_databases(full, verbose, analyze,
-							 host, port, username, password,
+		vacuum_all_databases(full, verbose, analyze, freeze,
+							 host, port, username, prompt_password,
 							 progname, echo, quiet);
 	}
 	else
@@ -161,8 +170,8 @@ main(int argc, char *argv[])
 				dbname = get_user_name(progname);
 		}
 
-		vacuum_one_database(dbname, full, verbose, analyze, table,
-							host, port, username, password,
+		vacuum_one_database(dbname, full, verbose, analyze, freeze, table,
+							host, port, username, prompt_password,
 							progname, echo);
 	}
 
@@ -172,9 +181,9 @@ main(int argc, char *argv[])
 
 static void
 vacuum_one_database(const char *dbname, bool full, bool verbose, bool analyze,
-					const char *table,
+					bool freeze, const char *table,
 					const char *host, const char *port,
-					const char *username, bool password,
+					const char *username, enum trivalue prompt_password,
 					const char *progname, bool echo)
 {
 	PQExpBufferData sql;
@@ -186,6 +195,8 @@ vacuum_one_database(const char *dbname, bool full, bool verbose, bool analyze,
 	appendPQExpBuffer(&sql, "VACUUM");
 	if (full)
 		appendPQExpBuffer(&sql, " FULL");
+	if (freeze)
+		appendPQExpBuffer(&sql, " FREEZE");
 	if (verbose)
 		appendPQExpBuffer(&sql, " VERBOSE");
 	if (analyze)
@@ -194,7 +205,7 @@ vacuum_one_database(const char *dbname, bool full, bool verbose, bool analyze,
 		appendPQExpBuffer(&sql, " %s", table);
 	appendPQExpBuffer(&sql, ";\n");
 
-	conn = connectDatabase(dbname, host, port, username, password, progname);
+	conn = connectDatabase(dbname, host, port, username, prompt_password, progname);
 	if (!executeMaintenanceCommand(conn, sql.data, echo))
 	{
 		if (table)
@@ -212,16 +223,16 @@ vacuum_one_database(const char *dbname, bool full, bool verbose, bool analyze,
 
 
 static void
-vacuum_all_databases(bool full, bool verbose, bool analyze,
+vacuum_all_databases(bool full, bool verbose, bool analyze, bool freeze,
 					 const char *host, const char *port,
-					 const char *username, bool password,
+					 const char *username, enum trivalue prompt_password,
 					 const char *progname, bool echo, bool quiet)
 {
 	PGconn	   *conn;
 	PGresult   *result;
 	int			i;
 
-	conn = connectDatabase("postgres", host, port, username, password, progname);
+	conn = connectDatabase("postgres", host, port, username, prompt_password, progname);
 	result = executeQuery(conn, "SELECT datname FROM pg_database WHERE datallowconn ORDER BY 1;", progname, echo);
 	PQfinish(conn);
 
@@ -235,8 +246,8 @@ vacuum_all_databases(bool full, bool verbose, bool analyze,
 			fflush(stdout);
 		}
 
-		vacuum_one_database(dbname, full, verbose, analyze, NULL,
-							host, port, username, password,
+		vacuum_one_database(dbname, full, verbose, analyze, freeze, NULL,
+							host, port, username, prompt_password,
 							progname, echo);
 	}
 
@@ -253,18 +264,20 @@ help(const char *progname)
 	printf(_("\nOptions:\n"));
 	printf(_("  -a, --all                       vacuum all databases\n"));
 	printf(_("  -d, --dbname=DBNAME             database to vacuum\n"));
-	printf(_("  -t, --table='TABLE[(COLUMNS)]'  vacuum specific table only\n"));
-	printf(_("  -f, --full                      do full vacuuming\n"));
-	printf(_("  -z, --analyze                   update optimizer hints\n"));
 	printf(_("  -e, --echo                      show the commands being sent to the server\n"));
+	printf(_("  -f, --full                      do full vacuuming\n"));
+	printf(_("  -F, --freeze                    freeze row transaction information\n"));
 	printf(_("  -q, --quiet                     don't write any messages\n"));
+	printf(_("  -t, --table='TABLE[(COLUMNS)]'  vacuum specific table only\n"));
 	printf(_("  -v, --verbose                   write a lot of output\n"));
+	printf(_("  -z, --analyze                   update optimizer hints\n"));
 	printf(_("  --help                          show this help, then exit\n"));
 	printf(_("  --version                       output version information, then exit\n"));
 	printf(_("\nConnection options:\n"));
 	printf(_("  -h, --host=HOSTNAME       database server host or socket directory\n"));
 	printf(_("  -p, --port=PORT           database server port\n"));
 	printf(_("  -U, --username=USERNAME   user name to connect as\n"));
+	printf(_("  -w, --no-password         never prompt for password\n"));
 	printf(_("  -W, --password            force password prompt\n"));
 	printf(_("\nRead the description of the SQL command VACUUM for details.\n"));
 	printf(_("\nReport bugs to <pgsql-bugs@postgresql.org>.\n"));

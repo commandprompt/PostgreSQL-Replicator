@@ -3,7 +3,7 @@
  * pg_enum.c
  *	  routines to support manipulation of the pg_enum relation
  *
- * Copyright (c) 2006-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2006-2009, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -20,6 +20,8 @@
 #include "catalog/pg_enum.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/rel.h"
+#include "utils/tqual.h"
 
 static int	oid_cmp(const void *p1, const void *p2);
 
@@ -40,7 +42,7 @@ EnumValuesCreate(Oid enumTypeOid, List *vals)
 	int			i,
 				n;
 	Datum		values[Natts_pg_enum];
-	char		nulls[Natts_pg_enum];
+	bool		nulls[Natts_pg_enum];
 	ListCell   *lc;
 	HeapTuple	tup;
 
@@ -72,7 +74,7 @@ EnumValuesCreate(Oid enumTypeOid, List *vals)
 	qsort(oids, n, sizeof(Oid), oid_cmp);
 
 	/* and make the entries */
-	memset(nulls, ' ', sizeof(nulls));
+	memset(nulls, false, sizeof(nulls));
 
 	i = 0;
 	foreach(lc, vals)
@@ -94,7 +96,7 @@ EnumValuesCreate(Oid enumTypeOid, List *vals)
 		namestrcpy(&enumlabel, lab);
 		values[Anum_pg_enum_enumlabel - 1] = NameGetDatum(&enumlabel);
 
-		tup = heap_formtuple(tupDesc, values, nulls);
+		tup = heap_form_tuple(tupDesc, values, nulls);
 		HeapTupleSetOid(tup, oids[i]);
 
 		simple_heap_insert(pg_enum, tup);

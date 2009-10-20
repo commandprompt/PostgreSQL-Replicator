@@ -3,7 +3,7 @@
  * catcache.c
  *	  System catalog cache for tuples matching a key.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -17,6 +17,8 @@
 #include "access/genam.h"
 #include "access/hash.h"
 #include "access/heapam.h"
+#include "access/relscan.h"
+#include "access/sysattr.h"
 #include "access/valid.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
@@ -27,9 +29,10 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/memutils.h"
-#include "utils/relcache.h"
+#include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
  /* #define CACHEDEBUG */	/* turns DEBUG elogs on */
@@ -101,30 +104,37 @@ GetCCHashEqFuncs(Oid keytype, PGFunction *hashfunc, RegProcedure *eqfunc)
 	{
 		case BOOLOID:
 			*hashfunc = hashchar;
+
 			*eqfunc = F_BOOLEQ;
 			break;
 		case CHAROID:
 			*hashfunc = hashchar;
+
 			*eqfunc = F_CHAREQ;
 			break;
 		case NAMEOID:
 			*hashfunc = hashname;
+
 			*eqfunc = F_NAMEEQ;
 			break;
 		case INT2OID:
 			*hashfunc = hashint2;
+
 			*eqfunc = F_INT2EQ;
 			break;
 		case INT2VECTOROID:
 			*hashfunc = hashint2vector;
+
 			*eqfunc = F_INT2VECTOREQ;
 			break;
 		case INT4OID:
 			*hashfunc = hashint4;
+
 			*eqfunc = F_INT4EQ;
 			break;
 		case TEXTOID:
 			*hashfunc = hashtext;
+
 			*eqfunc = F_TEXTEQ;
 			break;
 		case OIDOID:
@@ -137,15 +147,18 @@ GetCCHashEqFuncs(Oid keytype, PGFunction *hashfunc, RegProcedure *eqfunc)
 		case REGCONFIGOID:
 		case REGDICTIONARYOID:
 			*hashfunc = hashoid;
+
 			*eqfunc = F_OIDEQ;
 			break;
 		case OIDVECTOROID:
 			*hashfunc = hashoidvector;
+
 			*eqfunc = F_OIDVECTOREQ;
 			break;
 		default:
 			elog(FATAL, "type %u not supported as catcache key", keytype);
 			*hashfunc = NULL;	/* keep compiler quiet */
+
 			*eqfunc = InvalidOid;
 			break;
 	}
@@ -1670,16 +1683,16 @@ build_dummy_tuple(CatCache *cache, int nkeys, ScanKey skeys)
 	HeapTuple	ntp;
 	TupleDesc	tupDesc = cache->cc_tupdesc;
 	Datum	   *values;
-	char	   *nulls;
+	bool	   *nulls;
 	Oid			tupOid = InvalidOid;
 	NameData	tempNames[4];
 	int			i;
 
 	values = (Datum *) palloc(tupDesc->natts * sizeof(Datum));
-	nulls = (char *) palloc(tupDesc->natts * sizeof(char));
+	nulls = (bool *) palloc(tupDesc->natts * sizeof(bool));
 
 	memset(values, 0, tupDesc->natts * sizeof(Datum));
-	memset(nulls, 'n', tupDesc->natts * sizeof(char));
+	memset(nulls, true, tupDesc->natts * sizeof(bool));
 
 	for (i = 0; i < nkeys; i++)
 	{
@@ -1692,7 +1705,7 @@ build_dummy_tuple(CatCache *cache, int nkeys, ScanKey skeys)
 			 * Here we must be careful in case the caller passed a C string
 			 * where a NAME is wanted: convert the given argument to a
 			 * correctly padded NAME.  Otherwise the memcpy() done in
-			 * heap_formtuple could fall off the end of memory.
+			 * heap_form_tuple could fall off the end of memory.
 			 */
 			if (cache->cc_isname[i])
 			{
@@ -1702,7 +1715,7 @@ build_dummy_tuple(CatCache *cache, int nkeys, ScanKey skeys)
 				keyval = NameGetDatum(newval);
 			}
 			values[attindex - 1] = keyval;
-			nulls[attindex - 1] = ' ';
+			nulls[attindex - 1] = false;
 		}
 		else
 		{
@@ -1711,7 +1724,7 @@ build_dummy_tuple(CatCache *cache, int nkeys, ScanKey skeys)
 		}
 	}
 
-	ntp = heap_formtuple(tupDesc, values, nulls);
+	ntp = heap_form_tuple(tupDesc, values, nulls);
 	if (tupOid != InvalidOid)
 		HeapTupleSetOid(ntp, tupOid);
 

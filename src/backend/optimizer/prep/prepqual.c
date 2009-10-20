@@ -20,7 +20,7 @@
  * tree after local transformations that might introduce nested AND/ORs.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -219,6 +219,7 @@ push_nots(Expr *qual)
 			newopexpr->opresulttype = opexpr->opresulttype;
 			newopexpr->opretset = opexpr->opretset;
 			newopexpr->args = opexpr->args;
+			newopexpr->location = opexpr->location;
 			return (Expr *) newopexpr;
 		}
 		else
@@ -243,6 +244,7 @@ push_nots(Expr *qual)
 			newopexpr->opfuncid = InvalidOid;
 			newopexpr->useOr = !saopexpr->useOr;
 			newopexpr->args = saopexpr->args;
+			newopexpr->location = saopexpr->location;
 			return (Expr *) newopexpr;
 		}
 		else

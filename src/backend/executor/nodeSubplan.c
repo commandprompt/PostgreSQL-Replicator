@@ -3,7 +3,7 @@
  * nodeSubplan.c
  *	  routines to support subselects
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -20,7 +20,6 @@
 
 #include <math.h>
 
-#include "access/heapam.h"
 #include "executor/executor.h"
 #include "executor/nodeSubplan.h"
 #include "nodes/makefuncs.h"
@@ -30,6 +29,14 @@
 #include "utils/memutils.h"
 
 
+static Datum ExecSubPlan(SubPlanState *node,
+			ExprContext *econtext,
+			bool *isNull,
+			ExprDoneCond *isDone);
+static Datum ExecAlternativeSubPlan(AlternativeSubPlanState *node,
+					   ExprContext *econtext,
+					   bool *isNull,
+					   ExprDoneCond *isDone);
 static Datum ExecHashSubPlan(SubPlanState *node,
 				ExprContext *econtext,
 				bool *isNull);
@@ -46,7 +53,7 @@ static bool slotNoNulls(TupleTableSlot *slot);
  *		ExecSubPlan
  * ----------------------------------------------------------------
  */
-Datum
+static Datum
 ExecSubPlan(SubPlanState *node,
 			ExprContext *econtext,
 			bool *isNull,
@@ -59,9 +66,13 @@ ExecSubPlan(SubPlanState *node,
 	if (isDone)
 		*isDone = ExprSingleResult;
 
+	/* Sanity checks */
+	if (subplan->subLinkType == CTE_SUBLINK)
+		elog(ERROR, "CTE subplans should not be executed via ExecSubPlan");
 	if (subplan->setParam != NIL)
 		elog(ERROR, "cannot set parent params from subquery");
 
+	/* Select appropriate evaluation strategy */
 	if (subplan->useHashTable)
 		return ExecHashSubPlan(node, econtext, isNull);
 	else
@@ -681,11 +692,14 @@ ExecInitSubPlan(SubPlan *subplan, PlanState *parent)
 	 * If this plan is un-correlated or undirect correlated one and want to
 	 * set params for parent plan then mark parameters as needing evaluation.
 	 *
+	 * A CTE subplan's output parameter is never to be evaluated in the normal
+	 * way, so skip this in that case.
+	 *
 	 * Note that in the case of un-correlated subqueries we don't care about
 	 * setting parent->chgParam here: indices take care about it, for others -
 	 * it doesn't matter...
 	 */
-	if (subplan->setParam != NIL)
+	if (subplan->setParam != NIL && subplan->subLinkType != CTE_SUBLINK)
 	{
 		ListCell   *lst;
 
@@ -900,22 +914,21 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 	bool		found = false;
 	ArrayBuildState *astate = NULL;
 
+	if (subLinkType == ANY_SUBLINK ||
+		subLinkType == ALL_SUBLINK)
+		elog(ERROR, "ANY/ALL subselect unsupported as initplan");
+	if (subLinkType == CTE_SUBLINK)
+		elog(ERROR, "CTE subplans should not be executed via ExecSetParamPlan");
+
 	/*
 	 * Must switch to per-query memory context.
 	 */
 	oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_query_memory);
 
-	if (subLinkType == ANY_SUBLINK ||
-		subLinkType == ALL_SUBLINK)
-		elog(ERROR, "ANY/ALL subselect unsupported as initplan");
-
 	/*
-	 * By definition, an initplan has no parameters from our query level, but
-	 * it could have some from an outer level.	Rescan it if needed.
+	 * Run the plan.  (If it needs to be rescanned, the first ExecProcNode
+	 * call will take care of that.)
 	 */
-	if (planstate->chgParam != NULL)
-		ExecReScan(planstate, NULL);
-
 	for (slot = ExecProcNode(planstate);
 		 !TupIsNull(slot);
 		 slot = ExecProcNode(planstate))
@@ -925,7 +938,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 
 		if (subLinkType == EXISTS_SUBLINK)
 		{
-			/* There can be only one param... */
+			/* There can be only one setParam... */
 			int			paramid = linitial_int(subplan->setParam);
 			ParamExecData *prm = &(econtext->ecxt_param_exec_vals[paramid]);
 
@@ -987,7 +1000,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 
 	if (subLinkType == ARRAY_SUBLINK)
 	{
-		/* There can be only one param... */
+		/* There can be only one setParam... */
 		int			paramid = linitial_int(subplan->setParam);
 		ParamExecData *prm = &(econtext->ecxt_param_exec_vals[paramid]);
 
@@ -1007,7 +1020,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 	{
 		if (subLinkType == EXISTS_SUBLINK)
 		{
-			/* There can be only one param... */
+			/* There can be only one setParam... */
 			int			paramid = linitial_int(subplan->setParam);
 			ParamExecData *prm = &(econtext->ecxt_param_exec_vals[paramid]);
 
@@ -1052,18 +1065,105 @@ ExecReScanSetParamPlan(SubPlanState *node, PlanState *parent)
 		elog(ERROR, "extParam set of initplan is empty");
 
 	/*
-	 * Don't actually re-scan: ExecSetParamPlan does it if needed.
+	 * Don't actually re-scan: it'll happen inside ExecSetParamPlan if needed.
 	 */
 
 	/*
-	 * Mark this subplan's output parameters as needing recalculation
+	 * Mark this subplan's output parameters as needing recalculation.
+	 *
+	 * CTE subplans are never executed via parameter recalculation; instead
+	 * they get run when called by nodeCtescan.c.  So don't mark the output
+	 * parameter of a CTE subplan as dirty, but do set the chgParam bit for it
+	 * so that dependent plan nodes will get told to rescan.
 	 */
 	foreach(l, subplan->setParam)
 	{
 		int			paramid = lfirst_int(l);
 		ParamExecData *prm = &(estate->es_param_exec_vals[paramid]);
 
-		prm->execPlan = node;
+		if (subplan->subLinkType != CTE_SUBLINK)
+			prm->execPlan = node;
+
 		parent->chgParam = bms_add_member(parent->chgParam, paramid);
 	}
+}
+
+
+/*
+ * ExecInitAlternativeSubPlan
+ *
+ * Initialize for execution of one of a set of alternative subplans.
+ */
+AlternativeSubPlanState *
+ExecInitAlternativeSubPlan(AlternativeSubPlan *asplan, PlanState *parent)
+{
+	AlternativeSubPlanState *asstate = makeNode(AlternativeSubPlanState);
+	double		num_calls;
+	SubPlan    *subplan1;
+	SubPlan    *subplan2;
+	Cost		cost1;
+	Cost		cost2;
+
+	asstate->xprstate.evalfunc = (ExprStateEvalFunc) ExecAlternativeSubPlan;
+	asstate->xprstate.expr = (Expr *) asplan;
+
+	/*
+	 * Initialize subplans.  (Can we get away with only initializing the one
+	 * we're going to use?)
+	 */
+	asstate->subplans = (List *) ExecInitExpr((Expr *) asplan->subplans,
+											  parent);
+
+	/*
+	 * Select the one to be used.  For this, we need an estimate of the number
+	 * of executions of the subplan.  We use the number of output rows
+	 * expected from the parent plan node.	This is a good estimate if we are
+	 * in the parent's targetlist, and an underestimate (but probably not by
+	 * more than a factor of 2) if we are in the qual.
+	 */
+	num_calls = parent->plan->plan_rows;
+
+	/*
+	 * The planner saved enough info so that we don't have to work very hard
+	 * to estimate the total cost, given the number-of-calls estimate.
+	 */
+	Assert(list_length(asplan->subplans) == 2);
+	subplan1 = (SubPlan *) linitial(asplan->subplans);
+	subplan2 = (SubPlan *) lsecond(asplan->subplans);
+
+	cost1 = subplan1->startup_cost + num_calls * subplan1->per_call_cost;
+	cost2 = subplan2->startup_cost + num_calls * subplan2->per_call_cost;
+
+	if (cost1 < cost2)
+		asstate->active = 0;
+	else
+		asstate->active = 1;
+
+	return asstate;
+}
+
+/*
+ * ExecAlternativeSubPlan
+ *
+ * Execute one of a set of alternative subplans.
+ *
+ * Note: in future we might consider changing to different subplans on the
+ * fly, in case the original rowcount estimate turns out to be way off.
+ */
+static Datum
+ExecAlternativeSubPlan(AlternativeSubPlanState *node,
+					   ExprContext *econtext,
+					   bool *isNull,
+					   ExprDoneCond *isDone)
+{
+	/* Just pass control to the active subplan */
+	SubPlanState *activesp = (SubPlanState *) list_nth(node->subplans,
+													   node->active);
+
+	Assert(IsA(activesp, SubPlanState));
+
+	return ExecSubPlan(activesp,
+					   econtext,
+					   isNull,
+					   isDone);
 }

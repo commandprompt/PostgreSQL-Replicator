@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  */
@@ -16,6 +16,8 @@
 #include <io.h>					/* for _write() */
 #include <win32.h>
 #endif
+
+#include "portability/instr_time.h"
 
 #include "pqsignal.h"
 
@@ -822,8 +824,8 @@ SendQuery(const char *query)
 	{
 		if (on_error_rollback_warning == false && pset.sversion < 80000)
 		{
-			fprintf(stderr, _("The server version (%d) does not support savepoints for ON_ERROR_ROLLBACK.\n"),
-					pset.sversion);
+			fprintf(stderr, _("The server (version %d.%d) does not support savepoints for ON_ERROR_ROLLBACK.\n"),
+					pset.sversion / 10000, (pset.sversion / 100) % 100);
 			on_error_rollback_warning = true;
 		}
 		else
@@ -844,11 +846,11 @@ SendQuery(const char *query)
 	if (pset.fetch_count <= 0 || !is_select_command(query))
 	{
 		/* Default fetch-it-all-and-print mode */
-		TimevalStruct before,
+		instr_time	before,
 					after;
 
 		if (pset.timing)
-			GETTIMEOFDAY(&before);
+			INSTR_TIME_SET_CURRENT(before);
 
 		results = PQexec(pset.db, query);
 
@@ -858,8 +860,9 @@ SendQuery(const char *query)
 
 		if (pset.timing)
 		{
-			GETTIMEOFDAY(&after);
-			elapsed_msec = DIFF_MSEC(&after, &before);
+			INSTR_TIME_SET_CURRENT(after);
+			INSTR_TIME_SUBTRACT(after, before);
+			elapsed_msec = INSTR_TIME_GET_MILLISEC(after);
 		}
 
 		/* but printing results isn't: */
@@ -877,16 +880,20 @@ SendQuery(const char *query)
 	/* If we made a temporary savepoint, possibly release/rollback */
 	if (on_error_rollback_savepoint)
 	{
-		PGresult   *svptres;
+		const char *svptcmd;
 
 		transaction_status = PQtransactionStatus(pset.db);
 
-		/* We always rollback on an error */
 		if (transaction_status == PQTRANS_INERROR)
-			svptres = PQexec(pset.db, "ROLLBACK TO pg_psql_temporary_savepoint");
-		/* If they are no longer in a transaction, then do nothing */
+		{
+			/* We always rollback on an error */
+			svptcmd = "ROLLBACK TO pg_psql_temporary_savepoint";
+		}
 		else if (transaction_status != PQTRANS_INTRANS)
-			svptres = NULL;
+		{
+			/* If they are no longer in a transaction, then do nothing */
+			svptcmd = NULL;
+		}
 		else
 		{
 			/*
@@ -898,20 +905,27 @@ SendQuery(const char *query)
 				(strcmp(PQcmdStatus(results), "SAVEPOINT") == 0 ||
 				 strcmp(PQcmdStatus(results), "RELEASE") == 0 ||
 				 strcmp(PQcmdStatus(results), "ROLLBACK") == 0))
-				svptres = NULL;
+				svptcmd = NULL;
 			else
-				svptres = PQexec(pset.db, "RELEASE pg_psql_temporary_savepoint");
-		}
-		if (svptres && PQresultStatus(svptres) != PGRES_COMMAND_OK)
-		{
-			psql_error("%s", PQerrorMessage(pset.db));
-			PQclear(results);
-			PQclear(svptres);
-			ResetCancelConn();
-			return false;
+				svptcmd = "RELEASE pg_psql_temporary_savepoint";
 		}
 
-		PQclear(svptres);
+		if (svptcmd)
+		{
+			PGresult   *svptres;
+
+			svptres = PQexec(pset.db, svptcmd);
+			if (PQresultStatus(svptres) != PGRES_COMMAND_OK)
+			{
+				psql_error("%s", PQerrorMessage(pset.db));
+				PQclear(svptres);
+
+				PQclear(results);
+				ResetCancelConn();
+				return false;
+			}
+			PQclear(svptres);
+		}
 	}
 
 	PQclear(results);
@@ -961,7 +975,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	bool		did_pager = false;
 	int			ntuples;
 	char		fetch_cmd[64];
-	TimevalStruct before,
+	instr_time	before,
 				after;
 
 	*elapsed_msec = 0;
@@ -972,7 +986,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	my_popt.topt.prior_records = 0;
 
 	if (pset.timing)
-		GETTIMEOFDAY(&before);
+		INSTR_TIME_SET_CURRENT(before);
 
 	/* if we're not in a transaction, start one */
 	if (PQtransactionStatus(pset.db) == PQTRANS_IDLE)
@@ -1001,8 +1015,9 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 
 	if (pset.timing)
 	{
-		GETTIMEOFDAY(&after);
-		*elapsed_msec += DIFF_MSEC(&after, &before);
+		INSTR_TIME_SET_CURRENT(after);
+		INSTR_TIME_SUBTRACT(after, before);
+		*elapsed_msec += INSTR_TIME_GET_MILLISEC(after);
 	}
 
 	snprintf(fetch_cmd, sizeof(fetch_cmd),
@@ -1028,15 +1043,16 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	for (;;)
 	{
 		if (pset.timing)
-			GETTIMEOFDAY(&before);
+			INSTR_TIME_SET_CURRENT(before);
 
 		/* get FETCH_COUNT tuples at a time */
 		results = PQexec(pset.db, fetch_cmd);
 
 		if (pset.timing)
 		{
-			GETTIMEOFDAY(&after);
-			*elapsed_msec += DIFF_MSEC(&after, &before);
+			INSTR_TIME_SET_CURRENT(after);
+			INSTR_TIME_SUBTRACT(after, before);
+			*elapsed_msec += INSTR_TIME_GET_MILLISEC(after);
 		}
 
 		if (PQresultStatus(results) != PGRES_TUPLES_OK)
@@ -1112,7 +1128,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 
 cleanup:
 	if (pset.timing)
-		GETTIMEOFDAY(&before);
+		INSTR_TIME_SET_CURRENT(before);
 
 	/*
 	 * We try to close the cursor on either success or failure, but on failure
@@ -1137,8 +1153,9 @@ cleanup:
 
 	if (pset.timing)
 	{
-		GETTIMEOFDAY(&after);
-		*elapsed_msec += DIFF_MSEC(&after, &before);
+		INSTR_TIME_SET_CURRENT(after);
+		INSTR_TIME_SUBTRACT(after, before);
+		*elapsed_msec += INSTR_TIME_GET_MILLISEC(after);
 	}
 
 	return OK;

@@ -4,7 +4,7 @@
  *	  Definitions for tagged nodes.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -44,6 +44,7 @@ typedef enum NodeTag
 	T_Plan = 100,
 	T_Result,
 	T_Append,
+	T_RecursiveUnion,
 	T_BitmapAnd,
 	T_BitmapOr,
 	T_Scan,
@@ -55,6 +56,8 @@ typedef enum NodeTag
 	T_SubqueryScan,
 	T_FunctionScan,
 	T_ValuesScan,
+	T_CteScan,
+	T_WorkTableScan,
 	T_Join,
 	T_NestLoop,
 	T_MergeJoin,
@@ -63,10 +66,13 @@ typedef enum NodeTag
 	T_Sort,
 	T_Group,
 	T_Agg,
+	T_WindowAgg,
 	T_Unique,
 	T_Hash,
 	T_SetOp,
 	T_Limit,
+	/* this one isn't a subclass of Plan: */
+	T_PlanInvalItem,
 
 	/*
 	 * TAGS FOR PLAN STATE NODES (execnodes.h)
@@ -76,6 +82,7 @@ typedef enum NodeTag
 	T_PlanState = 200,
 	T_ResultState,
 	T_AppendState,
+	T_RecursiveUnionState,
 	T_BitmapAndState,
 	T_BitmapOrState,
 	T_ScanState,
@@ -87,6 +94,8 @@ typedef enum NodeTag
 	T_SubqueryScanState,
 	T_FunctionScanState,
 	T_ValuesScanState,
+	T_CteScanState,
+	T_WorkTableScanState,
 	T_JoinState,
 	T_NestLoopState,
 	T_MergeJoinState,
@@ -95,6 +104,7 @@ typedef enum NodeTag
 	T_SortState,
 	T_GroupState,
 	T_AggState,
+	T_WindowAggState,
 	T_UniqueState,
 	T_HashState,
 	T_SetOpState,
@@ -110,6 +120,7 @@ typedef enum NodeTag
 	T_Const,
 	T_Param,
 	T_Aggref,
+	T_WindowFunc,
 	T_ArrayRef,
 	T_FuncExpr,
 	T_OpExpr,
@@ -118,6 +129,7 @@ typedef enum NodeTag
 	T_BoolExpr,
 	T_SubLink,
 	T_SubPlan,
+	T_AlternativeSubPlan,
 	T_FieldSelect,
 	T_FieldStore,
 	T_RelabelType,
@@ -155,11 +167,13 @@ typedef enum NodeTag
 	T_ExprState = 400,
 	T_GenericExprState,
 	T_AggrefExprState,
+	T_WindowFuncExprState,
 	T_ArrayRefExprState,
 	T_FuncExprState,
 	T_ScalarArrayOpExprState,
 	T_BoolExprState,
 	T_SubPlanState,
+	T_AlternativeSubPlanState,
 	T_FieldSelectState,
 	T_FieldStoreState,
 	T_CoerceViaIOState,
@@ -202,9 +216,10 @@ typedef enum NodeTag
 	T_PathKey,
 	T_RestrictInfo,
 	T_InnerIndexscanInfo,
-	T_OuterJoinInfo,
-	T_InClauseInfo,
+	T_PlaceHolderVar,
+	T_SpecialJoinInfo,
 	T_AppendRelInfo,
+	T_PlaceHolderInfo,
 	T_PlannerParamItem,
 
 	/*
@@ -319,6 +334,15 @@ typedef enum NodeTag
 	T_CreateForwarderStmt,
 	T_DropForwarderStmt,
 	T_AlterForwarderStmt,
+	T_CreateFdwStmt,
+	T_AlterFdwStmt,
+	T_DropFdwStmt,
+	T_CreateForeignServerStmt,
+	T_AlterForeignServerStmt,
+	T_DropForeignServerStmt,
+	T_CreateUserMappingStmt,
+	T_AlterUserMappingStmt,
+	T_DropUserMappingStmt,
 
 	/*
 	 * TAGS FOR PARSE TREE NODES (parsenodes.h)
@@ -328,11 +352,14 @@ typedef enum NodeTag
 	T_ParamRef,
 	T_A_Const,
 	T_FuncCall,
+	T_A_Star,
 	T_A_Indices,
 	T_A_Indirection,
+	T_A_ArrayExpr,
 	T_ResTarget,
 	T_TypeCast,
 	T_SortBy,
+	T_WindowDef,
 	T_RangeSubselect,
 	T_RangeFunction,
 	T_TypeName,
@@ -341,18 +368,20 @@ typedef enum NodeTag
 	T_Constraint,
 	T_DefElem,
 	T_RangeTblEntry,
-	T_SortClause,
-	T_GroupClause,
+	T_SortGroupClause,
+	T_WindowClause,
 	T_FkConstraint,
 	T_PrivGrantee,
 	T_FuncWithArgs,
-	T_PrivTarget,
+	T_AccessPriv,
 	T_CreateOpClassItem,
 	T_InhRelation,
 	T_FunctionParameter,
 	T_LockingClause,
 	T_RowMarkClause,
 	T_XmlSerialize,
+	T_WithClause,
+	T_CommonTableExpr,
 
 	/*
 	 * TAGS FOR RANDOM OTHER STUFF
@@ -364,6 +393,7 @@ typedef enum NodeTag
 	 */
 	T_TriggerData = 950,		/* in commands/trigger.h */
 	T_ReturnSetInfo,			/* in nodes/execnodes.h */
+	T_WindowObjectData,			/* private in nodeWindowAgg.c */
 	T_TIDBitmap					/* in nodes/tidbitmap.h */
 } NodeTag;
 
@@ -388,6 +418,22 @@ typedef struct Node
  * !WARNING!: Avoid using newNode directly. You should be using the
  *	  macro makeNode.  eg. to create a Query node, use makeNode(Query)
  *
+ * Note: the size argument should always be a compile-time constant, so the
+ * apparent risk of multiple evaluation doesn't matter in practice.
+ */
+#ifdef __GNUC__
+
+/* With GCC, we can use a compound statement within an expression */
+#define newNode(size, tag) \
+({	Node   *_result; \
+	AssertMacro((size) >= sizeof(Node));		/* need the tag, at least */ \
+	_result = (Node *) palloc0fast(size); \
+	_result->type = (tag); \
+	_result; \
+})
+#else
+
+/*
  *	There is no way to dereference the palloc'ed pointer to assign the
  *	tag, and also return the pointer itself, so we need a holder variable.
  *	Fortunately, this macro isn't recursive so we just define
@@ -402,6 +448,7 @@ extern PGDLLIMPORT Node *newNodeMacroHolder;
 	newNodeMacroHolder->type = (tag), \
 	newNodeMacroHolder \
 )
+#endif   /* __GNUC__ */
 
 
 #define makeNode(_type_)		((_type_ *) newNode(sizeof(_type_),T_##_type_))
@@ -480,31 +527,57 @@ typedef enum CmdType
 typedef enum JoinType
 {
 	/*
-	 * The canonical kinds of joins
+	 * The canonical kinds of joins according to the SQL JOIN syntax. Only
+	 * these codes can appear in parser output (e.g., JoinExpr nodes).
 	 */
 	JOIN_INNER,					/* matching tuple pairs only */
-	JOIN_LEFT,					/* pairs + unmatched outer tuples */
-	JOIN_FULL,					/* pairs + unmatched outer + unmatched inner */
-	JOIN_RIGHT,					/* pairs + unmatched inner tuples */
+	JOIN_LEFT,					/* pairs + unmatched LHS tuples */
+	JOIN_FULL,					/* pairs + unmatched LHS + unmatched RHS */
+	JOIN_RIGHT,					/* pairs + unmatched RHS tuples */
 
 	/*
-	 * These are used for queries like WHERE foo IN (SELECT bar FROM ...).
-	 * Only JOIN_IN is actually implemented in the executor; the others are
-	 * defined for internal use in the planner.
+	 * Semijoins and anti-semijoins (as defined in relational theory) do not
+	 * appear in the SQL JOIN syntax, but there are standard idioms for
+	 * representing them (e.g., using EXISTS).	The planner recognizes these
+	 * cases and converts them to joins.  So the planner and executor must
+	 * support these codes.  NOTE: in JOIN_SEMI output, it is unspecified
+	 * which matching RHS row is joined to.  In JOIN_ANTI output, the row is
+	 * guaranteed to be null-extended.
 	 */
-	JOIN_IN,					/* at most one result per outer row */
-	JOIN_REVERSE_IN,			/* at most one result per inner row */
-	JOIN_UNIQUE_OUTER,			/* outer path must be made unique */
-	JOIN_UNIQUE_INNER			/* inner path must be made unique */
+	JOIN_SEMI,					/* 1 copy of each LHS row that has match(es) */
+	JOIN_ANTI,					/* 1 copy of each LHS row that has no match */
+
+	/*
+	 * These codes are used internally in the planner, but are not supported
+	 * by the executor (nor, indeed, by most of the planner).
+	 */
+	JOIN_UNIQUE_OUTER,			/* LHS path must be made unique */
+	JOIN_UNIQUE_INNER			/* RHS path must be made unique */
 
 	/*
 	 * We might need additional join types someday.
 	 */
 } JoinType;
 
+/*
+ * OUTER joins are those for which pushed-down quals must behave differently
+ * from the join's own quals.  This is in fact everything except INNER and
+ * SEMI joins.	However, this macro must also exclude the JOIN_UNIQUE symbols
+ * since those are temporary proxies for what will eventually be an INNER
+ * join.
+ *
+ * Note: semijoins are a hybrid case, but we choose to treat them as not
+ * being outer joins.  This is okay principally because the SQL syntax makes
+ * it impossible to have a pushed-down qual that refers to the inner relation
+ * of a semijoin; so there is no strong need to distinguish join quals from
+ * pushed-down quals.  This is convenient because for almost all purposes,
+ * quals attached to a semijoin can be treated the same as innerjoin quals.
+ */
 #define IS_OUTER_JOIN(jointype) \
-	((jointype) == JOIN_LEFT || \
-	 (jointype) == JOIN_FULL || \
-	 (jointype) == JOIN_RIGHT)
+	(((1 << (jointype)) & \
+	  ((1 << JOIN_LEFT) | \
+	   (1 << JOIN_FULL) | \
+	   (1 << JOIN_RIGHT) | \
+	   (1 << JOIN_ANTI))) != 0)
 
 #endif   /* NODES_H */

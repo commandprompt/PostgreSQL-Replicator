@@ -168,10 +168,10 @@ pg_dump -h <replaceable>host1</> <replaceable>dbname</> | psql -h <replaceable>h
    <para>
     After restoring a backup, it is wise to run <xref
     linkend="sql-analyze" endterm="sql-analyze-title"> on each
-    database so the query optimizer has useful statistics. An easy way
-    to do this is to run <command>vacuumdb -a -z</>; this is
-    equivalent to running <command>VACUUM ANALYZE</> on each database
-    manually.  For more advice on how to load large amounts of data
+    database so the query optimizer has useful statistics;
+    see <xref linkend="vacuum-for-statistics" endterm="vacuum-for-statistics-title">
+    and <xref linkend="autovacuum" endterm="autovacuum-title"> for more information.
+    For more advice on how to load large amounts of data
     into <productname>PostgreSQL</> efficiently, refer to <xref
     linkend="populate">.
    </para>
@@ -386,9 +386,17 @@ tar -cf backup.tar /usr/local/pgsql/data
    not be possible to use snapshot backup because the snapshots
    <emphasis>must</> be simultaneous.
    Read your file system documentation very carefully before trusting
-   to the consistent-snapshot technique in such situations.  The safest
-   approach is to shut down the database server for long enough to
-   establish all the frozen snapshots.
+   to the consistent-snapshot technique in such situations.
+  </para>
+
+  <para>
+   If simultaneous snapshots are not possible, one option is to shut down
+   the database server long enough to establish all the frozen snapshots.
+   Another option is perform a continuous archiving base backup (<xref
+   linkend="backup-base-backup">) because such backups are immune to file
+   system changes during the backup.  This requires enabling continuous
+   archiving just during the backup process; restore is done using
+   continuous archive recovery (<xref linkend="backup-pitr-recovery">).
   </para>
 
   <para>
@@ -577,11 +585,10 @@ cp -i pg_xlog/00000001000000A900000065 /mnt/server/archivedir/00000001000000A900
    <para>
     It is important that the archive command return zero exit status if and
     only if it succeeded.  Upon getting a zero result,
-    <productname>PostgreSQL</> will assume that the WAL segment file has been
-    successfully archived, and will remove or recycle it.
-    However, a nonzero status tells
-    <productname>PostgreSQL</> that the file was not archived; it will try
-    again periodically until it succeeds.
+    <productname>PostgreSQL</> will assume that the file has been
+    successfully archived, and will remove or recycle it.  However, a nonzero
+    status tells <productname>PostgreSQL</> that the file was not archived;
+    it will try again periodically until it succeeds.
    </para>
 
    <para>
@@ -723,19 +730,19 @@ SELECT pg_start_backup('label');
     </para>
 
     <para>
-     <function>pg_start_backup</> can take a long time to finish.
+     By default, <function>pg_start_backup</> can take a long time to finish.
      This is because it performs a checkpoint, and the I/O
-     required for a checkpoint will be spread out over a significant
+     required for the checkpoint will be spread out over a significant
      period of time, by default half your inter-checkpoint interval
      (see the configuration parameter
      <xref linkend="guc-checkpoint-completion-target">).  Usually
-     this is what you want because it minimizes the impact on query
+     this is what you want, because it minimizes the impact on query
      processing.  If you just want to start the backup as soon as
-     possible, execute a <command>CHECKPOINT</> command
-     (which performs a checkpoint as quickly as possible) and then
-     immediately execute <function>pg_start_backup</>.  Then there
-     will be very little for <function>pg_start_backup</>'s checkpoint
-     to do, and it won't take long.
+     possible, use:
+<programlisting>
+SELECT pg_start_backup('label', true);
+</programlisting>
+     This forces the checkpoint to be done as quickly as possible.
     </para>
    </listitem>
    <listitem>
@@ -762,12 +769,19 @@ SELECT pg_stop_backup();
     <para>
      Once the WAL segment files used during the backup are archived, you are
      done.  The file identified by <function>pg_stop_backup</>'s result is
-     the last segment that needs to be archived to complete the backup.
-     Archival of these files will happen automatically, since you have
-     already configured <varname>archive_command</>. In many cases, this
-     happens fairly quickly, but you are advised to monitor your archival
-     system to ensure this has taken place so that you can be certain you
-     have a complete backup.
+     the last segment that is required to form a complete set of backup files.
+     <function>pg_stop_backup</> does not return until the last segment has
+     been archived.
+     Archiving of these files happens automatically since you have
+     already configured <varname>archive_command</>. In most cases this
+     happens quickly, but you are advised to monitor your archive
+     system to ensure there are no delays.
+     If the archive process has fallen behind
+     because of failures of the archive command, it will keep retrying
+     until the archive succeeds and the backup is complete.
+     If you wish to place a time limit on the execution of
+     <function>pg_stop_backup</>, set an appropriate
+     <varname>statement_timeout</varname> value.
     </para>
    </listitem>
   </orderedlist>
@@ -916,7 +930,7 @@ SELECT pg_stop_backup();
    </listitem>
    <listitem>
     <para>
-     Restore the database files from your backup dump.  Be careful that they
+     Restore the database files from your base backup.  Be careful that they
      are restored with the right ownership (the database system user, not
      <literal>root</>!) and with the right permissions.  If you are using
      tablespaces,
@@ -931,8 +945,6 @@ SELECT pg_stop_backup();
      If you didn't archive <filename>pg_xlog/</> at all, then recreate it,
      being careful to ensure that you re-establish it as a symbolic link
      if you had it set up that way before.
-     Be sure to recreate the subdirectory
-     <filename>pg_xlog/archive_status/</> as well.
     </para>
    </listitem>
    <listitem>
@@ -1001,11 +1013,13 @@ restore_command = 'cp /mnt/server/archivedir/%f %p'
 
    <para>
     It is important that the command return nonzero exit status on failure.
-    The command <emphasis>will</> be asked for log files that are not present
+    The command <emphasis>will</> be asked for files that are not present
     in the archive; it must return nonzero when so asked.  This is not an
-    error condition.  Be aware also that the base name of the <literal>%p</>
-    path will be different from <literal>%f</>; do not expect them to be
-    interchangeable.
+    error condition.  Not all of the requested files will be WAL segment
+    files; you should also expect requests for files with a suffix of
+    <literal>.backup</> or <literal>.history</>. Also be aware that
+    the base name of the <literal>%p</> path will be different from
+    <literal>%f</>; do not expect them to be interchangeable.
    </para>
 
    <para>
@@ -1043,7 +1057,7 @@ restore_command = 'cp /mnt/server/archivedir/%f %p'
    <note>
      <para>
       The stop point must be after the ending time of the base backup, i.e.,
-      the time of <function>pg_stop_backup</>.  You cannot use a base backup
+      the end time of <function>pg_stop_backup</>.  You cannot use a base backup
       to recover to a time when that backup was still going on.  (To
       recover to such a time, you must go back to your previous base backup
       and roll forward from there.)
@@ -1094,8 +1108,9 @@ restore_command = 'cp /mnt/server/archivedir/%f %p'
         last valid restart point. That is the earliest file that must be kept
         to allow a restore to be restartable, so this information can be used
         to truncate the archive to just the minimum required to support
-        restart of the current restore. <literal>%r</> would only be used in a
-        warm-standby configuration (see <xref linkend="warm-standby">).
+        restart from the current restore. <literal>%r</> would typically be
+        used in a warm-standby configuration
+        (see <xref linkend="warm-standby">).
         Write <literal>%%</> to embed an actual <literal>%</> character
         in the command.
        </para>
@@ -1108,6 +1123,33 @@ restore_command = 'cp /mnt/server/archivedir/%f %p'
 restore_command = 'cp /mnt/server/archivedir/%f "%p"'
 restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
 </programlisting>
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="recovery-end-command" xreflabel="recovery_end_command">
+      <term><varname>recovery_end_command</varname> (<type>string</type>)</term>
+      <listitem>
+       <para>
+        This parameter specifies a shell command that will be executed once only
+        at the end of recovery. This parameter is optional. The purpose of the
+        <varname>recovery_end_command</> is to provide a mechanism for cleanup
+        following replication or recovery.
+        Any <literal>%r</> is replaced by the name of the file
+        containing the last valid restart point. That is the earliest file that
+        must be kept to allow a restore to be restartable, so this information
+        can be used to truncate the archive to just the minimum required to
+        support restart from the current restore. <literal>%r</> would
+        typically be used in a warm-standby configuration
+        (see <xref linkend="warm-standby">).
+        Write <literal>%%</> to embed an actual <literal>%</> character
+        in the command.
+       </para>
+       <para>
+        If the command returns a non-zero exit status then a WARNING log
+        message will be written and the database will proceed to start up
+        anyway.  An exception is that if the command was terminated by a
+        signal, the database will not proceed with startup.
        </para>
       </listitem>
      </varlistentry>
@@ -1180,20 +1222,6 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
         in complex re-recovery situations, where you need to return to
         a state that itself was reached after a point-in-time recovery.
         See <xref linkend="backup-timelines"> for discussion.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry id="log-restartpoints"
-                   xreflabel="log_restartpoints">
-      <term><varname>log_restartpoints</varname>
-        (<type>boolean</type>)
-      </term>
-      <listitem>
-       <para>
-        Specifies whether to log each restart point as it occurs. This
-        can be helpful to track the progress of a long recovery.
-        Default is <literal>false</>.
        </para>
       </listitem>
      </varlistentry>
@@ -1312,7 +1340,6 @@ touch /var/lib/pgsql/backup_in_progress
 psql -c "select pg_start_backup('hot_backup');"
 tar -cf /var/lib/pgsql/backup.tar /var/lib/pgsql/data/
 psql -c "select pg_stop_backup();"
-sleep 20
 rm /var/lib/pgsql/backup_in_progress
 tar -rf /var/lib/pgsql/backup.tar /var/lib/pgsql/archive/
 </programlisting>
@@ -1321,6 +1348,24 @@ tar -rf /var/lib/pgsql/backup.tar /var/lib/pgsql/archive/
       After the backup the switch file is removed. Archived WAL files are
       then added to the backup so that both base backup and all required
       WAL files are part of the same <application>tar</> file.
+      Please remember to add error handling to your backup scripts.
+     </para>
+
+     <para>
+      If archive storage size is a concern, use <application>pg_compresslog</>,
+      <ulink url="http://pglesslog.projects.postgresql.org"></ulink>, to
+      remove unnecessary <xref linkend="guc-full-page-writes"> and trailing
+      space from the WAL files.  You can then use
+      <application>gzip</application> to further compress the output of
+      <application>pg_compresslog</>:
+<programlisting>
+archive_command = 'pg_compresslog %p - | gzip &gt; /var/lib/pgsql/archive/%f'
+</programlisting>
+      You will then need to use <application>gunzip</> and
+      <application>pg_decompresslog</> during recovery:
+<programlisting>
+restore_command = 'gunzip &lt; /mnt/server/archivedir/%f | pg_decompresslog - %p'
+</programlisting>
      </para>
     </sect3>
 
@@ -1505,7 +1550,7 @@ archive_command = 'local_backup_script.sh'
   </para>
 
   <para>
-   It should be noted that the log shipping is asynchronous, i.e. the WAL
+   It should be noted that the log shipping is asynchronous, i.e., the WAL
    records are shipped after transaction commit. As a result there is a
    window for data loss should the primary server suffer a catastrophic
    failure: transactions not yet shipped will be lost.  The length of the
@@ -1576,19 +1621,21 @@ archive_command = 'local_backup_script.sh'
 
    <para>
     The magic that makes the two loosely coupled servers work together is
-    simply a <varname>restore_command</> used on the standby that waits
-    for the next WAL file to become available from the primary. The
-    <varname>restore_command</> is specified in the
+    simply a <varname>restore_command</> used on the standby that,
+    when asked for the next WAL file, waits for it to become available from
+    the primary. The <varname>restore_command</> is specified in the
     <filename>recovery.conf</> file on the standby server. Normal recovery
     processing would request a file from the WAL archive, reporting failure
     if the file was unavailable.  For standby processing it is normal for
-    the next file to be unavailable, so we must be patient and wait for
-    it to appear. A waiting <varname>restore_command</> can be written as
-    a custom script that loops after polling for the existence of the next
-    WAL file. There must also be some way to trigger failover, which should
-    interrupt the <varname>restore_command</>, break the loop and return
-    a file-not-found error to the standby server. This ends recovery and
-    the standby will then come up as a normal server.
+    the next WAL file to be unavailable, so we must be patient and wait for
+    it to appear. For files ending in <literal>.backup</> or
+    <literal>.history</> there is no need to wait, and a non-zero return
+    code must be returned. A waiting <varname>restore_command</> can be
+    written as a custom script that loops after polling for the existence of
+    the next WAL file. There must also be some way to trigger failover, which
+    should interrupt the <varname>restore_command</>, break the loop and
+    return a file-not-found error to the standby server. This ends recovery
+    and the standby will then come up as a normal server.
    </para>
 
    <para>
@@ -1608,9 +1655,10 @@ if (!triggered)
 
    <para>
     A working example of a waiting <varname>restore_command</> is provided
-    as a <filename>contrib</> module named <application>pg_standby</>. This
-    example can be extended as needed to support specific configurations or
-    environments.
+    as a <filename>contrib</> module named <application>pg_standby</>. It
+    should be used as a reference on how to correctly implement the logic
+    described above. It can also be extended as needed to support specific
+    configurations or environments.
    </para>
 
    <para>
@@ -1830,7 +1878,7 @@ if (!triggered)
     backup.  You can do this by running <application>pg_controldata</>
     on the standby server to inspect the control file and determine the
     current checkpoint WAL location, or by using the
-    <varname>log_restartpoints</> option to print values to the server log.
+    <varname>log_checkpoints</> option to print values to the server log.
    </para>
   </sect2>
  </sect1>
@@ -1910,13 +1958,6 @@ pg_dumpall -p 5432 | psql -d postgres -p 6543
   </para>
 
   <para>
-   In practice you probably want to test your client
-   applications on the new setup before switching over completely.
-   This is another reason for setting up concurrent installations
-   of old and new versions.
-  </para>
-
-  <para>
    If you cannot or do not want to run two servers in parallel, you can
    do the backup step before installing the new version, bring down
    the server, move the old version out of the way, install the new
@@ -1955,5 +1996,68 @@ psql -f backup postgres
     moving an installation like this will not work.)
    </para>
   </note>
+
+  <para>
+   In practice you probably want to test your client applications on the
+   new version before switching over completely.  This is another reason
+   for setting up concurrent installations of old and new versions.  When
+   testing a <productname>PostgreSQL</> major upgrade, consider the
+   following categories of possible changes:
+  </para>
+
+  <variablelist>
+
+   <varlistentry>
+    <term>Administration</term>
+    <listitem>
+     <para>
+      The capabilities available for administrators to monitor and control
+      the server often change and improve in each major release.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>SQL</term>
+    <listitem>
+     <para>
+      Typically this includes new SQL command capabilities and not changes
+      in behavior, unless specifically mentioned in the release notes.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>Library API</term>
+    <listitem>
+     <para>
+      Typically libraries like <application>libpq</> only add new
+      functionality, again unless mentioned in the release notes.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>System Catalogs</term>
+    <listitem>
+     <para>
+      System catalog changes usually only affect database management tools.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>Server C-language API</term>
+    <listitem>
+     <para>
+      This involved changes in the backend function API, which is written
+      in the C programming language.  Such changes effect code that
+      references backend functions deep inside the server.
+     </para>
+    </listitem>
+   </varlistentry>
+
+  </variablelist>
+
  </sect1>
 </chapter>

@@ -3,7 +3,7 @@
  * nodeTidscan.c
  *	  Routines to support direct tid scans of relations
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -25,10 +25,12 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/sysattr.h"
 #include "catalog/pg_type.h"
 #include "executor/execdebug.h"
 #include "executor/nodeTidscan.h"
 #include "optimizer/clauses.h"
+#include "storage/bufmgr.h"
 #include "utils/array.h"
 
 
@@ -61,10 +63,10 @@ TidListCreate(TidScanState *tidstate)
 	ListCell   *l;
 
 	/*
-	 * We silently discard any TIDs that are out of range at the time of
-	 * scan start.  (Since we hold at least AccessShareLock on the table,
-	 * it won't be possible for someone to truncate away the blocks we
-	 * intend to visit.)
+	 * We silently discard any TIDs that are out of range at the time of scan
+	 * start.  (Since we hold at least AccessShareLock on the table, it won't
+	 * be possible for someone to truncate away the blocks we intend to
+	 * visit.)
 	 */
 	nblocks = RelationGetNumberOfBlocks(tidstate->ss.ss_currentRelation);
 

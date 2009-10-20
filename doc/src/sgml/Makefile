@@ -37,8 +37,13 @@ ifndef SGMLSPL
 SGMLSPL = sgmlspl
 endif
 
+ifndef DOCBOOK2MAN
+DOCBOOK2MAN = docbook2man_is_missing
+endif
+
 # docbook2man generates man pages from docbook refentry source code.
 D2MSCRIPT= $(D2MDIR)/docbook2man-spec.pl
+D2MLINKS = $(D2MDIR)/docbook2man-spec_makelinks
 
 
 GENERATED_SGML = bookindex.sgml version.sgml \
@@ -53,6 +58,9 @@ endif
 # Enable some extra warnings
 # -wfully-tagged needed to throw a warning on missing tags 
 # for older tool chains, 2007-08-31
+# Note: try "make SPFLAGS=-wxml" to catch a lot of other dubious constructs,
+# in particular < and & that haven't been made into entities.  It's far too
+# noisy to turn on by default, unfortunately.
 override SPFLAGS += -wall -wno-unused-param -wno-empty -wfully-tagged
 
 ##
@@ -61,18 +69,23 @@ override SPFLAGS += -wall -wno-unused-param -wno-empty -wfully-tagged
 
 .PHONY: html man draft clean
 
-DEFAULTSECTION = $(sqlmansect_dummy)
+DEFAULTSECTION = l
 
 fix_man_xrefs = $(PERL) -npi -e 's{\[XRef to GUC-([A-Z0-9-]*)\]}{($$l = $$1) =~ tr/A-Z-/a-z_/, $$l}ge || s{\[XRef to [A-Z0-9-]*\]}{in the documentation}g'
+lowercase = tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'
 
 man: postgres.sgml $(ALLSGML)
-	$(NSGMLS) $(NSGMLS_FLAGS) $< | $(SGMLSPL) $(D2MSCRIPT) --lowercase --section $(DEFAULTSECTION) --date "`date '+%Y-%m-%d'`"
+	$(NSGMLS) $(NSGMLS_FLAGS) $(SGMLINCLUDE) $< | $(SGMLSPL) $(D2MSCRIPT) --lowercase --section $(DEFAULTSECTION) --date "`date '+%Y-%m-%d'`"
 # One more time, to resolve cross-references
-	$(NSGMLS) $(NSGMLS_FLAGS) $< | $(SGMLSPL) $(D2MSCRIPT) --lowercase --section $(DEFAULTSECTION) --date "`date '+%Y-%m-%d'`"
-	$(fix_man_xrefs) *.1 *.$(DEFAULTSECTION)
-	$(mkinstalldirs) man1 man$(DEFAULTSECTION)
+	$(NSGMLS) $(NSGMLS_FLAGS) $(SGMLINCLUDE) $< | $(SGMLSPL) $(D2MSCRIPT) --lowercase --section $(DEFAULTSECTION) --date "`date '+%Y-%m-%d'`"
+	$(fix_man_xrefs) *.1 *.7
+	$(mkinstalldirs) man1 man7
+	$(D2MLINKS) < manpage.links
 	mv *.1 man1/
-	mv *.$(DEFAULTSECTION) man$(DEFAULTSECTION)/
+	mv *.7 man7/
+	rm *.$(DEFAULTSECTION)
+# manpage.links doesn't handle lowercase, needs fixups
+	cd man7 && for file in `awk '{ print $$2 }' ../manpage.links`; do $(lowercase) <$$file >`echo $$file | $(lowercase)` && rm $$file || exit; done
 
 
 ##
@@ -116,7 +129,7 @@ HTML.index:
 version.sgml: $(top_builddir)/src/Makefile.global
 	{ \
 	  echo "<!entity version \"$(VERSION)\">"; \
-	  echo "<!entity majorversion \"`expr $(VERSION) : '\([0-9][0-9]*\.[0-9][0-9]*\)'`\">"; \
+	  echo "<!entity majorversion \"$(MAJORVERSION)\">"; \
 	} >$@
 
 features-supported.sgml: $(top_srcdir)/src/backend/catalog/sql_feature_packages.txt $(top_srcdir)/src/backend/catalog/sql_features.txt
@@ -220,9 +233,9 @@ OSX = osx # (may be called sx or sgml2xml on some systems)
 XSLTPROC = xsltproc
 
 postgres.xml: postgres.sgml $(GENERATED_SGML)
-	$(OSX) -x lower $< | \
-	  sed -e 's/\[\(amp\|copy\|egrave\|gt\|lt\|mdash\|nbsp\|ouml\|pi\|quot\|uuml\) *\]/\&\1;/g' \
-	      -e '1a\' -e '<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN" "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">' \
+	$(OSX) -D. -x lower $< | \
+	  $(PERL) -p -e 's/\[(amp|copy|egrave|gt|lt|mdash|nbsp|ouml|pi|quot|uuml) *\]/\&\1;/g;' \
+	             -e '$$_ .= qq{<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN" "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">\n} if $$. == 1;' \
 	  >$@
 # ' hello Emacs
 
@@ -263,6 +276,18 @@ MAKEINFO = makeinfo
 
 
 ##
+## Experimental man page building through docbook2x
+##
+
+manx: postgres.xml stylesheet-man.xsl
+	$(DOCBOOK2MAN) --solinks -s $(srcdir)/stylesheet-man.xsl --string-param default-manpage-section=$(DEFAULTSECTION)  $<
+	$(mkinstalldirs) man1 man7
+	mv *.1 man1/
+	mv *.7 man7/
+	rm *.$(DEFAULTSECTION)
+
+
+##
 ## Check
 ##
 
@@ -279,7 +304,7 @@ clean distclean maintainer-clean:
 # HTML
 	rm -f HTML.manifest *.html
 # man
-	rm -rf *.1 *.$(DEFAULTSECTION) man1 man$(DEFAULTSECTION) manpage.refs manpage.links manpage.log
+	rm -rf *.1 *.7 *.$(DEFAULTSECTION) man1 man7 manpage.refs manpage.links manpage.log
 # print
 	rm -f *.rtf *.tex-ps *.tex-pdf *.dvi *.aux *.log *.ps *.pdf *.out *.fot
 # index

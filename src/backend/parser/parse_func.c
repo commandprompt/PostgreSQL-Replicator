@@ -3,7 +3,7 @@
  * parse_func.c
  *		handle function calls in parser
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,21 +14,18 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
-#include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_agg.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "parser/parse_func.h"
 #include "parser/parse_relation.h"
 #include "parser/parse_target.h"
 #include "parser/parse_type.h"
 #include "utils/builtins.h"
-#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
@@ -55,14 +52,14 @@ static void unknown_attribute(ParseState *pstate, Node *relref, char *attname,
  *	intended to be used only to deliver an appropriate error message,
  *	not to affect the semantics.  When is_column is true, we should have
  *	a single argument (the putative table), unqualified function name
- *	equal to the column name, and no aggregate decoration.
+ *	equal to the column name, and no aggregate or variadic decoration.
  *
  *	The argument expressions (in fargs) must have been transformed already.
  */
 Node *
 ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
-				  bool agg_star, bool agg_distinct, bool is_column,
-				  int location)
+				  bool agg_star, bool agg_distinct, bool func_variadic,
+				  WindowDef *over, bool is_column, int location)
 {
 	Oid			rettype;
 	Oid			funcid;
@@ -70,10 +67,13 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	ListCell   *nextl;
 	Node	   *first_arg = NULL;
 	int			nargs;
+	int			nargsplusdefs;
 	Oid			actual_arg_types[FUNC_MAX_ARGS];
 	Oid		   *declared_arg_types;
+	List	   *argdefaults;
 	Node	   *retval;
 	bool		retset;
+	int			nvargs;
 	FuncDetailCode fdresult;
 
 	/*
@@ -85,8 +85,10 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	if (list_length(fargs) > FUNC_MAX_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-				 errmsg("cannot pass more than %d arguments to a function",
-						FUNC_MAX_ARGS),
+			 errmsg_plural("cannot pass more than %d argument to a function",
+						   "cannot pass more than %d arguments to a function",
+						   FUNC_MAX_ARGS,
+						   FUNC_MAX_ARGS),
 				 parser_errposition(pstate, location)));
 
 	/*
@@ -125,9 +127,10 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	 * Check for column projection: if function has one argument, and that
 	 * argument is of complex type, and function name is not qualified, then
 	 * the "function call" could be a projection.  We also check that there
-	 * wasn't any aggregate decoration.
+	 * wasn't any aggregate or variadic decoration.
 	 */
-	if (nargs == 1 && !agg_star && !agg_distinct && list_length(funcname) == 1)
+	if (nargs == 1 && !agg_star && !agg_distinct && over == NULL &&
+		!func_variadic && list_length(funcname) == 1)
 	{
 		Oid			argtype = actual_arg_types[0];
 
@@ -152,12 +155,16 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	 * func_get_detail looks up the function in the catalogs, does
 	 * disambiguation for polymorphic functions, handles inheritance, and
 	 * returns the funcid and type and set or singleton status of the
-	 * function's return value.  it also returns the true argument types to
-	 * the function.
+	 * function's return value.  It also returns the true argument types to
+	 * the function.  In the case of a variadic function call, the reported
+	 * "true" types aren't really what is in pg_proc: the variadic argument is
+	 * replaced by a suitable number of copies of its element type.  We'll fix
+	 * it up below.  We may also have to deal with default arguments.
 	 */
 	fdresult = func_get_detail(funcname, fargs, nargs, actual_arg_types,
-							   &funcid, &rettype, &retset,
-							   &declared_arg_types);
+							   !func_variadic, true,
+							   &funcid, &rettype, &retset, &nvargs,
+							   &declared_arg_types, &argdefaults);
 	if (fdresult == FUNCDETAIL_COERCION)
 	{
 		/*
@@ -166,7 +173,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		 */
 		return coerce_type(pstate, linitial(fargs),
 						   actual_arg_types[0], rettype, -1,
-						   COERCION_EXPLICIT, COERCE_EXPLICIT_CALL);
+						   COERCION_EXPLICIT, COERCE_EXPLICIT_CALL, location);
 	}
 	else if (fdresult == FUNCDETAIL_NORMAL)
 	{
@@ -187,8 +194,15 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 			errmsg("DISTINCT specified, but %s is not an aggregate function",
 				   NameListToString(funcname)),
 					 parser_errposition(pstate, location)));
+		if (over)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("OVER specified, but %s is not a window function nor an aggregate function",
+							NameListToString(funcname)),
+					 parser_errposition(pstate, location)));
 	}
-	else if (fdresult != FUNCDETAIL_AGGREGATE)
+	else if (!(fdresult == FUNCDETAIL_AGGREGATE ||
+			   fdresult == FUNCDETAIL_WINDOWFUNC))
 	{
 		/*
 		 * Oops.  Time to die.
@@ -228,18 +242,73 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	}
 
 	/*
+	 * If there are default arguments, we have to include their types in
+	 * actual_arg_types for the purpose of checking generic type consistency.
+	 * However, we do NOT put them into the generated parse node, because
+	 * their actual values might change before the query gets run.	The
+	 * planner has to insert the up-to-date values at plan time.
+	 */
+	nargsplusdefs = nargs;
+	foreach(l, argdefaults)
+	{
+		Node	   *expr = (Node *) lfirst(l);
+
+		/* probably shouldn't happen ... */
+		if (nargsplusdefs >= FUNC_MAX_ARGS)
+			ereport(ERROR,
+					(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
+			 errmsg_plural("cannot pass more than %d argument to a function",
+						   "cannot pass more than %d arguments to a function",
+						   FUNC_MAX_ARGS,
+						   FUNC_MAX_ARGS),
+					 parser_errposition(pstate, location)));
+
+		actual_arg_types[nargsplusdefs++] = exprType(expr);
+	}
+
+	/*
 	 * enforce consistency with polymorphic argument and return types,
 	 * possibly adjusting return type or declared_arg_types (which will be
 	 * used as the cast destination by make_fn_arguments)
 	 */
 	rettype = enforce_generic_type_consistency(actual_arg_types,
 											   declared_arg_types,
-											   nargs,
+											   nargsplusdefs,
 											   rettype,
 											   false);
 
 	/* perform the necessary typecasting of arguments */
 	make_fn_arguments(pstate, fargs, actual_arg_types, declared_arg_types);
+
+	/*
+	 * If it's a variadic function call, transform the last nvargs arguments
+	 * into an array --- unless it's an "any" variadic.
+	 */
+	if (nvargs > 0 && declared_arg_types[nargs - 1] != ANYOID)
+	{
+		ArrayExpr  *newa = makeNode(ArrayExpr);
+		int			non_var_args = nargs - nvargs;
+		List	   *vargs;
+
+		Assert(non_var_args >= 0);
+		vargs = list_copy_tail(fargs, non_var_args);
+		fargs = list_truncate(fargs, non_var_args);
+
+		newa->elements = vargs;
+		/* assume all the variadic arguments were coerced to the same type */
+		newa->element_typeid = exprType((Node *) linitial(vargs));
+		newa->array_typeid = get_array_type(newa->element_typeid);
+		if (!OidIsValid(newa->array_typeid))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("could not find array type for data type %s",
+							format_type_be(newa->element_typeid)),
+				  parser_errposition(pstate, exprLocation((Node *) vargs))));
+		newa->multidims = false;
+		newa->location = exprLocation((Node *) vargs);
+
+		fargs = lappend(fargs, newa);
+	}
 
 	/* build the appropriate output structure */
 	if (fdresult == FUNCDETAIL_NORMAL)
@@ -251,10 +320,11 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		funcexpr->funcretset = retset;
 		funcexpr->funcformat = COERCE_EXPLICIT_CALL;
 		funcexpr->args = fargs;
+		funcexpr->location = location;
 
 		retval = (Node *) funcexpr;
 	}
-	else
+	else if (fdresult == FUNCDETAIL_AGGREGATE && !over)
 	{
 		/* aggregate function */
 		Aggref	   *aggref = makeNode(Aggref);
@@ -264,6 +334,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		aggref->args = fargs;
 		aggref->aggstar = agg_star;
 		aggref->aggdistinct = agg_distinct;
+		aggref->location = location;
 
 		/*
 		 * Reject attempt to call a parameterless aggregate without (*)
@@ -276,16 +347,69 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 							NameListToString(funcname)),
 					 parser_errposition(pstate, location)));
 
-		/* parse_agg.c does additional aggregate-specific processing */
-		transformAggregateCall(pstate, aggref);
-
-		retval = (Node *) aggref;
-
 		if (retset)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
 					 errmsg("aggregates cannot return sets"),
 					 parser_errposition(pstate, location)));
+
+		/* parse_agg.c does additional aggregate-specific processing */
+		transformAggregateCall(pstate, aggref);
+
+		retval = (Node *) aggref;
+	}
+	else
+	{
+		/* window function */
+		WindowFunc *wfunc = makeNode(WindowFunc);
+
+		/*
+		 * True window functions must be called with a window definition.
+		 */
+		if (!over)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("window function call requires an OVER clause"),
+					 parser_errposition(pstate, location)));
+
+		wfunc->winfnoid = funcid;
+		wfunc->wintype = rettype;
+		wfunc->args = fargs;
+		/* winref will be set by transformWindowFuncCall */
+		wfunc->winstar = agg_star;
+		wfunc->winagg = (fdresult == FUNCDETAIL_AGGREGATE);
+		wfunc->location = location;
+
+		/*
+		 * agg_star is allowed for aggregate functions but distinct isn't
+		 */
+		if (agg_distinct)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				  errmsg("DISTINCT is not implemented for window functions"),
+					 parser_errposition(pstate, location)));
+
+		/*
+		 * Reject attempt to call a parameterless aggregate without (*)
+		 * syntax.	This is mere pedantry but some folks insisted ...
+		 */
+		if (wfunc->winagg && fargs == NIL && !agg_star)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("%s(*) must be used to call a parameterless aggregate function",
+							NameListToString(funcname)),
+					 parser_errposition(pstate, location)));
+
+		if (retset)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+					 errmsg("window functions cannot return sets"),
+					 parser_errposition(pstate, location)));
+
+		/* parse_agg.c does additional window-func-specific processing */
+		transformWindowFuncCall(pstate, wfunc, over);
+
+		retval = (Node *) wfunc;
 	}
 
 	return retval;
@@ -404,8 +528,9 @@ func_select_candidate(int nargs,
 	int			nbestMatch,
 				nmatch;
 	Oid			input_base_typeids[FUNC_MAX_ARGS];
-	CATEGORY	slot_category[FUNC_MAX_ARGS],
+	TYPCATEGORY slot_category[FUNC_MAX_ARGS],
 				current_category;
+	bool		current_is_preferred;
 	bool		slot_has_preferred_type[FUNC_MAX_ARGS];
 	bool		resolved_unknowns;
 
@@ -413,8 +538,10 @@ func_select_candidate(int nargs,
 	if (nargs > FUNC_MAX_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-				 errmsg("cannot pass more than %d arguments to a function",
-						FUNC_MAX_ARGS)));
+			 errmsg_plural("cannot pass more than %d argument to a function",
+						   "cannot pass more than %d arguments to a function",
+						   FUNC_MAX_ARGS,
+						   FUNC_MAX_ARGS)));
 
 	/*
 	 * If any input types are domains, reduce them to their base types. This
@@ -556,7 +683,7 @@ func_select_candidate(int nargs,
 		if (input_base_typeids[i] != UNKNOWNOID)
 			continue;
 		resolved_unknowns = true;		/* assume we can do it */
-		slot_category[i] = INVALID_TYPE;
+		slot_category[i] = TYPCATEGORY_INVALID;
 		slot_has_preferred_type[i] = false;
 		have_conflict = false;
 		for (current_candidate = candidates;
@@ -565,29 +692,28 @@ func_select_candidate(int nargs,
 		{
 			current_typeids = current_candidate->args;
 			current_type = current_typeids[i];
-			current_category = TypeCategory(current_type);
-			if (slot_category[i] == INVALID_TYPE)
+			get_type_category_preferred(current_type,
+										&current_category,
+										&current_is_preferred);
+			if (slot_category[i] == TYPCATEGORY_INVALID)
 			{
 				/* first candidate */
 				slot_category[i] = current_category;
-				slot_has_preferred_type[i] =
-					IsPreferredType(current_category, current_type);
+				slot_has_preferred_type[i] = current_is_preferred;
 			}
 			else if (current_category == slot_category[i])
 			{
 				/* more candidates in same category */
-				slot_has_preferred_type[i] |=
-					IsPreferredType(current_category, current_type);
+				slot_has_preferred_type[i] |= current_is_preferred;
 			}
 			else
 			{
 				/* category conflict! */
-				if (current_category == STRING_TYPE)
+				if (current_category == TYPCATEGORY_STRING)
 				{
 					/* STRING always wins if available */
 					slot_category[i] = current_category;
-					slot_has_preferred_type[i] =
-						IsPreferredType(current_category, current_type);
+					slot_has_preferred_type[i] = current_is_preferred;
 				}
 				else
 				{
@@ -598,7 +724,7 @@ func_select_candidate(int nargs,
 				}
 			}
 		}
-		if (have_conflict && slot_category[i] != STRING_TYPE)
+		if (have_conflict && slot_category[i] != TYPCATEGORY_STRING)
 		{
 			/* Failed to resolve category conflict at this position */
 			resolved_unknowns = false;
@@ -623,14 +749,15 @@ func_select_candidate(int nargs,
 				if (input_base_typeids[i] != UNKNOWNOID)
 					continue;
 				current_type = current_typeids[i];
-				current_category = TypeCategory(current_type);
+				get_type_category_preferred(current_type,
+											&current_category,
+											&current_is_preferred);
 				if (current_category != slot_category[i])
 				{
 					keepit = false;
 					break;
 				}
-				if (slot_has_preferred_type[i] &&
-					!IsPreferredType(current_category, current_type))
+				if (slot_has_preferred_type[i] && !current_is_preferred)
 				{
 					keepit = false;
 					break;
@@ -667,21 +794,12 @@ func_select_candidate(int nargs,
  * Find the named function in the system catalogs.
  *
  * Attempt to find the named function in the system catalogs with
- *	arguments exactly as specified, so that the normal case
- *	(exact match) is as quick as possible.
+ * arguments exactly as specified, so that the normal case (exact match)
+ * is as quick as possible.
  *
  * If an exact match isn't found:
  *	1) check for possible interpretation as a type coercion request
- *	2) get a vector of all possible input arg type arrays constructed
- *	   from the superclasses of the original input arg types
- *	3) get a list of all possible argument type arrays to the function
- *	   with given name and number of arguments
- *	4) for each input arg type array from vector #1:
- *	 a) find how many of the function arg type arrays from list #2
- *		it can be coerced to
- *	 b) if the answer is one, we have our function
- *	 c) if the answer is more than one, attempt to resolve the conflict
- *	 d) if the answer is zero, try the next array from vector #1
+ *	2) apply the ambiguous-function resolution rules
  *
  * Note: we rely primarily on nargs/argtypes as the argument description.
  * The actual expression node list is passed in fargs so that we can check
@@ -693,16 +811,30 @@ func_get_detail(List *funcname,
 				List *fargs,
 				int nargs,
 				Oid *argtypes,
+				bool expand_variadic,
+				bool expand_defaults,
 				Oid *funcid,	/* return value */
 				Oid *rettype,	/* return value */
 				bool *retset,	/* return value */
-				Oid **true_typeids)		/* return value */
+				int *nvargs,	/* return value */
+				Oid **true_typeids,		/* return value */
+				List **argdefaults)		/* optional return value */
 {
 	FuncCandidateList raw_candidates;
 	FuncCandidateList best_candidate;
 
+	/* initialize output arguments to silence compiler warnings */
+	*funcid = InvalidOid;
+	*rettype = InvalidOid;
+	*retset = false;
+	*nvargs = 0;
+	*true_typeids = NULL;
+	if (argdefaults)
+		*argdefaults = NIL;
+
 	/* Get list of possible candidates from namespace search */
-	raw_candidates = FuncnameGetCandidates(funcname, nargs);
+	raw_candidates = FuncnameGetCandidates(funcname, nargs,
+										   expand_variadic, expand_defaults);
 
 	/*
 	 * Quickly check if there is an exact match to the input datatypes (there
@@ -785,6 +917,7 @@ func_get_detail(List *funcname,
 					*funcid = InvalidOid;
 					*rettype = targetType;
 					*retset = false;
+					*nvargs = 0;
 					*true_typeids = argtypes;
 					return FUNCDETAIL_COERCION;
 				}
@@ -833,7 +966,16 @@ func_get_detail(List *funcname,
 		Form_pg_proc pform;
 		FuncDetailCode result;
 
+		/*
+		 * If expanding variadics or defaults, the "best candidate" might
+		 * represent multiple equivalently good functions; treat this case as
+		 * ambiguous.
+		 */
+		if (!OidIsValid(best_candidate->oid))
+			return FUNCDETAIL_MULTIPLE;
+
 		*funcid = best_candidate->oid;
+		*nvargs = best_candidate->nvargs;
 		*true_typeids = best_candidate->args;
 
 		ftup = SearchSysCache(PROCOID,
@@ -845,104 +987,49 @@ func_get_detail(List *funcname,
 		pform = (Form_pg_proc) GETSTRUCT(ftup);
 		*rettype = pform->prorettype;
 		*retset = pform->proretset;
-		result = pform->proisagg ? FUNCDETAIL_AGGREGATE : FUNCDETAIL_NORMAL;
+		/* fetch default args if caller wants 'em */
+		if (argdefaults)
+		{
+			if (best_candidate->ndargs > 0)
+			{
+				Datum		proargdefaults;
+				bool		isnull;
+				char	   *str;
+				List	   *defaults;
+				int			ndelete;
+
+				/* shouldn't happen, FuncnameGetCandidates messed up */
+				if (best_candidate->ndargs > pform->pronargdefaults)
+					elog(ERROR, "not enough default arguments");
+
+				proargdefaults = SysCacheGetAttr(PROCOID, ftup,
+												 Anum_pg_proc_proargdefaults,
+												 &isnull);
+				Assert(!isnull);
+				str = TextDatumGetCString(proargdefaults);
+				defaults = (List *) stringToNode(str);
+				Assert(IsA(defaults, List));
+				pfree(str);
+				/* Delete any unused defaults from the returned list */
+				ndelete = list_length(defaults) - best_candidate->ndargs;
+				while (ndelete-- > 0)
+					defaults = list_delete_first(defaults);
+				*argdefaults = defaults;
+			}
+			else
+				*argdefaults = NIL;
+		}
+		if (pform->proisagg)
+			result = FUNCDETAIL_AGGREGATE;
+		else if (pform->proiswindow)
+			result = FUNCDETAIL_WINDOWFUNC;
+		else
+			result = FUNCDETAIL_NORMAL;
 		ReleaseSysCache(ftup);
 		return result;
 	}
 
 	return FUNCDETAIL_NOTFOUND;
-}
-
-
-/*
- * Given two type OIDs, determine whether the first is a complex type
- * (class type) that inherits from the second.
- */
-bool
-typeInheritsFrom(Oid subclassTypeId, Oid superclassTypeId)
-{
-	bool		result = false;
-	Oid			relid;
-	Relation	inhrel;
-	List	   *visited,
-			   *queue;
-	ListCell   *queue_item;
-
-	if (!ISCOMPLEX(subclassTypeId) || !ISCOMPLEX(superclassTypeId))
-		return false;
-	relid = typeidTypeRelid(subclassTypeId);
-	if (relid == InvalidOid)
-		return false;
-
-	/*
-	 * Begin the search at the relation itself, so add relid to the queue.
-	 */
-	queue = list_make1_oid(relid);
-	visited = NIL;
-
-	inhrel = heap_open(InheritsRelationId, AccessShareLock);
-
-	/*
-	 * Use queue to do a breadth-first traversal of the inheritance graph from
-	 * the relid supplied up to the root.  Notice that we append to the queue
-	 * inside the loop --- this is okay because the foreach() macro doesn't
-	 * advance queue_item until the next loop iteration begins.
-	 */
-	foreach(queue_item, queue)
-	{
-		Oid			this_relid = lfirst_oid(queue_item);
-		ScanKeyData skey;
-		HeapScanDesc inhscan;
-		HeapTuple	inhtup;
-
-		/* If we've seen this relid already, skip it */
-		if (list_member_oid(visited, this_relid))
-			continue;
-
-		/*
-		 * Okay, this is a not-yet-seen relid. Add it to the list of
-		 * already-visited OIDs, then find all the types this relid inherits
-		 * from and add them to the queue. The one exception is we don't add
-		 * the original relation to 'visited'.
-		 */
-		if (queue_item != list_head(queue))
-			visited = lappend_oid(visited, this_relid);
-
-		ScanKeyInit(&skey,
-					Anum_pg_inherits_inhrelid,
-					BTEqualStrategyNumber, F_OIDEQ,
-					ObjectIdGetDatum(this_relid));
-
-		inhscan = heap_beginscan(inhrel, SnapshotNow, 1, &skey);
-
-		while ((inhtup = heap_getnext(inhscan, ForwardScanDirection)) != NULL)
-		{
-			Form_pg_inherits inh = (Form_pg_inherits) GETSTRUCT(inhtup);
-			Oid			inhparent = inh->inhparent;
-
-			/* If this is the target superclass, we're done */
-			if (get_rel_type_id(inhparent) == superclassTypeId)
-			{
-				result = true;
-				break;
-			}
-
-			/* Else add to queue */
-			queue = lappend_oid(queue, inhparent);
-		}
-
-		heap_endscan(inhscan);
-
-		if (result)
-			break;
-	}
-
-	heap_close(inhrel, AccessShareLock);
-
-	list_free(visited);
-	list_free(queue);
-
-	return result;
 }
 
 
@@ -978,7 +1065,8 @@ make_fn_arguments(ParseState *pstate,
 												actual_arg_types[i],
 												declared_arg_types[i], -1,
 												COERCION_IMPLICIT,
-												COERCE_IMPLICIT_CAST);
+												COERCE_IMPLICIT_CAST,
+												-1);
 		}
 		i++;
 	}
@@ -1188,7 +1276,7 @@ LookupFuncName(List *funcname, int nargs, const Oid *argtypes, bool noError)
 {
 	FuncCandidateList clist;
 
-	clist = FuncnameGetCandidates(funcname, nargs);
+	clist = FuncnameGetCandidates(funcname, nargs, false, false);
 
 	while (clist)
 	{
@@ -1244,8 +1332,10 @@ LookupFuncNameTypeNames(List *funcname, List *argtypes, bool noError)
 	if (argcount > FUNC_MAX_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-				 errmsg("functions cannot have more than %d arguments",
-						FUNC_MAX_ARGS)));
+				 errmsg_plural("functions cannot have more than %d argument",
+							   "functions cannot have more than %d arguments",
+							   FUNC_MAX_ARGS,
+							   FUNC_MAX_ARGS)));
 
 	args_item = list_head(argtypes);
 	for (i = 0; i < argcount; i++)
@@ -1282,8 +1372,10 @@ LookupAggNameTypeNames(List *aggname, List *argtypes, bool noError)
 	if (argcount > FUNC_MAX_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-				 errmsg("functions cannot have more than %d arguments",
-						FUNC_MAX_ARGS)));
+				 errmsg_plural("functions cannot have more than %d argument",
+							   "functions cannot have more than %d arguments",
+							   FUNC_MAX_ARGS,
+							   FUNC_MAX_ARGS)));
 
 	i = 0;
 	foreach(lc, argtypes)

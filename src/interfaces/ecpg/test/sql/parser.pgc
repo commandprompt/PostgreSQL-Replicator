@@ -5,7 +5,7 @@
 /* test parser addition that merges two tokens into one */
 EXEC SQL INCLUDE ../regression;
 
-int main(int argc, char* argv[]) {
+int main() {
   EXEC SQL BEGIN DECLARE SECTION;
   	int item[3], ind[3], i;
   EXEC SQL END DECLARE SECTION;
@@ -27,6 +27,9 @@ int main(int argc, char* argv[]) {
 
   for (i=0; i<3; i++)
   	printf("item[%d] = %d\n", i, ind[i] ? -1 : item[i]);
+
+  EXEC SQL ALTER TABLE T ALTER Item1 TYPE bigint;
+  EXEC SQL ALTER TABLE T ALTER COLUMN Item2 SET DATA TYPE smallint;
 
   EXEC SQL DROP TABLE T;
 

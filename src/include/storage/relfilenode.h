@@ -4,7 +4,7 @@
  *	  Physical access information for relations.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -15,8 +15,31 @@
 #define RELFILENODE_H
 
 /*
+ * The physical storage of a relation consists of one or more forks. The
+ * main fork is always created, but in addition to that there can be
+ * additional forks for storing various metadata. ForkNumber is used when
+ * we need to refer to a specific fork in a relation.
+ */
+typedef enum ForkNumber
+{
+	InvalidForkNumber = -1,
+	MAIN_FORKNUM = 0,
+	FSM_FORKNUM,
+	VISIBILITYMAP_FORKNUM
+
+	/*
+	 * NOTE: if you add a new fork, change MAX_FORKNUM below and update the
+	 * forkNames array in catalog.c
+	 */
+} ForkNumber;
+
+#define MAX_FORKNUM		VISIBILITYMAP_FORKNUM
+
+/*
  * RelFileNode must provide all that we need to know to physically access
- * a relation.
+ * a relation. Note, however, that a "physical" relation is comprised of
+ * multiple files on the filesystem, as each fork is stored as a separate
+ * file, and each fork can be divided into multiple segments. See md.c.
  *
  * spcNode identifies the tablespace of the relation.  It corresponds to
  * pg_tablespace.oid.

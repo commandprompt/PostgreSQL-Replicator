@@ -5,7 +5,7 @@
  *	  standard operators and index access methods.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -64,12 +64,13 @@
 
 
 /* Return data from examine_variable and friends */
-typedef struct
+typedef struct VariableStatData
 {
 	Node	   *var;			/* the Var or expression tree */
 	RelOptInfo *rel;			/* Relation, or NULL if not identifiable */
 	HeapTuple	statsTuple;		/* pg_statistic tuple, or NULL if none */
 	/* NB: if statsTuple!=NULL, it must be freed when caller is done */
+	void		(*freefunc) (HeapTuple tuple);	/* how to free statsTuple */
 	Oid			vartype;		/* exposed type of expression */
 	Oid			atttype;		/* type to pass to get_attstatsslot */
 	int32		atttypmod;		/* typmod to pass to get_attstatsslot */
@@ -79,7 +80,7 @@ typedef struct
 #define ReleaseVariableStats(vardata)  \
 	do { \
 		if (HeapTupleIsValid((vardata).statsTuple)) \
-			ReleaseSysCache((vardata).statsTuple); \
+			(* (vardata).freefunc) ((vardata).statsTuple); \
 	} while(0)
 
 
@@ -97,6 +98,18 @@ typedef enum
 
 /* selfuncs.c */
 
+/* Hooks for plugins to get control when we ask for stats */
+typedef bool (*get_relation_stats_hook_type) (PlannerInfo *root,
+														  RangeTblEntry *rte,
+														  AttrNumber attnum,
+												  VariableStatData *vardata);
+extern PGDLLIMPORT get_relation_stats_hook_type get_relation_stats_hook;
+typedef bool (*get_index_stats_hook_type) (PlannerInfo *root,
+													   Oid indexOid,
+													   AttrNumber indexattnum,
+												  VariableStatData *vardata);
+extern PGDLLIMPORT get_index_stats_hook_type get_index_stats_hook;
+
 extern void examine_variable(PlannerInfo *root, Node *node, int varRelid,
 				 VariableStatData *vardata);
 extern bool get_restriction_variable(PlannerInfo *root, List *args,
@@ -104,15 +117,18 @@ extern bool get_restriction_variable(PlannerInfo *root, List *args,
 						 VariableStatData *vardata, Node **other,
 						 bool *varonleft);
 extern void get_join_variables(PlannerInfo *root, List *args,
+				   SpecialJoinInfo *sjinfo,
 				   VariableStatData *vardata1,
-				   VariableStatData *vardata2);
+				   VariableStatData *vardata2,
+				   bool *join_is_reversed);
 extern double get_variable_numdistinct(VariableStatData *vardata);
 extern double mcv_selectivity(VariableStatData *vardata, FmgrInfo *opproc,
 				Datum constval, bool varonleft,
 				double *sumcommonp);
 extern double histogram_selectivity(VariableStatData *vardata, FmgrInfo *opproc,
 					  Datum constval, bool varonleft,
-					  int min_hist_size, int n_skip);
+					  int min_hist_size, int n_skip,
+					  int *hist_size);
 
 extern Pattern_Prefix_Status pattern_fixed_prefix(Const *patt,
 					 Pattern_Type ptype,
@@ -147,17 +163,19 @@ extern Datum nlikejoinsel(PG_FUNCTION_ARGS);
 extern Datum icnlikejoinsel(PG_FUNCTION_ARGS);
 
 extern Selectivity booltestsel(PlannerInfo *root, BoolTestType booltesttype,
-			Node *arg, int varRelid, JoinType jointype);
+			Node *arg, int varRelid,
+			JoinType jointype, SpecialJoinInfo *sjinfo);
 extern Selectivity nulltestsel(PlannerInfo *root, NullTestType nulltesttype,
-			Node *arg, int varRelid, JoinType jointype);
+			Node *arg, int varRelid,
+			JoinType jointype, SpecialJoinInfo *sjinfo);
 extern Selectivity scalararraysel(PlannerInfo *root,
 			   ScalarArrayOpExpr *clause,
 			   bool is_join_clause,
-			   int varRelid, JoinType jointype);
+			   int varRelid, JoinType jointype, SpecialJoinInfo *sjinfo);
 extern int	estimate_array_length(Node *arrayexpr);
 extern Selectivity rowcomparesel(PlannerInfo *root,
 			  RowCompareExpr *clause,
-			  int varRelid, JoinType jointype);
+			  int varRelid, JoinType jointype, SpecialJoinInfo *sjinfo);
 
 extern void mergejoinscansel(PlannerInfo *root, Node *clause,
 				 Oid opfamily, int strategy, bool nulls_first,

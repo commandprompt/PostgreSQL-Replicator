@@ -3,7 +3,7 @@
  * win32_shmem.c
  *	  Implement shared memory using win32 facilities
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -58,11 +58,11 @@ GetSharedMemName(void)
 		elog(FATAL, "could not generate full pathname for datadir %s: %lu",
 			 DataDir, GetLastError());
 
-	/* 
+	/*
 	 * XXX: Intentionally overwriting the Global\ part here. This was not the
 	 * original approach, but putting it in the actual Global\ namespace
-	 * causes permission errors in a lot of cases, so we leave it in
-	 * the default namespace for now.
+	 * causes permission errors in a lot of cases, so we leave it in the
+	 * default namespace for now.
 	 */
 	for (cp = retptr; *cp; cp++)
 		if (*cp == '\\')
@@ -136,19 +136,22 @@ PGSharedMemoryCreate(Size size, bool makePrivate, int port)
 	/*
 	 * When recycling a shared memory segment, it may take a short while
 	 * before it gets dropped from the global namespace. So re-try after
-	 * sleeping for a second, and continue retrying 10 times.
-	 * (both the 1 second time and the 10 retries are completely arbitrary)
+	 * sleeping for a second, and continue retrying 10 times. (both the 1
+	 * second time and the 10 retries are completely arbitrary)
 	 */
 	for (i = 0; i < 10; i++)
 	{
-		/* In case CreateFileMapping() doesn't set the error code to 0 on success */
+		/*
+		 * In case CreateFileMapping() doesn't set the error code to 0 on
+		 * success
+		 */
 		SetLastError(0);
 
-		hmap = CreateFileMapping((HANDLE) 0xFFFFFFFF,		/* Use the pagefile */
-								 NULL,		/* Default security attrs */
-								 PAGE_READWRITE,	/* Memory is Read/Write */
+		hmap = CreateFileMapping((HANDLE) 0xFFFFFFFF,	/* Use the pagefile */
+								 NULL,	/* Default security attrs */
+								 PAGE_READWRITE,		/* Memory is Read/Write */
 								 0L,	/* Size Upper 32 Bits	*/
-								 (DWORD) size,		/* Size Lower 32 bits */
+								 (DWORD) size,	/* Size Lower 32 bits */
 								 szShareMem);
 
 		if (!hmap)
@@ -159,12 +162,13 @@ PGSharedMemoryCreate(Size size, bool makePrivate, int port)
 
 		/*
 		 * If the segment already existed, CreateFileMapping() will return a
-		 * handle to the existing one.
+		 * handle to the existing one and set ERROR_ALREADY_EXISTS.
 		 */
 		if (GetLastError() == ERROR_ALREADY_EXISTS)
 		{
-			CloseHandle(hmap);		/* Close the old handle, since we got a valid
-									 * one to the previous segment. */
+			CloseHandle(hmap);	/* Close the handle, since we got a valid one
+								 * to the previous segment. */
+			hmap = NULL;
 			Sleep(1000);
 			continue;
 		}
@@ -172,13 +176,13 @@ PGSharedMemoryCreate(Size size, bool makePrivate, int port)
 	}
 
 	/*
-	 * If the last call in the loop still returned ERROR_ALREADY_EXISTS, this shared memory
-	 * segment exists and we assume it belongs to somebody else.
+	 * If the last call in the loop still returned ERROR_ALREADY_EXISTS, this
+	 * shared memory segment exists and we assume it belongs to somebody else.
 	 */
-	if (GetLastError() == ERROR_ALREADY_EXISTS)
+	if (!hmap)
 		ereport(FATAL,
-			 (errmsg("pre-existing shared memory block is still in use"),
-			  errhint("Check if there are any old server processes still running, and terminate them.")));
+				(errmsg("pre-existing shared memory block is still in use"),
+				 errhint("Check if there are any old server processes still running, and terminate them.")));
 
 	free(szShareMem);
 

@@ -37,7 +37,7 @@
 
   <para>
    To run the regression tests after building but before installation,
-   type
+   type:
 <screen>
 gmake check
 </screen>
@@ -45,12 +45,12 @@ gmake check
    <filename>src/test/regress</filename> and run the command there.)
    This will first build several auxiliary files, such as
    some sample user-defined trigger functions, and then run the test driver
-   script.  At the end you should see something like
+   script.  At the end you should see something like:
 <screen>
 <computeroutput>
-======================
- All 100 tests passed.
-======================
+=======================
+ All 115 tests passed.
+=======================
 </computeroutput>
 </screen>
    or otherwise a note about which tests failed.  See <xref
@@ -64,10 +64,9 @@ gmake check
     If you already did the build as root, you do not have to start all
     over.  Instead, make the regression test directory writable by
     some other user, log in as that user, and restart the tests.
-    For example
+    For example:
 <screen>
 <prompt>root# </prompt><userinput>chmod -R a+w src/test/regress</userinput>
-<prompt>root# </prompt><userinput>chmod -R a+w contrib/spi</userinput>
 <prompt>root# </prompt><userinput>su - joeuser</userinput>
 <prompt>joeuser$ </prompt><userinput>cd <replaceable>top-level build directory</></userinput>
 <prompt>joeuser$ </prompt><userinput>gmake check</userinput>
@@ -102,7 +101,7 @@ gmake check
     make sure this limit is at least fifty or so, else you might get
     random-seeming failures in the parallel test.  If you are not in
     a position to raise the limit, you can cut down the degree of parallelism
-    by setting the <literal>MAX_CONNECTIONS</> parameter.  For example,
+    by setting the <literal>MAX_CONNECTIONS</> parameter.  For example:
 <screen>
 gmake MAX_CONNECTIONS=10 check
 </screen>
@@ -112,11 +111,11 @@ gmake MAX_CONNECTIONS=10 check
   <para>
    To run the tests after installation<![%standalone-ignore;[ (see <xref linkend="installation">)]]>,
    initialize a data area and start the
-   server, <![%standalone-ignore;[as explained in <xref linkend="runtime">, ]]> then type
+   server, <![%standalone-ignore;[as explained in <xref linkend="runtime">, ]]> then type:
 <screen>
 gmake installcheck
 </screen>
-or for a parallel test
+or for a parallel test:
 <screen>
 gmake installcheck-parallel
 </screen>
@@ -131,14 +130,14 @@ gmake installcheck-parallel
    At present, these tests can be used only against an already-installed
    server.  To run the tests for all procedural languages that have been
    built and installed, change to the <filename>src/pl</> directory of the
-   build tree and type
+   build tree and type:
 <screen>
 gmake installcheck
 </screen>
    You can also do this in any of the subdirectories of <filename>src/pl</>
    to run tests for just one procedural language.  To run the tests for all
    <filename>contrib</> modules that have them, change to the
-   <filename>contrib</> directory of the build tree and type
+   <filename>contrib</> directory of the build tree and type:
 <screen>
 gmake installcheck
 </screen>
@@ -205,12 +204,46 @@ gmake installcheck
     <title>Locale differences</title>
 
     <para>
-     If you run the tests against an already-installed server that was
+     If you run the tests against a server that was
      initialized with a collation-order locale other than C, then
      there might be differences due to sort order and follow-up
      failures.  The regression test suite is set up to handle this
      problem by providing alternative result files that together are
      known to handle a large number of locales.
+    </para>
+
+    <para>
+     To run the tests in a different locale when using the
+     temporary-installation method, pass the appropriate
+     locale-related environment variables on
+     the <command>make</command> command line, for example:
+<programlisting>
+gmake check LANG=de_DE.utf8
+</programlisting>
+     (The regression test driver unsets <envar>LC_ALL</envar>, so it
+     does not work to choose the locale using that variable.)  To use
+     no locale, either unset all locale-related environment variables
+     (or set them to <literal>C</literal>) or use the following
+     special invocation:
+<programlisting>
+gmake check NO_LOCALE=1
+</programlisting>
+     When running the tests against an existing installation, the
+     locale setup is determined by the existing installation.  To
+     change it, initialize the database cluster with a different
+     locale by passing the appropriate options
+     to <command>initdb</command>.
+    </para>
+
+    <para>
+     In general, it is nevertheless advisable to try to run the
+     regression tests in the locale setup that is wanted for
+     production use, as this will exercise the locale- and
+     encoding-related code portions that will actually be used in
+     production.  Depending on the operating system environment, you
+     might get failures, but then you will at least know what
+     locale-specific behaviors to expect when running real
+     applications.
     </para>
    </sect2>
     
@@ -420,5 +453,37 @@ float8:out:i.86-.*-openbsd=float8-small-is-zero.out
    </para>
     
   </sect1>
-  
+
+  <sect1 id="regress-coverage">
+   <title>Test Coverage Examination</title>
+
+   <para>
+    The PostgreSQL source code can be compiled with coverage testing
+    instrumentation, so that it becomes possible to examine which
+    parts of the code are covered by the regression tests or any other
+    test suite that is run with the code.  This is currently supported
+    when compiling with GCC and requires the <command>gcov</command>
+    and <command>lcov</command> programs.
+   </para>
+
+   <para>
+    A typical workflow would look like this:
+<screen>
+./configure --enable-coverage ... OTHER OPTIONS ...
+gmake
+gmake check # or other test suite
+gmake coverage-html
+</screen>
+    Then point your HTML browser
+    to <filename>coverage/index.html</filename>.
+   </para>
+
+   <para>
+    To reset the execution counts between test runs, run:
+<screen>
+gmake coverage-clean
+</screen>
+   </para>
+  </sect1>
+
 </chapter>

@@ -8,7 +8,7 @@
  * or call fmgr-callable functions.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -49,6 +49,7 @@ typedef struct FmgrInfo
 								 * count */
 	bool		fn_strict;		/* function is "strict" (NULL in => NULL out) */
 	bool		fn_retset;		/* function returns a set */
+	unsigned char fn_stats;		/* collect stats if track_functions > this */
 	void	   *fn_extra;		/* extra space for use by handler */
 	MemoryContext fn_mcxt;		/* memory context to store fn_extra in */
 	fmNodePtr	fn_expr;		/* expression parse tree for call, or NULL */
@@ -353,6 +354,12 @@ extern int no_such_variable
  * are custom-configurable and especially likely to break dynamically loaded
  * modules if they were compiled with other values.  Also, the length field
  * can be used to detect definition changes.
+ *
+ * Note: we compare magic blocks with memcmp(), so there had better not be
+ * any alignment pad bytes in them.
+ *
+ * Note: when changing the contents of magic blocks, be sure to adjust the
+ * incompatible_module_error() function in dfmgr.c.
  *-------------------------------------------------------------------------
  */
 
@@ -364,6 +371,8 @@ typedef struct
 	int			funcmaxargs;	/* FUNC_MAX_ARGS */
 	int			indexmaxkeys;	/* INDEX_MAX_KEYS */
 	int			namedatalen;	/* NAMEDATALEN */
+	int			float4byval;	/* FLOAT4PASSBYVAL */
+	int			float8byval;	/* FLOAT8PASSBYVAL */
 } Pg_magic_struct;
 
 /* The actual data block contents */
@@ -373,7 +382,9 @@ typedef struct
 	PG_VERSION_NUM / 100, \
 	FUNC_MAX_ARGS, \
 	INDEX_MAX_KEYS, \
-	NAMEDATALEN \
+	NAMEDATALEN, \
+	FLOAT4PASSBYVAL, \
+	FLOAT8PASSBYVAL \
 }
 
 /*
@@ -505,6 +516,8 @@ extern Oid	fmgr_internal_function(const char *proname);
 extern Oid	get_fn_expr_rettype(FmgrInfo *flinfo);
 extern Oid	get_fn_expr_argtype(FmgrInfo *flinfo, int argnum);
 extern Oid	get_call_expr_argtype(fmNodePtr expr, int argnum);
+extern bool get_fn_expr_arg_stable(FmgrInfo *flinfo, int argnum);
+extern bool get_call_expr_arg_stable(fmNodePtr expr, int argnum);
 
 /*
  * Routines in dfmgr.c

@@ -3,7 +3,7 @@
  * array_userfuncs.c
  *	  Misc user-visible array support functions
  *
- * Copyright (c) 2003-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2003-2009, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  $PostgreSQL$
@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 
+#include "nodes/execnodes.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -464,4 +465,87 @@ create_singleton_array(FunctionCallInfo fcinfo,
 
 	return construct_md_array(dvalues, NULL, ndims, dims, lbs, element_type,
 							  typlen, typbyval, typalign);
+}
+
+
+/*
+ * ARRAY_AGG aggregate function
+ */
+Datum
+array_agg_transfn(PG_FUNCTION_ARGS)
+{
+	Oid			arg1_typeid = get_fn_expr_argtype(fcinfo->flinfo, 1);
+	MemoryContext aggcontext;
+	ArrayBuildState *state;
+	Datum		elem;
+
+	if (arg1_typeid == InvalidOid)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("could not determine input data type")));
+
+	if (fcinfo->context && IsA(fcinfo->context, AggState))
+		aggcontext = ((AggState *) fcinfo->context)->aggcontext;
+	else if (fcinfo->context && IsA(fcinfo->context, WindowAggState))
+		aggcontext = ((WindowAggState *) fcinfo->context)->wincontext;
+	else
+	{
+		/* cannot be called directly because of internal-type argument */
+		elog(ERROR, "array_agg_transfn called in non-aggregate context");
+		aggcontext = NULL;		/* keep compiler quiet */
+	}
+
+	state = PG_ARGISNULL(0) ? NULL : (ArrayBuildState *) PG_GETARG_POINTER(0);
+	elem = PG_ARGISNULL(1) ? (Datum) 0 : PG_GETARG_DATUM(1);
+	state = accumArrayResult(state,
+							 elem,
+							 PG_ARGISNULL(1),
+							 arg1_typeid,
+							 aggcontext);
+
+	/*
+	 * The transition type for array_agg() is declared to be "internal", which
+	 * is a pass-by-value type the same size as a pointer.	So we can safely
+	 * pass the ArrayBuildState pointer through nodeAgg.c's machinations.
+	 */
+	PG_RETURN_POINTER(state);
+}
+
+Datum
+array_agg_finalfn(PG_FUNCTION_ARGS)
+{
+	Datum		result;
+	ArrayBuildState *state;
+	int			dims[1];
+	int			lbs[1];
+
+	/*
+	 * Test for null before Asserting we are in right context.	This is to
+	 * avoid possible Assert failure in 8.4beta installations, where it is
+	 * possible for users to create NULL constants of type internal.
+	 */
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();		/* returns null iff no input values */
+
+	/* cannot be called directly because of internal-type argument */
+	Assert(fcinfo->context &&
+		   (IsA(fcinfo->context, AggState) ||
+			IsA(fcinfo->context, WindowAggState)));
+
+	state = (ArrayBuildState *) PG_GETARG_POINTER(0);
+
+	dims[0] = state->nelems;
+	lbs[0] = 1;
+
+	/*
+	 * Make the result.  We cannot release the ArrayBuildState because
+	 * sometimes aggregate final functions are re-executed.  Rather, it
+	 * is nodeAgg.c's responsibility to reset the aggcontext when it's
+	 * safe to do so.
+	 */
+	result = makeMdArrayResult(state, 1, dims, lbs,
+							   CurrentMemoryContext,
+							   false);
+
+	PG_RETURN_DATUM(result);
 }

@@ -4,7 +4,7 @@
  *	  Routines to attempt to prove logical implications between predicate
  *	  expressions.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,10 +20,12 @@
 #include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
+#include "optimizer/planmain.h"
 #include "optimizer/predtest.h"
-#include "parser/parse_expr.h"
 #include "utils/array.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
@@ -96,6 +98,8 @@ static Node *extract_not_arg(Node *clause);
 static bool list_member_strip(List *list, Expr *datum);
 static bool btree_predicate_proof(Expr *predicate, Node *clause,
 					  bool refute_it);
+static Oid	get_btree_test_op(Oid pred_op, Oid clause_op, bool refute_it);
+static void InvalidateOprProofCacheCallBack(Datum arg, int cacheid, ItemPointer tuplePtr);
 
 
 /*
@@ -120,14 +124,31 @@ static bool btree_predicate_proof(Expr *predicate, Node *clause,
 bool
 predicate_implied_by(List *predicate_list, List *restrictinfo_list)
 {
+	Node	   *p,
+			   *r;
+
 	if (predicate_list == NIL)
 		return true;			/* no predicate: implication is vacuous */
 	if (restrictinfo_list == NIL)
 		return false;			/* no restriction: implication must fail */
 
-	/* Otherwise, away we go ... */
-	return predicate_implied_by_recurse((Node *) restrictinfo_list,
-										(Node *) predicate_list);
+	/*
+	 * If either input is a single-element list, replace it with its lone
+	 * member; this avoids one useless level of AND-recursion.	We only need
+	 * to worry about this at top level, since eval_const_expressions should
+	 * have gotten rid of any trivial ANDs or ORs below that.
+	 */
+	if (list_length(predicate_list) == 1)
+		p = (Node *) linitial(predicate_list);
+	else
+		p = (Node *) predicate_list;
+	if (list_length(restrictinfo_list) == 1)
+		r = (Node *) linitial(restrictinfo_list);
+	else
+		r = (Node *) restrictinfo_list;
+
+	/* And away we go ... */
+	return predicate_implied_by_recurse(r, p);
 }
 
 /*
@@ -161,14 +182,31 @@ predicate_implied_by(List *predicate_list, List *restrictinfo_list)
 bool
 predicate_refuted_by(List *predicate_list, List *restrictinfo_list)
 {
+	Node	   *p,
+			   *r;
+
 	if (predicate_list == NIL)
 		return false;			/* no predicate: no refutation is possible */
 	if (restrictinfo_list == NIL)
 		return false;			/* no restriction: refutation must fail */
 
-	/* Otherwise, away we go ... */
-	return predicate_refuted_by_recurse((Node *) restrictinfo_list,
-										(Node *) predicate_list);
+	/*
+	 * If either input is a single-element list, replace it with its lone
+	 * member; this avoids one useless level of AND-recursion.	We only need
+	 * to worry about this at top level, since eval_const_expressions should
+	 * have gotten rid of any trivial ANDs or ORs below that.
+	 */
+	if (list_length(predicate_list) == 1)
+		p = (Node *) linitial(predicate_list);
+	else
+		p = (Node *) predicate_list;
+	if (list_length(restrictinfo_list) == 1)
+		r = (Node *) linitial(restrictinfo_list);
+	else
+		r = (Node *) restrictinfo_list;
+
+	/* And away we go ... */
+	return predicate_refuted_by_recurse(r, p);
 }
 
 /*----------
@@ -614,13 +652,14 @@ predicate_refuted_by_recurse(Node *clause, Node *predicate)
 		case CLASS_ATOM:
 
 #ifdef NOT_USED
+
 			/*
 			 * If A is a NOT-clause, A R=> B if B => A's arg
 			 *
 			 * Unfortunately not: this would only prove that B is not-TRUE,
 			 * not that it's not NULL either.  Keep this code as a comment
-			 * because it would be useful if we ever had a need for the
-			 * weak form of refutation.
+			 * because it would be useful if we ever had a need for the weak
+			 * form of refutation.
 			 */
 			not_arg = extract_not_arg(clause);
 			if (not_arg &&
@@ -700,7 +739,7 @@ predicate_refuted_by_recurse(Node *clause, Node *predicate)
  * This function also implements enforcement of MAX_SAOP_ARRAY_SIZE: if a
  * ScalarArrayOpExpr's array has too many elements, we just classify it as an
  * atom.  (This will result in its being passed as-is to the simple_clause
- * functions, which will fail to prove anything about it.)  Note that we
+ * functions, which will fail to prove anything about it.)	Note that we
  * cannot just stop after considering MAX_SAOP_ARRAY_SIZE elements; in general
  * that would result in wrong proofs, rather than failing to prove anything.
  */
@@ -1276,25 +1315,14 @@ btree_predicate_proof(Expr *predicate, Node *clause, bool refute_it)
 	Const	   *pred_const,
 			   *clause_const;
 	bool		pred_var_on_left,
-				clause_var_on_left,
-				pred_op_negated;
+				clause_var_on_left;
 	Oid			pred_op,
 				clause_op,
-				pred_op_negator,
-				clause_op_negator,
-				test_op = InvalidOid;
-	Oid			opfamily_id;
-	bool		found = false;
-	StrategyNumber pred_strategy,
-				clause_strategy,
-				test_strategy;
-	Oid			clause_righttype;
+				test_op;
 	Expr	   *test_expr;
 	ExprState  *test_exprstate;
 	Datum		test_result;
 	bool		isNull;
-	CatCList   *catlist;
-	int			i;
 	EState	   *estate;
 	MemoryContext oldcontext;
 
@@ -1384,12 +1412,174 @@ btree_predicate_proof(Expr *predicate, Node *clause, bool refute_it)
 	}
 
 	/*
-	 * Try to find a btree opfamily containing the needed operators.
+	 * Lookup the comparison operator using the system catalogs and the
+	 * operator implication tables.
+	 */
+	test_op = get_btree_test_op(pred_op, clause_op, refute_it);
+
+	if (!OidIsValid(test_op))
+	{
+		/* couldn't find a suitable comparison operator */
+		return false;
+	}
+
+	/*
+	 * Evaluate the test.  For this we need an EState.
+	 */
+	estate = CreateExecutorState();
+
+	/* We can use the estate's working context to avoid memory leaks. */
+	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	/* Build expression tree */
+	test_expr = make_opclause(test_op,
+							  BOOLOID,
+							  false,
+							  (Expr *) pred_const,
+							  (Expr *) clause_const);
+
+	/* Fill in opfuncids */
+	fix_opfuncids((Node *) test_expr);
+
+	/* Prepare it for execution */
+	test_exprstate = ExecInitExpr(test_expr, NULL);
+
+	/* And execute it. */
+	test_result = ExecEvalExprSwitchContext(test_exprstate,
+											GetPerTupleExprContext(estate),
+											&isNull, NULL);
+
+	/* Get back to outer memory context */
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Release all the junk we just created */
+	FreeExecutorState(estate);
+
+	if (isNull)
+	{
+		/* Treat a null result as non-proof ... but it's a tad fishy ... */
+		elog(DEBUG2, "null predicate test result");
+		return false;
+	}
+	return DatumGetBool(test_result);
+}
+
+
+/*
+ * We use a lookaside table to cache the result of btree proof operator
+ * lookups, since the actual lookup is pretty expensive and doesn't change
+ * for any given pair of operators (at least as long as pg_amop doesn't
+ * change).  A single hash entry stores both positive and negative results
+ * for a given pair of operators.
+ */
+typedef struct OprProofCacheKey
+{
+	Oid			pred_op;		/* predicate operator */
+	Oid			clause_op;		/* clause operator */
+} OprProofCacheKey;
+
+typedef struct OprProofCacheEntry
+{
+	/* the hash lookup key MUST BE FIRST */
+	OprProofCacheKey key;
+
+	bool		have_implic;	/* do we know the implication result? */
+	bool		have_refute;	/* do we know the refutation result? */
+	Oid			implic_test_op; /* OID of the operator, or 0 if none */
+	Oid			refute_test_op; /* OID of the operator, or 0 if none */
+} OprProofCacheEntry;
+
+static HTAB *OprProofCacheHash = NULL;
+
+
+/*
+ * get_btree_test_op
+ *	  Identify the comparison operator needed for a btree-operator
+ *	  proof or refutation.
+ *
+ * Given the truth of a predicate "var pred_op const1", we are attempting to
+ * prove or refute a clause "var clause_op const2".  The identities of the two
+ * operators are sufficient to determine the operator (if any) to compare
+ * const2 to const1 with.
+ *
+ * Returns the OID of the operator to use, or InvalidOid if no proof is
+ * possible.
+ */
+static Oid
+get_btree_test_op(Oid pred_op, Oid clause_op, bool refute_it)
+{
+	OprProofCacheKey key;
+	OprProofCacheEntry *cache_entry;
+	bool		cfound;
+	bool		pred_op_negated;
+	Oid			pred_op_negator,
+				clause_op_negator,
+				test_op = InvalidOid;
+	Oid			opfamily_id;
+	bool		found = false;
+	StrategyNumber pred_strategy,
+				clause_strategy,
+				test_strategy;
+	Oid			clause_righttype;
+	CatCList   *catlist;
+	int			i;
+
+	/*
+	 * Find or make a cache entry for this pair of operators.
+	 */
+	if (OprProofCacheHash == NULL)
+	{
+		/* First time through: initialize the hash table */
+		HASHCTL		ctl;
+
+		if (!CacheMemoryContext)
+			CreateCacheMemoryContext();
+
+		MemSet(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(OprProofCacheKey);
+		ctl.entrysize = sizeof(OprProofCacheEntry);
+		ctl.hash = tag_hash;
+		OprProofCacheHash = hash_create("Btree proof lookup cache", 256,
+										&ctl, HASH_ELEM | HASH_FUNCTION);
+
+		/* Arrange to flush cache on pg_amop changes */
+		CacheRegisterSyscacheCallback(AMOPOPID,
+									  InvalidateOprProofCacheCallBack,
+									  (Datum) 0);
+	}
+
+	key.pred_op = pred_op;
+	key.clause_op = clause_op;
+	cache_entry = (OprProofCacheEntry *) hash_search(OprProofCacheHash,
+													 (void *) &key,
+													 HASH_ENTER, &cfound);
+	if (!cfound)
+	{
+		/* new cache entry, set it invalid */
+		cache_entry->have_implic = false;
+		cache_entry->have_refute = false;
+	}
+	else
+	{
+		/* pre-existing cache entry, see if we know the answer */
+		if (refute_it)
+		{
+			if (cache_entry->have_refute)
+				return cache_entry->refute_test_op;
+		}
+		else
+		{
+			if (cache_entry->have_implic)
+				return cache_entry->implic_test_op;
+		}
+	}
+
+	/*
+	 * Try to find a btree opfamily containing the given operators.
 	 *
 	 * We must find a btree opfamily that contains both operators, else the
 	 * implication can't be determined.  Also, the opfamily must contain a
-	 * suitable test operator taking the pred_const and clause_const
-	 * datatypes.
+	 * suitable test operator taking the operators' righthand datatypes.
 	 *
 	 * If there are multiple matching opfamilies, assume we can use any one to
 	 * determine the logical relationship of the two operators and the correct
@@ -1549,44 +1739,43 @@ btree_predicate_proof(Expr *predicate, Node *clause, bool refute_it)
 
 	if (!found)
 	{
-		/* couldn't find a btree opfamily to interpret the operators */
-		return false;
+		/* couldn't find a suitable comparison operator */
+		test_op = InvalidOid;
 	}
 
-	/*
-	 * Evaluate the test.  For this we need an EState.
-	 */
-	estate = CreateExecutorState();
-
-	/* We can use the estate's working context to avoid memory leaks. */
-	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
-
-	/* Build expression tree */
-	test_expr = make_opclause(test_op,
-							  BOOLOID,
-							  false,
-							  (Expr *) pred_const,
-							  (Expr *) clause_const);
-
-	/* Prepare it for execution */
-	test_exprstate = ExecPrepareExpr(test_expr, estate);
-
-	/* And execute it. */
-	test_result = ExecEvalExprSwitchContext(test_exprstate,
-											GetPerTupleExprContext(estate),
-											&isNull, NULL);
-
-	/* Get back to outer memory context */
-	MemoryContextSwitchTo(oldcontext);
-
-	/* Release all the junk we just created */
-	FreeExecutorState(estate);
-
-	if (isNull)
+	/* Cache the result, whether positive or negative */
+	if (refute_it)
 	{
-		/* Treat a null result as non-proof ... but it's a tad fishy ... */
-		elog(DEBUG2, "null predicate test result");
-		return false;
+		cache_entry->refute_test_op = test_op;
+		cache_entry->have_refute = true;
 	}
-	return DatumGetBool(test_result);
+	else
+	{
+		cache_entry->implic_test_op = test_op;
+		cache_entry->have_implic = true;
+	}
+
+	return test_op;
+}
+
+
+/*
+ * Callback for pg_amop inval events
+ */
+static void
+InvalidateOprProofCacheCallBack(Datum arg, int cacheid, ItemPointer tuplePtr)
+{
+	HASH_SEQ_STATUS status;
+	OprProofCacheEntry *hentry;
+
+	Assert(OprProofCacheHash != NULL);
+
+	/* Currently we just reset all entries; hard to be smarter ... */
+	hash_seq_init(&status, OprProofCacheHash);
+
+	while ((hentry = (OprProofCacheEntry *) hash_seq_search(&status)) != NULL)
+	{
+		hentry->have_implic = false;
+		hentry->have_refute = false;
+	}
 }

@@ -74,7 +74,8 @@ SELECT test_void_func1(), test_void_func1() IS NULL AS "is null";
 SELECT test_void_func2(); -- should fail
 SELECT test_return_none(), test_return_none() IS NULL AS "is null";
 
--- Test for functions with named parameters
+-- Test for functions with named and nameless parameters
+SELECT test_param_names0(2,7);
 SELECT test_param_names1(1,'text');
 SELECT test_param_names2(users) from users;
 SELECT test_param_names3(1);
@@ -143,3 +144,8 @@ SELECT * FROM test_type_record_as('obj', 'one', null, false);
 SELECT * FROM test_type_record_as('obj', null, 2, false);
 SELECT * FROM test_type_record_as('obj', 'three', 3, false);
 SELECT * FROM test_type_record_as('obj', null, null, true);
+
+SELECT * FROM test_in_out_params('test_in');
+-- this doesn't work yet :-(
+SELECT * FROM test_in_out_params_multi('test_in');
+SELECT * FROM test_inout_params('test_in');

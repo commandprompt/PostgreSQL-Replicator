@@ -19,7 +19,7 @@
  * routines.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -106,14 +106,14 @@ pqPutc(char c, PGconn *conn)
 
 
 /*
- * pqGets:
+ * pqGets[_append]:
  * get a null-terminated string from the connection,
  * and store it in an expansible PQExpBuffer.
  * If we run out of memory, all of the string is still read,
  * but the excess characters are silently discarded.
  */
-int
-pqGets(PQExpBuffer buf, PGconn *conn)
+static int
+pqGets_internal(PQExpBuffer buf, PGconn *conn, bool resetbuffer)
 {
 	/* Copy conn data to locals for faster search loop */
 	char	   *inBuffer = conn->inBuffer;
@@ -129,7 +129,9 @@ pqGets(PQExpBuffer buf, PGconn *conn)
 
 	slen = inCursor - conn->inCursor;
 
-	resetPQExpBuffer(buf);
+	if (resetbuffer)
+		resetPQExpBuffer(buf);
+
 	appendBinaryPQExpBuffer(buf, inBuffer + conn->inCursor, slen);
 
 	conn->inCursor = ++inCursor;
@@ -139,6 +141,18 @@ pqGets(PQExpBuffer buf, PGconn *conn)
 				buf->data);
 
 	return 0;
+}
+
+int
+pqGets(PQExpBuffer buf, PGconn *conn)
+{
+	return pqGets_internal(buf, conn, true);
+}
+
+int
+pqGets_append(PQExpBuffer buf, PGconn *conn)
+{
+	return pqGets_internal(buf, conn, false);
 }
 
 
@@ -164,7 +178,7 @@ pqPuts(const char *s, PGconn *conn)
 int
 pqGetnchar(char *s, size_t len, PGconn *conn)
 {
-	if (len < 0 || len > (size_t) (conn->inEnd - conn->inCursor))
+	if (len > (size_t) (conn->inEnd - conn->inCursor))
 		return EOF;
 
 	memcpy(s, conn->inBuffer + conn->inCursor, len);
@@ -278,12 +292,12 @@ pqPutInt(int value, size_t bytes, PGconn *conn)
  * Returns 0 on success, EOF if failed to enlarge buffer
  */
 int
-pqCheckOutBufferSpace(int bytes_needed, PGconn *conn)
+pqCheckOutBufferSpace(size_t bytes_needed, PGconn *conn)
 {
 	int			newsize = conn->outBufSize;
 	char	   *newbuf;
 
-	if (bytes_needed <= newsize)
+	if (bytes_needed <= (size_t) newsize)
 		return 0;
 
 	/*
@@ -296,9 +310,9 @@ pqCheckOutBufferSpace(int bytes_needed, PGconn *conn)
 	do
 	{
 		newsize *= 2;
-	} while (bytes_needed > newsize && newsize > 0);
+	} while (newsize > 0 && bytes_needed > (size_t) newsize);
 
-	if (bytes_needed <= newsize)
+	if (newsize > 0 && bytes_needed <= (size_t) newsize)
 	{
 		newbuf = realloc(conn->outBuffer, newsize);
 		if (newbuf)
@@ -314,9 +328,9 @@ pqCheckOutBufferSpace(int bytes_needed, PGconn *conn)
 	do
 	{
 		newsize += 8192;
-	} while (bytes_needed > newsize && newsize > 0);
+	} while (newsize > 0 && bytes_needed > (size_t) newsize);
 
-	if (bytes_needed <= newsize)
+	if (newsize > 0 && bytes_needed <= (size_t) newsize)
 	{
 		newbuf = realloc(conn->outBuffer, newsize);
 		if (newbuf)
@@ -341,12 +355,12 @@ pqCheckOutBufferSpace(int bytes_needed, PGconn *conn)
  * Returns 0 on success, EOF if failed to enlarge buffer
  */
 int
-pqCheckInBufferSpace(int bytes_needed, PGconn *conn)
+pqCheckInBufferSpace(size_t bytes_needed, PGconn *conn)
 {
 	int			newsize = conn->inBufSize;
 	char	   *newbuf;
 
-	if (bytes_needed <= newsize)
+	if (bytes_needed <= (size_t) newsize)
 		return 0;
 
 	/*
@@ -359,9 +373,9 @@ pqCheckInBufferSpace(int bytes_needed, PGconn *conn)
 	do
 	{
 		newsize *= 2;
-	} while (bytes_needed > newsize && newsize > 0);
+	} while (newsize > 0 && bytes_needed > (size_t) newsize);
 
-	if (bytes_needed <= newsize)
+	if (newsize > 0 && bytes_needed <= (size_t) newsize)
 	{
 		newbuf = realloc(conn->inBuffer, newsize);
 		if (newbuf)
@@ -377,9 +391,9 @@ pqCheckInBufferSpace(int bytes_needed, PGconn *conn)
 	do
 	{
 		newsize += 8192;
-	} while (bytes_needed > newsize && newsize > 0);
+	} while (newsize > 0 && bytes_needed > (size_t) newsize);
 
-	if (bytes_needed <= newsize)
+	if (newsize > 0 && bytes_needed <= (size_t) newsize)
 	{
 		newbuf = realloc(conn->inBuffer, newsize);
 		if (newbuf)
@@ -572,7 +586,7 @@ pqReadData(PGconn *conn)
 	 */
 	if (conn->inBufSize - conn->inEnd < 8192)
 	{
-		if (pqCheckInBufferSpace(conn->inEnd + 8192, conn))
+		if (pqCheckInBufferSpace(conn->inEnd + (size_t) 8192, conn))
 		{
 			/*
 			 * We don't insist that the enlarge worked, but we need some room
@@ -755,10 +769,11 @@ pqSendSome(PGconn *conn, int len)
 #ifndef WIN32
 		sent = pqsecure_write(conn, ptr, len);
 #else
+
 		/*
-		 * Windows can fail on large sends, per KB article Q201213. The failure-point
-		 * appears to be different in different versions of Windows, but 64k should
-		 * always be safe.
+		 * Windows can fail on large sends, per KB article Q201213. The
+		 * failure-point appears to be different in different versions of
+		 * Windows, but 64k should always be safe.
 		 */
 		sent = pqsecure_write(conn, ptr, Min(len, 65536));
 #endif
@@ -1059,10 +1074,11 @@ pqSocketPoll(int sock, int forRead, int forWrite, time_t end_time)
 	FD_ZERO(&output_mask);
 	FD_ZERO(&except_mask);
 	if (forRead)
-		FD_SET(sock, &input_mask);
+		FD_SET		(sock, &input_mask);
+
 	if (forWrite)
-		FD_SET(sock, &output_mask);
-	FD_SET(sock, &except_mask);
+		FD_SET		(sock, &output_mask);
+	FD_SET		(sock, &except_mask);
 
 	/* Compute appropriate timeout interval */
 	if (end_time == ((time_t) -1))
@@ -1152,7 +1168,7 @@ libpq_gettext(const char *msgid)
 		ldir = getenv("PGLOCALEDIR");
 		if (!ldir)
 			ldir = LOCALEDIR;
-		bindtextdomain("libpq", ldir);
+		bindtextdomain(PG_TEXTDOMAIN("libpq"), ldir);
 #ifdef WIN32
 		SetLastError(save_errno);
 #else
@@ -1160,7 +1176,7 @@ libpq_gettext(const char *msgid)
 #endif
 	}
 
-	return dgettext("libpq", msgid);
+	return dgettext(PG_TEXTDOMAIN("libpq"), msgid);
 }
 
 #endif   /* ENABLE_NLS */

@@ -3,7 +3,7 @@
  * float.c
  *	  Functions for the built-in floating-point types.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -585,9 +585,7 @@ float4um(PG_FUNCTION_ARGS)
 	float4		arg1 = PG_GETARG_FLOAT4(0);
 	float4		result;
 
-	result = ((arg1 != 0) ? -(arg1) : arg1);
-
-	CHECKFLOATVAL(result, isinf(arg1), true);
+	result = -arg1;
 	PG_RETURN_FLOAT4(result);
 }
 
@@ -654,9 +652,7 @@ float8um(PG_FUNCTION_ARGS)
 	float8		arg1 = PG_GETARG_FLOAT8(0);
 	float8		result;
 
-	result = ((arg1 != 0) ? -(arg1) : arg1);
-
-	CHECKFLOATVAL(result, isinf(arg1), true);
+	result = -arg1;
 	PG_RETURN_FLOAT8(result);
 }
 
@@ -712,16 +708,16 @@ float8smaller(PG_FUNCTION_ARGS)
 Datum
 float4pl(PG_FUNCTION_ARGS)
 {
-	float8		arg1 = PG_GETARG_FLOAT4(0);
-	float8		arg2 = PG_GETARG_FLOAT4(1);
+	float4		arg1 = PG_GETARG_FLOAT4(0);
+	float4		arg2 = PG_GETARG_FLOAT4(1);
 	float4		result;
 
 	result = arg1 + arg2;
 
 	/*
 	 * There isn't any way to check for underflow of addition/subtraction
-	 * because numbers near the underflow value have been already been to the
-	 * point where we can't detect the that the two values were originally
+	 * because numbers near the underflow value have already been rounded to
+	 * the point where we can't detect that the two values were originally
 	 * different, e.g. on x86, '1e-45'::float4 == '2e-45'::float4 ==
 	 * 1.4013e-45.
 	 */
@@ -766,7 +762,6 @@ float4div(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_DIVISION_BY_ZERO),
 				 errmsg("division by zero")));
 
-	/* Do division in float8, then check for overflow */
 	result = arg1 / arg2;
 
 	CHECKFLOATVAL(result, isinf(arg1) || isinf(arg2), arg1 == 0);
@@ -1340,13 +1335,17 @@ dpow(PG_FUNCTION_ARGS)
 
 	/*
 	 * The SQL spec requires that we emit a particular SQLSTATE error code for
-	 * certain error conditions.
+	 * certain error conditions.  Specifically, we don't return a
+	 * divide-by-zero error code for 0 ^ -1.
 	 */
-	if ((arg1 == 0 && arg2 < 0) ||
-		(arg1 < 0 && floor(arg2) != arg2))
+	if (arg1 == 0 && arg2 < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION),
-				 errmsg("invalid argument for power function")));
+				 errmsg("zero raised to a negative power is undefined")));
+	if (arg1 < 0 && floor(arg2) != arg2)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION),
+				 errmsg("a negative number raised to a non-integer power yields a complex result")));
 
 	/*
 	 * pow() sets errno only on some platforms, depending on whether it
@@ -1693,8 +1692,12 @@ Datum
 setseed(PG_FUNCTION_ARGS)
 {
 	float8		seed = PG_GETARG_FLOAT8(0);
-	int			iseed = (int) (seed * MAX_RANDOM_VALUE);
+	int			iseed;
 
+	if (seed < -1 || seed > 1)
+		elog(ERROR, "setseed parameter %f out of range [-1,1]", seed);
+
+	iseed = (int) (seed * MAX_RANDOM_VALUE);
 	srandom((unsigned int) iseed);
 
 	PG_RETURN_VOID();
@@ -1766,7 +1769,9 @@ float8_accum(PG_FUNCTION_ARGS)
 	 * parameter in-place to reduce palloc overhead. Otherwise we construct a
 	 * new array with the updated transition data and return it.
 	 */
-	if (fcinfo->context && IsA(fcinfo->context, AggState))
+	if (fcinfo->context &&
+		(IsA(fcinfo->context, AggState) ||
+		 IsA(fcinfo->context, WindowAggState)))
 	{
 		transvalues[0] = N;
 		transvalues[1] = sumX;
@@ -1785,7 +1790,7 @@ float8_accum(PG_FUNCTION_ARGS)
 
 		result = construct_array(transdatums, 3,
 								 FLOAT8OID,
-							 sizeof(float8), false /* float8 byval */ , 'd');
+								 sizeof(float8), FLOAT8PASSBYVAL, 'd');
 
 		PG_RETURN_ARRAYTYPE_P(result);
 	}
@@ -1819,7 +1824,9 @@ float4_accum(PG_FUNCTION_ARGS)
 	 * parameter in-place to reduce palloc overhead. Otherwise we construct a
 	 * new array with the updated transition data and return it.
 	 */
-	if (fcinfo->context && IsA(fcinfo->context, AggState))
+	if (fcinfo->context &&
+		(IsA(fcinfo->context, AggState) ||
+		 IsA(fcinfo->context, WindowAggState)))
 	{
 		transvalues[0] = N;
 		transvalues[1] = sumX;
@@ -1838,7 +1845,7 @@ float4_accum(PG_FUNCTION_ARGS)
 
 		result = construct_array(transdatums, 3,
 								 FLOAT8OID,
-							 sizeof(float8), false /* float8 byval */ , 'd');
+								 sizeof(float8), FLOAT8PASSBYVAL, 'd');
 
 		PG_RETURN_ARRAYTYPE_P(result);
 	}
@@ -2036,7 +2043,9 @@ float8_regr_accum(PG_FUNCTION_ARGS)
 	 * parameter in-place to reduce palloc overhead. Otherwise we construct a
 	 * new array with the updated transition data and return it.
 	 */
-	if (fcinfo->context && IsA(fcinfo->context, AggState))
+	if (fcinfo->context &&
+		(IsA(fcinfo->context, AggState) ||
+		 IsA(fcinfo->context, WindowAggState)))
 	{
 		transvalues[0] = N;
 		transvalues[1] = sumX;
@@ -2061,8 +2070,7 @@ float8_regr_accum(PG_FUNCTION_ARGS)
 
 		result = construct_array(transdatums, 6,
 								 FLOAT8OID,
-								 sizeof(float8),
-								 false /* float8 byval */ , 'd');
+								 sizeof(float8), FLOAT8PASSBYVAL, 'd');
 
 		PG_RETURN_ARRAYTYPE_P(result);
 	}
@@ -2689,7 +2697,7 @@ width_bucket_float8(PG_FUNCTION_ARGS)
 			  errmsg("operand, lower bound and upper bound cannot be NaN")));
 
 	/* Note that we allow "operand" to be infinite */
-	if (is_infinite(bound1) || is_infinite(bound2))
+	if (isinf(bound1) || isinf(bound2))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION),
 				 errmsg("lower and upper bounds must be finite")));

@@ -262,20 +262,20 @@ CREATE OPERATOR ~ (
 
 
 -- define the GiST support methods
-CREATE OR REPLACE FUNCTION g_cube_consistent(internal,cube,int4)
+CREATE OR REPLACE FUNCTION g_cube_consistent(internal,cube,int,oid,internal)
 RETURNS bool
 AS 'MODULE_PATHNAME'
-LANGUAGE C IMMUTABLE;
+LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION g_cube_compress(internal)
 RETURNS internal 
 AS 'MODULE_PATHNAME'
-LANGUAGE C IMMUTABLE;
+LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION g_cube_decompress(internal)
 RETURNS internal 
 AS 'MODULE_PATHNAME'
-LANGUAGE C IMMUTABLE;
+LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION g_cube_penalty(internal,internal,internal)
 RETURNS internal
@@ -285,17 +285,17 @@ LANGUAGE C IMMUTABLE STRICT;
 CREATE OR REPLACE FUNCTION g_cube_picksplit(internal, internal)
 RETURNS internal
 AS 'MODULE_PATHNAME'
-LANGUAGE C IMMUTABLE;
+LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION g_cube_union(internal, internal)
 RETURNS cube 
 AS 'MODULE_PATHNAME'
-LANGUAGE C IMMUTABLE;
+LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION g_cube_same(cube, cube, internal)
 RETURNS internal 
 AS 'MODULE_PATHNAME'
-LANGUAGE C IMMUTABLE;
+LANGUAGE C IMMUTABLE STRICT;
 
 
 -- Create the operator classes for indexing
@@ -317,7 +317,7 @@ CREATE OPERATOR CLASS gist_cube_ops
 	OPERATOR	8	<@ ,
 	OPERATOR	13	@ ,
 	OPERATOR	14	~ ,
-	FUNCTION	1	g_cube_consistent (internal, cube, int4),
+	FUNCTION	1	g_cube_consistent (internal, cube, int, oid, internal),
 	FUNCTION	2	g_cube_union (internal, internal),
 	FUNCTION	3	g_cube_compress (internal),
 	FUNCTION	4	g_cube_decompress (internal),

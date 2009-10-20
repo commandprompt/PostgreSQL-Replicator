@@ -9,7 +9,7 @@
  *	  more likely to break across PostgreSQL releases than code that uses
  *	  only the official API.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * $PostgreSQL$
@@ -22,6 +22,7 @@
 
 /* We assume libpq-fe.h has already been included. */
 #include "postgres_fe.h"
+#include "libpq-events.h"
 
 #include <time.h>
 #include <sys/types.h>
@@ -54,6 +55,9 @@
 
 #ifdef ENABLE_SSPI
 #define SECURITY_WIN32
+#if defined(WIN32) && !defined(WIN32_ONLY_COMPILER)
+#include <ntsecapi.h>
+#endif
 #include <security.h>
 #undef SECURITY_WIN32
 
@@ -65,14 +69,19 @@ typedef struct
 {
 	void	   *value;
 	int			length;
-}	gss_buffer_desc;
+} gss_buffer_desc;
 #endif
 #endif   /* ENABLE_SSPI */
 
 #ifdef USE_SSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+
+#if (SSLEAY_VERSION_NUMBER >= 0x00907000L) && !defined(OPENSSL_NO_ENGINE)
+#define USE_SSL_ENGINE
 #endif
+
+#endif /* USE_SSL */
 
 /*
  * POSTGRES backend dependent Constants.
@@ -99,19 +108,6 @@ union pgresult_data
 	PGresult_data *next;		/* link to next block, or NULL */
 	char		space[1];		/* dummy for accessing block as bytes */
 };
-
-/* Data about a single attribute (column) of a query result */
-
-typedef struct pgresAttDesc
-{
-	char	   *name;			/* column name */
-	Oid			tableid;		/* source table, if known */
-	int			columnid;		/* source column, if known */
-	int			format;			/* format code for value (text/binary) */
-	Oid			typid;			/* type id */
-	int			typlen;			/* type size */
-	int			atttypmod;		/* type-specific modifier info */
-} PGresAttDesc;
 
 /* Data about a single parameter of a prepared statement */
 typedef struct pgresParamDesc
@@ -162,6 +158,15 @@ typedef struct
 	void	   *noticeProcArg;
 } PGNoticeHooks;
 
+typedef struct PGEvent
+{
+	PGEventProc proc;			/* the function to call on events */
+	char	   *name;			/* used only for error messages */
+	void	   *passThrough;	/* pointer supplied at registration time */
+	void	   *data;			/* optional state (instance) data */
+	bool		resultInitialized;		/* T if RESULTCREATE/COPY succeeded */
+} PGEvent;
+
 struct pg_result
 {
 	int			ntups;
@@ -182,6 +187,8 @@ struct pg_result
 	 * on the PGresult don't have to reference the PGconn.
 	 */
 	PGNoticeHooks noticeHooks;
+	PGEvent    *events;
+	int			nEvents;
 	int			client_encoding;	/* encoding id */
 
 	/*
@@ -291,8 +298,12 @@ struct pg_conn
 	char	   *dbName;			/* database name */
 	char	   *pguser;			/* Postgres username and password, if any */
 	char	   *pgpass;
-	bool		pgpass_from_client;	/* did password come from connect args? */
 	char	   *sslmode;		/* SSL mode (require,prefer,allow,disable) */
+	char	   *sslkey;			/* client key filename */
+	char	   *sslcert;		/* client certificate filename */
+	char	   *sslrootcert;	/* root certificate filename */
+	char	   *sslcrl;			/* certificate revocation list filename */
+
 #if defined(KRB5) || defined(ENABLE_GSS) || defined(ENABLE_SSPI)
 	char	   *krbsrvname;		/* Kerberos service name */
 #endif
@@ -302,6 +313,11 @@ struct pg_conn
 
 	/* Callback procedures for notice message processing */
 	PGNoticeHooks noticeHooks;
+
+	/* Event procs registered via PQregisterEventProc */
+	PGEvent    *events;			/* expandable array of event data */
+	int			nEvents;		/* number of active events */
+	int			eventArraySize; /* allocated array size */
 
 	/* Status indicators */
 	ConnStatusType status;
@@ -337,7 +353,6 @@ struct pg_conn
 	int			be_pid;			/* PID of backend --- needed for cancels */
 	int			be_key;			/* key of backend --- needed for cancels */
 	char		md5Salt[4];		/* password salt received from backend */
-	char		cryptSalt[2];	/* password salt received from backend */
 	pgParameterStatus *pstatus; /* ParameterStatus data */
 	int			client_encoding;	/* encoding id */
 	bool		std_strings;	/* standard_conforming_strings */
@@ -373,7 +388,13 @@ struct pg_conn
 	X509	   *peer;			/* X509 cert of server */
 	char		peer_dn[256 + 1];		/* peer distinguished name */
 	char		peer_cn[SM_USER + 1];	/* peer common name */
+#ifdef USE_SSL_ENGINE
+	ENGINE	   *engine;			/* SSL engine, if any */
+#else
+	void	   *engine;			/* dummy field to keep struct the same
+								   if OpenSSL version changes */
 #endif
+#endif /* USE_SSL */
 
 #ifdef ENABLE_GSS
 	gss_ctx_id_t gctx;			/* GSS context */
@@ -438,6 +459,13 @@ extern bool pqGetHomeDirectory(char *buf, int bufsize);
 
 #ifdef ENABLE_THREAD_SAFETY
 extern pgthreadlock_t pg_g_threadlock;
+
+#define PGTHREAD_ERROR(msg) \
+	do { \
+		fprintf(stderr, "%s\n", msg); \
+		exit(1); \
+	} while (0)
+
 
 #define pglock_thread()		pg_g_threadlock(true)
 #define pgunlock_thread()	pg_g_threadlock(false)
@@ -504,11 +532,12 @@ extern PGresult *pqFunctionCall3(PGconn *conn, Oid fnid,
   * Get, EOF merely means the buffer is exhausted, not that there is
   * necessarily any error.
   */
-extern int	pqCheckOutBufferSpace(int bytes_needed, PGconn *conn);
-extern int	pqCheckInBufferSpace(int bytes_needed, PGconn *conn);
+extern int	pqCheckOutBufferSpace(size_t bytes_needed, PGconn *conn);
+extern int	pqCheckInBufferSpace(size_t bytes_needed, PGconn *conn);
 extern int	pqGetc(char *result, PGconn *conn);
 extern int	pqPutc(char c, PGconn *conn);
 extern int	pqGets(PQExpBuffer buf, PGconn *conn);
+extern int	pqGets_append(PQExpBuffer buf, PGconn *conn);
 extern int	pqPuts(const char *s, PGconn *conn);
 extern int	pqGetnchar(char *s, size_t len, PGconn *conn);
 extern int	pqPutnchar(const char *s, size_t len, PGconn *conn);

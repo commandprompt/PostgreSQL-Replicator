@@ -1,4 +1,7 @@
 /*
+ * $PostgreSQL$
+ *
+ *
  * tablefunc
  *
  * Sample to demonstrate C functions which return setof scalar
@@ -7,7 +10,7 @@
  * And contributors:
  * Nabil Sayegh <postgresql@e-trolley.de>
  *
- * Copyright (c) 2002-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2009, PostgreSQL Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and its
  * documentation for any purpose, without fee, and without a written agreement

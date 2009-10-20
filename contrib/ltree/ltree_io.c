@@ -3,9 +3,11 @@
  * Teodor Sigaev <teodor@stack.net>
  * $PostgreSQL$
  */
+#include "postgres.h"
+
+#include <ctype.h>
 
 #include "ltree.h"
-#include <ctype.h>
 #include "crc32.h"
 
 PG_FUNCTION_INFO_V1(ltree_in);
@@ -23,16 +25,17 @@ Datum		lquery_out(PG_FUNCTION_ARGS);
 
 #define UNCHAR ereport(ERROR, \
 					   (errcode(ERRCODE_SYNTAX_ERROR), \
-						errmsg("syntax error at position %d near \"%c\"", \
-						(int)(ptr-buf), *ptr)));
+						errmsg("syntax error at position %d", \
+						pos)));
 
 
 typedef struct
 {
 	char	   *start;
-	int			len;
+	int			len;			/* length in bytes */
 	int			flag;
-}	nodeitem;
+	int			wlen;			/* length in characters */
+} nodeitem;
 
 #define LTPRS_WAITNAME	0
 #define LTPRS_WAITDELIM 1
@@ -49,24 +52,30 @@ ltree_in(PG_FUNCTION_ARGS)
 	int			state = LTPRS_WAITNAME;
 	ltree	   *result;
 	ltree_level *curlevel;
+	int			charlen;
+	int			pos = 0;
 
 	ptr = buf;
 	while (*ptr)
 	{
-		if (*ptr == '.')
+		charlen = pg_mblen(ptr);
+		if (charlen == 1 && t_iseq(ptr, '.'))
 			num++;
-		ptr++;
+		ptr += charlen;
 	}
 
 	list = lptr = (nodeitem *) palloc(sizeof(nodeitem) * (num + 1));
 	ptr = buf;
 	while (*ptr)
 	{
+		charlen = pg_mblen(ptr);
+
 		if (state == LTPRS_WAITNAME)
 		{
-			if (ISALNUM(*ptr))
+			if (ISALNUM(ptr))
 			{
 				lptr->start = ptr;
+				lptr->wlen = 0;
 				state = LTPRS_WAITDELIM;
 			}
 			else
@@ -74,40 +83,43 @@ ltree_in(PG_FUNCTION_ARGS)
 		}
 		else if (state == LTPRS_WAITDELIM)
 		{
-			if (*ptr == '.')
+			if (charlen == 1 && t_iseq(ptr, '.'))
 			{
 				lptr->len = ptr - lptr->start;
-				if (lptr->len > 255)
+				if (lptr->wlen > 255)
 					ereport(ERROR,
 							(errcode(ERRCODE_NAME_TOO_LONG),
 							 errmsg("name of level is too long"),
 							 errdetail("Name length is %d, must "
 									   "be < 256, in position %d.",
-									 lptr->len, (int) (lptr->start - buf))));
+									   lptr->wlen, pos)));
 
 				totallen += MAXALIGN(lptr->len + LEVEL_HDRSIZE);
 				lptr++;
 				state = LTPRS_WAITNAME;
 			}
-			else if (!ISALNUM(*ptr))
+			else if (!ISALNUM(ptr))
 				UNCHAR;
 		}
 		else
 			/* internal error */
 			elog(ERROR, "internal error in parser");
-		ptr++;
+
+		ptr += charlen;
+		lptr->wlen++;
+		pos++;
 	}
 
 	if (state == LTPRS_WAITDELIM)
 	{
 		lptr->len = ptr - lptr->start;
-		if (lptr->len > 255)
+		if (lptr->wlen > 255)
 			ereport(ERROR,
 					(errcode(ERRCODE_NAME_TOO_LONG),
 					 errmsg("name of level is too long"),
 					 errdetail("Name length is %d, must "
 							   "be < 256, in position %d.",
-							   lptr->len, (int) (lptr->start - buf))));
+							   lptr->wlen, pos)));
 
 		totallen += MAXALIGN(lptr->len + LEVEL_HDRSIZE);
 		lptr++;
@@ -125,7 +137,7 @@ ltree_in(PG_FUNCTION_ARGS)
 	lptr = list;
 	while (lptr - list < result->numlevel)
 	{
-		curlevel->len = (uint8) lptr->len;
+		curlevel->len = (uint16) lptr->len;
 		memcpy(curlevel->name, lptr->start, lptr->len);
 		curlevel = LEVEL_NEXT(curlevel);
 		lptr++;
@@ -196,15 +208,23 @@ lquery_in(PG_FUNCTION_ARGS)
 	lquery_variant *lrptr = NULL;
 	bool		hasnot = false;
 	bool		wasbad = false;
+	int			charlen;
+	int			pos = 0;
 
 	ptr = buf;
 	while (*ptr)
 	{
-		if (*ptr == '.')
-			num++;
-		else if (*ptr == '|')
-			numOR++;
-		ptr++;
+		charlen = pg_mblen(ptr);
+
+		if (charlen == 1)
+		{
+			if (t_iseq(ptr, '.'))
+				num++;
+			else if (t_iseq(ptr, '|'))
+				numOR++;
+		}
+
+		ptr += charlen;
 	}
 
 	num++;
@@ -212,34 +232,34 @@ lquery_in(PG_FUNCTION_ARGS)
 	ptr = buf;
 	while (*ptr)
 	{
+		charlen = pg_mblen(ptr);
+
 		if (state == LQPRS_WAITLEVEL)
 		{
-			if (ISALNUM(*ptr))
+			if (ISALNUM(ptr))
 			{
-				GETVAR(curqlevel) = lptr = (nodeitem *) palloc(sizeof(nodeitem) * (numOR + 1));
-				memset((void *) GETVAR(curqlevel), 0, sizeof(nodeitem) * (numOR + 1));
+				GETVAR(curqlevel) = lptr = (nodeitem *) palloc0(sizeof(nodeitem) * (numOR + 1));
 				lptr->start = ptr;
 				state = LQPRS_WAITDELIM;
 				curqlevel->numvar = 1;
 			}
-			else if (*ptr == '!')
+			else if (charlen == 1 && t_iseq(ptr, '!'))
 			{
-				GETVAR(curqlevel) = lptr = (nodeitem *) palloc(sizeof(nodeitem) * (numOR + 1));
-				memset((void *) GETVAR(curqlevel), 0, sizeof(nodeitem) * (numOR + 1));
+				GETVAR(curqlevel) = lptr = (nodeitem *) palloc0(sizeof(nodeitem) * (numOR + 1));
 				lptr->start = ptr + 1;
 				state = LQPRS_WAITDELIM;
 				curqlevel->numvar = 1;
 				curqlevel->flag |= LQL_NOT;
 				hasnot = true;
 			}
-			else if (*ptr == '*')
+			else if (charlen == 1 && t_iseq(ptr, '*'))
 				state = LQPRS_WAITOPEN;
 			else
 				UNCHAR;
 		}
 		else if (state == LQPRS_WAITVAR)
 		{
-			if (ISALNUM(*ptr))
+			if (ISALNUM(ptr))
 			{
 				lptr++;
 				lptr->start = ptr;
@@ -251,61 +271,61 @@ lquery_in(PG_FUNCTION_ARGS)
 		}
 		else if (state == LQPRS_WAITDELIM)
 		{
-			if (*ptr == '@')
+			if (charlen == 1 && t_iseq(ptr, '@'))
 			{
 				if (lptr->start == ptr)
 					UNCHAR;
 				lptr->flag |= LVAR_INCASE;
 				curqlevel->flag |= LVAR_INCASE;
 			}
-			else if (*ptr == '*')
+			else if (charlen == 1 && t_iseq(ptr, '*'))
 			{
 				if (lptr->start == ptr)
 					UNCHAR;
 				lptr->flag |= LVAR_ANYEND;
 				curqlevel->flag |= LVAR_ANYEND;
 			}
-			else if (*ptr == '%')
+			else if (charlen == 1 && t_iseq(ptr, '%'))
 			{
 				if (lptr->start == ptr)
 					UNCHAR;
 				lptr->flag |= LVAR_SUBLEXEME;
 				curqlevel->flag |= LVAR_SUBLEXEME;
 			}
-			else if (*ptr == '|')
+			else if (charlen == 1 && t_iseq(ptr, '|'))
 			{
 				lptr->len = ptr - lptr->start -
 					((lptr->flag & LVAR_SUBLEXEME) ? 1 : 0) -
 					((lptr->flag & LVAR_INCASE) ? 1 : 0) -
 					((lptr->flag & LVAR_ANYEND) ? 1 : 0);
-				if (lptr->len > 255)
+				if (lptr->wlen > 255)
 					ereport(ERROR,
 							(errcode(ERRCODE_NAME_TOO_LONG),
 							 errmsg("name of level is too long"),
 							 errdetail("Name length is %d, must "
 									   "be < 256, in position %d.",
-									 lptr->len, (int) (lptr->start - buf))));
+									   lptr->wlen, pos)));
 
 				state = LQPRS_WAITVAR;
 			}
-			else if (*ptr == '.')
+			else if (charlen == 1 && t_iseq(ptr, '.'))
 			{
 				lptr->len = ptr - lptr->start -
 					((lptr->flag & LVAR_SUBLEXEME) ? 1 : 0) -
 					((lptr->flag & LVAR_INCASE) ? 1 : 0) -
 					((lptr->flag & LVAR_ANYEND) ? 1 : 0);
-				if (lptr->len > 255)
+				if (lptr->wlen > 255)
 					ereport(ERROR,
 							(errcode(ERRCODE_NAME_TOO_LONG),
 							 errmsg("name of level is too long"),
 							 errdetail("Name length is %d, must "
 									   "be < 256, in position %d.",
-									 lptr->len, (int) (lptr->start - buf))));
+									   lptr->wlen, pos)));
 
 				state = LQPRS_WAITLEVEL;
 				curqlevel = NEXTLEV(curqlevel);
 			}
-			else if (ISALNUM(*ptr))
+			else if (ISALNUM(ptr))
 			{
 				if (lptr->flag)
 					UNCHAR;
@@ -315,9 +335,9 @@ lquery_in(PG_FUNCTION_ARGS)
 		}
 		else if (state == LQPRS_WAITOPEN)
 		{
-			if (*ptr == '{')
+			if (charlen == 1 && t_iseq(ptr, '{'))
 				state = LQPRS_WAITFNUM;
-			else if (*ptr == '.')
+			else if (charlen == 1 && t_iseq(ptr, '.'))
 			{
 				curqlevel->low = 0;
 				curqlevel->high = 0xffff;
@@ -329,9 +349,9 @@ lquery_in(PG_FUNCTION_ARGS)
 		}
 		else if (state == LQPRS_WAITFNUM)
 		{
-			if (*ptr == ',')
+			if (charlen == 1 && t_iseq(ptr, ','))
 				state = LQPRS_WAITSNUM;
-			else if (isdigit((unsigned char) *ptr))
+			else if (t_isdigit(ptr))
 			{
 				curqlevel->low = atoi(ptr);
 				state = LQPRS_WAITND;
@@ -341,12 +361,12 @@ lquery_in(PG_FUNCTION_ARGS)
 		}
 		else if (state == LQPRS_WAITSNUM)
 		{
-			if (isdigit((unsigned char) *ptr))
+			if (t_isdigit(ptr))
 			{
 				curqlevel->high = atoi(ptr);
 				state = LQPRS_WAITCLOSE;
 			}
-			else if (*ptr == '}')
+			else if (charlen == 1 && t_iseq(ptr, '}'))
 			{
 				curqlevel->high = 0xffff;
 				state = LQPRS_WAITEND;
@@ -356,26 +376,26 @@ lquery_in(PG_FUNCTION_ARGS)
 		}
 		else if (state == LQPRS_WAITCLOSE)
 		{
-			if (*ptr == '}')
+			if (charlen == 1 && t_iseq(ptr, '}'))
 				state = LQPRS_WAITEND;
-			else if (!isdigit((unsigned char) *ptr))
+			else if (!t_isdigit(ptr))
 				UNCHAR;
 		}
 		else if (state == LQPRS_WAITND)
 		{
-			if (*ptr == '}')
+			if (charlen == 1 && t_iseq(ptr, '}'))
 			{
 				curqlevel->high = curqlevel->low;
 				state = LQPRS_WAITEND;
 			}
-			else if (*ptr == ',')
+			else if (charlen == 1 && t_iseq(ptr, ','))
 				state = LQPRS_WAITSNUM;
-			else if (!isdigit((unsigned char) *ptr))
+			else if (!t_isdigit(ptr))
 				UNCHAR;
 		}
 		else if (state == LQPRS_WAITEND)
 		{
-			if (*ptr == '.')
+			if (charlen == 1 && t_iseq(ptr, '.'))
 			{
 				state = LQPRS_WAITLEVEL;
 				curqlevel = NEXTLEV(curqlevel);
@@ -386,7 +406,11 @@ lquery_in(PG_FUNCTION_ARGS)
 		else
 			/* internal error */
 			elog(ERROR, "internal error in parser");
-		ptr++;
+
+		ptr += charlen;
+		if (state == LQPRS_WAITDELIM)
+			lptr->wlen++;
+		pos++;
 	}
 
 	if (state == LQPRS_WAITDELIM)
@@ -407,13 +431,13 @@ lquery_in(PG_FUNCTION_ARGS)
 					 errmsg("syntax error"),
 					 errdetail("Unexpected end of line.")));
 
-		if (lptr->len > 255)
+		if (lptr->wlen > 255)
 			ereport(ERROR,
 					(errcode(ERRCODE_NAME_TOO_LONG),
 					 errmsg("name of level is too long"),
 					 errdetail("Name length is %d, must "
 							   "be < 256, in position %d.",
-							   lptr->len, (int) (lptr->start - buf))));
+							   lptr->wlen, pos)));
 	}
 	else if (state == LQPRS_WAITOPEN)
 		curqlevel->high = 0xffff;

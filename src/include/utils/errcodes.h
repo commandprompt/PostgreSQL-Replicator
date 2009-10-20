@@ -9,7 +9,7 @@
  * string is determined by the MAKE_SQLSTATE() macro, which is not defined
  * in this file; it can be defined by the caller for special purposes.
  *
- * Copyright (c) 2003-2008, PostgreSQL Global Development Group
+ * Copyright (c) 2003-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
@@ -101,6 +101,9 @@
 /* Class 0P - Invalid Role Specification */
 #define ERRCODE_INVALID_ROLE_SPECIFICATION	MAKE_SQLSTATE('0','P', '0','0','0')
 
+/* Class 20 - Case Not Found */
+#define ERRCODE_CASE_NOT_FOUND				MAKE_SQLSTATE('2','0', '0','0','0')
+
 /* Class 21 - Cardinality Violation */
 /* (this means something returned the wrong number of rows) */
 #define ERRCODE_CARDINALITY_VIOLATION		MAKE_SQLSTATE('2','1', '0','0','0')
@@ -119,6 +122,8 @@
 #define ERRCODE_INDICATOR_OVERFLOW			MAKE_SQLSTATE('2','2', '0','2','2')
 #define ERRCODE_INTERVAL_FIELD_OVERFLOW		MAKE_SQLSTATE('2','2', '0','1','5')
 #define ERRCODE_INVALID_ARGUMENT_FOR_LOG	MAKE_SQLSTATE('2','2', '0','1','E')
+#define ERRCODE_INVALID_ARGUMENT_FOR_NTILE	MAKE_SQLSTATE('2','2', '0','1','4')
+#define ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE	MAKE_SQLSTATE('2','2', '0','1','6')
 #define ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION MAKE_SQLSTATE('2','2', '0', '1', 'F')
 #define ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION	MAKE_SQLSTATE('2','2', '0', '1', 'G')
 #define ERRCODE_INVALID_CHARACTER_VALUE_FOR_CAST		MAKE_SQLSTATE('2','2', '0','1','8')
@@ -128,9 +133,10 @@
 #define ERRCODE_INVALID_ESCAPE_SEQUENCE		MAKE_SQLSTATE('2','2', '0','2','5')
 #define ERRCODE_NONSTANDARD_USE_OF_ESCAPE_CHARACTER		MAKE_SQLSTATE('2','2', 'P','0','6')
 #define ERRCODE_INVALID_INDICATOR_PARAMETER_VALUE		MAKE_SQLSTATE('2','2', '0','1','0')
-#define ERRCODE_INVALID_LIMIT_VALUE			MAKE_SQLSTATE('2','2', '0','2','0')
 #define ERRCODE_INVALID_PARAMETER_VALUE		MAKE_SQLSTATE('2','2', '0','2','3')
 #define ERRCODE_INVALID_REGULAR_EXPRESSION	MAKE_SQLSTATE('2','2', '0','1','B')
+#define ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE	MAKE_SQLSTATE('2', '2', '0', '1', 'W')
+#define ERRCODE_INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE	MAKE_SQLSTATE('2', '2', '0', '1', 'X')
 #define ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE	MAKE_SQLSTATE('2','2', '0','0','9')
 #define ERRCODE_INVALID_USE_OF_ESCAPE_CHARACTER		MAKE_SQLSTATE('2','2', '0','0','C')
 #define ERRCODE_MOST_SPECIFIC_TYPE_MISMATCH MAKE_SQLSTATE('2','2', '0','0','G')
@@ -243,6 +249,8 @@
 #define ERRCODE_INSUFFICIENT_PRIVILEGE		MAKE_SQLSTATE('4','2', '5','0','1')
 #define ERRCODE_CANNOT_COERCE				MAKE_SQLSTATE('4','2', '8','4','6')
 #define ERRCODE_GROUPING_ERROR				MAKE_SQLSTATE('4','2', '8','0','3')
+#define ERRCODE_WINDOWING_ERROR				MAKE_SQLSTATE('4','2', 'P','2','0')
+#define ERRCODE_INVALID_RECURSION			MAKE_SQLSTATE('4','2', 'P','1','9')
 #define ERRCODE_INVALID_FOREIGN_KEY			MAKE_SQLSTATE('4','2', '8','3','0')
 #define ERRCODE_INVALID_NAME				MAKE_SQLSTATE('4','2', '6','0','2')
 #define ERRCODE_NAME_TOO_LONG				MAKE_SQLSTATE('4','2', '6','2','2')

@@ -3,7 +3,7 @@
  * pl_handler.c		- Handler for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,9 +14,7 @@
  */
 
 #include "plpgsql.h"
-#include "pl.tab.h"
 
-#include "access/heapam.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -43,6 +41,8 @@ _PG_init(void)
 
 	if (inited)
 		return;
+
+	pg_bindtextdomain(TEXTDOMAIN);
 
 	plpgsql_HashTableInit();
 	RegisterXactCallback(plpgsql_xact_cb, NULL);
@@ -159,7 +159,7 @@ plpgsql_validator(PG_FUNCTION_ARGS)
 				 !IsPolymorphicType(proc->prorettype))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("plpgsql functions cannot return type %s",
+					 errmsg("PL/pgSQL functions cannot return type %s",
 							format_type_be(proc->prorettype))));
 	}
 
@@ -174,7 +174,7 @@ plpgsql_validator(PG_FUNCTION_ARGS)
 			if (!IsPolymorphicType(argtypes[i]))
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("plpgsql functions cannot take type %s",
+						 errmsg("PL/pgSQL functions cannot accept type %s",
 								format_type_be(argtypes[i]))));
 		}
 	}

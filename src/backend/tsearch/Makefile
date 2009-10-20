@@ -2,7 +2,7 @@
 #
 # Makefile for backend/tsearch
 #
-# Copyright (c) 2006-2008, PostgreSQL Global Development Group
+# Copyright (c) 2006-2009, PostgreSQL Global Development Group
 #
 # $PostgreSQL$
 #
@@ -19,15 +19,9 @@ DICTFILES=synonym_sample.syn thesaurus_sample.ths hunspell_sample.affix \
 OBJS = ts_locale.o ts_parse.o wparser.o wparser_def.o dict.o \
 	dict_simple.o dict_synonym.o dict_thesaurus.o \
 	dict_ispell.o regis.o spell.o \
-	to_tsany.o ts_utils.o
+	to_tsany.o ts_selfuncs.o ts_typanalyze.o ts_utils.o
 
-all: SUBSYS.o 
-
-SUBSYS.o: $(OBJS)
-	$(LD) $(LDREL) $(LDOUT) SUBSYS.o $^
-
-depend dep:
-	$(CC) -MM $(CFLAGS) *.c >depend
+include $(top_srcdir)/src/backend/common.mk
 
 .PHONY: install-data
 install-data: $(DICTFILES) installdirs
@@ -43,10 +37,3 @@ uninstall-data:
 	for i in $(DICTFILES); \
 		do rm -rf '$(DESTDIR)$(datadir)/$(DICTDIR)/'$$i || exit; \
 	done
-
-clean distclean maintainer-clean: 
-	rm -f SUBSYS.o $(OBJS)
-
-ifeq (depend,$(wildcard depend))
-include depend
-endif

@@ -3,9 +3,11 @@
  * Teodor Sigaev <teodor@stack.net>
  * $PostgreSQL$
  */
+#include "postgres.h"
+
+#include <ctype.h>
 
 #include "ltree.h"
-#include <ctype.h>
 
 PG_FUNCTION_INFO_V1(ltxtq_exec);
 PG_FUNCTION_INFO_V1(ltxtq_rexec);
@@ -14,7 +16,7 @@ PG_FUNCTION_INFO_V1(ltxtq_rexec);
  * check for boolean condition
  */
 bool
-ltree_execute(ITEM * curitem, void *checkval, bool calcnot, bool (*chkcond) (void *checkval, ITEM * val))
+ltree_execute(ITEM *curitem, void *checkval, bool calcnot, bool (*chkcond) (void *checkval, ITEM *val))
 {
 	if (curitem->type == VAL)
 		return (*chkcond) (checkval, curitem);
@@ -48,14 +50,14 @@ typedef struct
 } CHKVAL;
 
 static bool
-checkcondition_str(void *checkval, ITEM * val)
+checkcondition_str(void *checkval, ITEM *val)
 {
 	ltree_level *level = LTREE_FIRST(((CHKVAL *) checkval)->node);
 	int			tlen = ((CHKVAL *) checkval)->node->numlevel;
 	char	   *op = ((CHKVAL *) checkval)->operand + val->distance;
 	int			(*cmpptr) (const char *, const char *, size_t);
 
-	cmpptr = (val->flag & LVAR_INCASE) ? pg_strncasecmp : strncmp;
+	cmpptr = (val->flag & LVAR_INCASE) ? ltree_strncasecmp : strncmp;
 	while (tlen > 0)
 	{
 		if (val->flag & LVAR_SUBLEXEME)

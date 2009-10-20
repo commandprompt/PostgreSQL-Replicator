@@ -37,11 +37,31 @@ static char sccsid[] = "@(#)getopt.c	8.3 (Berkeley) 4/27/95";
 #endif   /* LIBC_SCCS and not lint */
 
 
+/*
+ * On some versions of Solaris, opterr and friends are defined in core libc
+ * rather than in a separate getopt module.  Define these variables only
+ * if configure found they aren't there by default.  (We assume that testing
+ * opterr is sufficient for all of these except optreset.)
+ */
+#ifndef HAVE_INT_OPTERR
+
 int			opterr = 1,			/* if error message should be printed */
 			optind = 1,			/* index into parent argv vector */
-			optopt,				/* character checked for validity */
-			optreset;			/* reset getopt */
+			optopt;				/* character checked for validity */
 char	   *optarg;				/* argument associated with option */
+#else
+
+extern int	opterr;
+extern int	optind;
+extern int	optopt;
+extern char *optarg;
+#endif
+
+#ifndef HAVE_INT_OPTRESET
+int			optreset;			/* reset getopt */
+#else
+extern int	optreset;
+#endif
 
 #define BADCH	(int)'?'
 #define BADARG	(int)':'

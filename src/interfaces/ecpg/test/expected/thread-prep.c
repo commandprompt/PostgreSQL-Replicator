@@ -1,6 +1,5 @@
 /* Processed by ecpg (regression mode) */
 /* These include files are added by the preprocessor */
-#include <ecpgtype.h>
 #include <ecpglib.h>
 #include <ecpgerrno.h>
 #include <sqlca.h>
@@ -134,13 +133,13 @@ static void* fn(void* arg)
 	   
 	
 #line 39 "prep.pgc"
- int  value    ;
+ int value ;
  
 #line 40 "prep.pgc"
- char  name [ 100 ]    ;
+ char name [ 100 ] ;
  
 #line 41 "prep.pgc"
- char  query [ 256 ]   = "INSERT INTO T VALUES ( ? )" ;
+ char query [ 256 ] = "INSERT INTO T VALUES ( ? )" ;
 /* exec sql end declare section */
 #line 42 "prep.pgc"
 
@@ -196,7 +195,7 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	return 0;
 }
 
-int main (int argc, char** argv)
+int main ()
 {
 	int i;
 #ifdef WIN32
@@ -217,13 +216,13 @@ if (sqlca.sqlcode < 0) sqlprint();}
 if (sqlca.sqlcode < 0) sqlprint();}
 #line 70 "prep.pgc"
 
-	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table if exists T ", ECPGt_EOIT, ECPGt_EORT);
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table if exists T", ECPGt_EOIT, ECPGt_EORT);
 #line 71 "prep.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
 #line 71 "prep.pgc"
 
-	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create  table T ( i int   )    ", ECPGt_EOIT, ECPGt_EORT);
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create table T ( i int )", ECPGt_EOIT, ECPGt_EORT);
 #line 72 "prep.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}

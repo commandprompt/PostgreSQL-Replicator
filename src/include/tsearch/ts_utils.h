@@ -3,7 +3,7 @@
  * ts_utils.h
  *	  helper utilities for tsearch
  *
- * Copyright (c) 1998-2008, PostgreSQL Global Development Group
+ * Copyright (c) 1998-2009, PostgreSQL Global Development Group
  *
  * $PostgreSQL$
  *
@@ -42,9 +42,10 @@ typedef struct TSQueryParserStateData *TSQueryParserState;
 
 typedef void (*PushFunction) (Datum opaque, TSQueryParserState state,
 										  char *token, int tokenlen,
-										  int2 tokenweights		/* bitmap as described
+										  int2 tokenweights,	/* bitmap as described
 																 * in QueryOperand
-								  struct */ );
+																 * struct */
+										  bool prefix);
 
 extern TSQuery parse_tsquery(char *buf,
 			  PushFunction pushval,
@@ -52,7 +53,7 @@ extern TSQuery parse_tsquery(char *buf,
 
 /* Functions for use by PushFunction implementations */
 extern void pushValue(TSQueryParserState state,
-		  char *strval, int lenval, int2 weight);
+		  char *strval, int lenval, int2 weight, bool prefix);
 extern void pushStop(TSQueryParserState state);
 extern void pushOperator(TSQueryParserState state, int8 operator);
 
@@ -74,6 +75,7 @@ typedef struct
 		 */
 		uint16	   *apos;
 	}			pos;
+	uint16		flags;			/* currently, only TSL_PREFIX */
 	char	   *word;
 	uint32		alen;
 } ParsedWord;
@@ -107,15 +109,10 @@ extern bool TS_execute(QueryItem *curitem, void *checkval, bool calcnot,
 		   bool (*chkcond) (void *checkval, QueryOperand *val));
 
 /*
- * Useful conversion macros
- */
-#define TextPGetCString(t) DatumGetCString(DirectFunctionCall1(textout, PointerGetDatum(t)))
-#define CStringGetTextP(c) DatumGetTextP(DirectFunctionCall1(textin, CStringGetDatum(c)))
-
-/*
  * to_ts* - text transformation to tsvector, tsquery
  */
 extern TSVector make_tsvector(ParsedText *prs);
+extern int32 tsCompareString(char *a, int lena, char *b, int lenb, bool prefix);
 
 extern Datum to_tsvector_byid(PG_FUNCTION_ARGS);
 extern Datum to_tsvector(PG_FUNCTION_ARGS);
@@ -148,6 +145,8 @@ extern Datum gtsvectorout(PG_FUNCTION_ARGS);
  */
 
 extern Datum gin_extract_tsvector(PG_FUNCTION_ARGS);
+extern Datum gin_cmp_tslexeme(PG_FUNCTION_ARGS);
+extern Datum gin_cmp_prefix(PG_FUNCTION_ARGS);
 extern Datum gin_extract_tsquery(PG_FUNCTION_ARGS);
 extern Datum gin_tsquery_consistent(PG_FUNCTION_ARGS);
 
@@ -183,6 +182,11 @@ typedef struct QTNode
 typedef uint64 TSQuerySign;
 
 #define TSQS_SIGLEN  (sizeof(TSQuerySign)*BITS_PER_BYTE)
+
+#define TSQuerySignGetDatum(X)		Int64GetDatum((int64) (X))
+#define DatumGetTSQuerySign(X)		((TSQuerySign) DatumGetInt64(X))
+#define PG_RETURN_TSQUERYSIGN(X)	return TSQuerySignGetDatum(X)
+#define PG_GETARG_TSQUERYSIGN(n)	DatumGetTSQuerySign(PG_GETARG_DATUM(n))
 
 
 extern QTNode *QT2QTN(QueryItem *in, char *operand);

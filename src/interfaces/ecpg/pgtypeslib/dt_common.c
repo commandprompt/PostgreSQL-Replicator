@@ -26,7 +26,6 @@ typedef long AbsoluteTime;
 static datetkn datetktbl[] = {
 /*	text, token, lexval */
 	{EARLY, RESERV, DTK_EARLY}, /* "-infinity" reserved for "early time" */
-	{"abstime", IGNORE_DTF, 0}, /* for pre-v6.1 "Invalid Abstime" */
 	{"acsst", DTZ, POS(42)},	/* Cent. Australia */
 	{"acst", DTZ, NEG(16)},		/* Atlantic/Porto Acre */
 	{"act", TZ, NEG(20)},		/* Atlantic/Porto Acre */
@@ -471,7 +470,6 @@ static datetkn deltatktbl[] = {
 	{"msecs", UNITS, DTK_MILLISEC},
 	{"qtr", UNITS, DTK_QUARTER},	/* "quarter" relative */
 	{DQUARTER, UNITS, DTK_QUARTER},		/* "quarter" relative */
-	{"reltime", IGNORE_DTF, 0}, /* pre-v6.1 "Undefined Reltime" */
 	{"s", UNITS, DTK_SECOND},
 	{"sec", UNITS, DTK_SECOND},
 	{DSECOND, UNITS, DTK_SECOND},
@@ -982,7 +980,7 @@ EncodeDateTime(struct tm * tm, fsec_t fsec, int *tzp, char **tzn, int style, cha
 	return TRUE;
 }	/* EncodeDateTime() */
 
-void
+int
 GetEpochTime(struct tm * tm)
 {
 	struct tm  *t0;
@@ -990,18 +988,19 @@ GetEpochTime(struct tm * tm)
 
 	t0 = gmtime(&epoch);
 
-	tm->tm_year = t0->tm_year;
-	tm->tm_mon = t0->tm_mon;
-	tm->tm_mday = t0->tm_mday;
-	tm->tm_hour = t0->tm_hour;
-	tm->tm_min = t0->tm_min;
-	tm->tm_sec = t0->tm_sec;
+	if (t0)
+	{
+		tm->tm_year = t0->tm_year + 1900;
+		tm->tm_mon = t0->tm_mon + 1;
+		tm->tm_mday = t0->tm_mday;
+		tm->tm_hour = t0->tm_hour;
+		tm->tm_min = t0->tm_min;
+		tm->tm_sec = t0->tm_sec;
 
-	if (tm->tm_year < 1900)
-		tm->tm_year += 1900;
-	tm->tm_mon++;
+		return 0;
+	}
 
-	return;
+	return -1;
 }	/* GetEpochTime() */
 
 static void
@@ -1010,10 +1009,17 @@ abstime2tm(AbsoluteTime _time, int *tzp, struct tm * tm, char **tzn)
 	time_t		time = (time_t) _time;
 	struct tm  *tx;
 
+	errno = 0;
 	if (tzp != NULL)
 		tx = localtime((time_t *) &time);
 	else
 		tx = gmtime((time_t *) &time);
+
+	if (!tx)
+	{
+		errno = PGTYPES_TS_BAD_TIMESTAMP;
+		return;
+	}
 
 	tm->tm_year = tx->tm_year + 1900;
 	tm->tm_mon = tx->tm_mon + 1;
@@ -1126,7 +1132,7 @@ dt2time(double jd, int *hour, int *min, int *sec, fsec_t *fsec)
  */
 static int
 DecodeNumberField(int len, char *str, int fmask,
-	int *tmask, struct tm * tm, fsec_t *fsec, int *is2digits, bool EuroDates)
+				  int *tmask, struct tm * tm, fsec_t *fsec, int *is2digits)
 {
 	char	   *cp;
 
@@ -1252,7 +1258,7 @@ DecodeNumber(int flen, char *str, int fmask,
 		 */
 		if (cp - str > 2)
 			return DecodeNumberField(flen, str, (fmask | DTK_DATE_M),
-									 tmask, tm, fsec, is2digits, EuroDates);
+									 tmask, tm, fsec, is2digits);
 
 		*fsec = strtod(cp, &cp);
 		if (*cp != '\0')
@@ -1470,7 +1476,7 @@ DecodeDate(char *str, int fmask, int *tmask, struct tm * tm, bool EuroDates)
  *	can be used to represent time spans.
  */
 int
-DecodeTime(char *str, int fmask, int *tmask, struct tm * tm, fsec_t *fsec)
+DecodeTime(char *str, int *tmask, struct tm * tm, fsec_t *fsec)
 {
 	char	   *cp;
 
@@ -1634,7 +1640,7 @@ DecodePosixTimezone(char *str, int *tzp)
  */
 int
 ParseDateTime(char *timestr, char *lowstr,
-	  char **field, int *ftype, int maxfields, int *numfields, char **endstr)
+			  char **field, int *ftype, int *numfields, char **endstr)
 {
 	int			nf = 0;
 	char	   *lp = lowstr;
@@ -1922,7 +1928,7 @@ DecodeDateTime(char **field, int *ftype, int nf,
 						 * time
 						 */
 						if ((ftype[i] = DecodeNumberField(strlen(field[i]), field[i], fmask,
-							   &tmask, tm, fsec, &is2digits, EuroDates)) < 0)
+										  &tmask, tm, fsec, &is2digits)) < 0)
 							return -1;
 
 						/*
@@ -1945,7 +1951,7 @@ DecodeDateTime(char **field, int *ftype, int nf,
 				break;
 
 			case DTK_TIME:
-				if (DecodeTime(field[i], fmask, &tmask, tm, fsec) != 0)
+				if (DecodeTime(field[i], &tmask, tm, fsec) != 0)
 					return -1;
 
 				/*
@@ -2110,7 +2116,7 @@ DecodeDateTime(char **field, int *ftype, int nf,
 						case DTK_TIME:
 							/* previous field was "t" for ISO time */
 							if ((ftype[i] = DecodeNumberField(strlen(field[i]), field[i], (fmask | DTK_DATE_M),
-							   &tmask, tm, fsec, &is2digits, EuroDates)) < 0)
+										  &tmask, tm, fsec, &is2digits)) < 0)
 								return -1;
 
 							if (tmask != DTK_TIME_M)
@@ -2148,13 +2154,13 @@ DecodeDateTime(char **field, int *ftype, int nf,
 						 * Example: 20011223 or 040506
 						 */
 						if ((ftype[i] = DecodeNumberField(flen, field[i], fmask,
-							   &tmask, tm, fsec, &is2digits, EuroDates)) < 0)
+										  &tmask, tm, fsec, &is2digits)) < 0)
 							return -1;
 					}
 					else if (flen > 4)
 					{
 						if ((ftype[i] = DecodeNumberField(flen, field[i], fmask,
-							   &tmask, tm, fsec, &is2digits, EuroDates)) < 0)
+										  &tmask, tm, fsec, &is2digits)) < 0)
 							return -1;
 					}
 					/* otherwise it is a single date/time field... */
@@ -2542,7 +2548,7 @@ pgtypes_defmt_scan(union un_fmt_comb * scan_val, int scan_type, char **pstr, cha
 			while (**pstr == ' ')
 				(*pstr)++;
 			errno = 0;
-			scan_val->uint_val = (unsigned long int) strtol(*pstr, &strtol_end, 10);
+			scan_val->luint_val = (unsigned long int) strtol(*pstr, &strtol_end, 10);
 			if (errno)
 				err = 1;
 			break;
@@ -2577,7 +2583,7 @@ PGTYPEStimestamp_defmt_scan(char **str, char *fmt, timestamp * d,
 			   *pfmt,
 			   *tmp;
 	int			err = 1;
-	int			j;
+	unsigned int j;
 	struct tm	tm;
 
 	pfmt = fmt;
@@ -2856,12 +2862,18 @@ PGTYPEStimestamp_defmt_scan(char **str, char *fmt, timestamp * d,
 					time_t		et = (time_t) scan_val.luint_val;
 
 					tms = gmtime(&et);
-					*year = tms->tm_year;
-					*month = tms->tm_mon;
-					*day = tms->tm_mday;
-					*hour = tms->tm_hour;
-					*minute = tms->tm_min;
-					*second = tms->tm_sec;
+
+					if (tms)
+					{
+						*year = tms->tm_year + 1900;
+						*month = tms->tm_mon + 1;
+						*day = tms->tm_mday;
+						*hour = tms->tm_hour;
+						*minute = tms->tm_min;
+						*second = tms->tm_sec;
+					}
+					else
+						err = 1;
 				}
 				break;
 			case 'S':
@@ -2896,7 +2908,7 @@ PGTYPEStimestamp_defmt_scan(char **str, char *fmt, timestamp * d,
 				pfmt++;
 				scan_type = PGTYPES_TYPE_UINT;
 				err = pgtypes_defmt_scan(&scan_val, scan_type, &pstr, pfmt);
-				if (scan_val.uint_val < 0 || scan_val.uint_val > 53)
+				if (scan_val.uint_val > 53)
 					err = 1;
 				break;
 			case 'V':
@@ -2910,14 +2922,14 @@ PGTYPEStimestamp_defmt_scan(char **str, char *fmt, timestamp * d,
 				pfmt++;
 				scan_type = PGTYPES_TYPE_UINT;
 				err = pgtypes_defmt_scan(&scan_val, scan_type, &pstr, pfmt);
-				if (scan_val.uint_val < 0 || scan_val.uint_val > 6)
+				if (scan_val.uint_val > 6)
 					err = 1;
 				break;
 			case 'W':
 				pfmt++;
 				scan_type = PGTYPES_TYPE_UINT;
 				err = pgtypes_defmt_scan(&scan_val, scan_type, &pstr, pfmt);
-				if (scan_val.uint_val < 0 || scan_val.uint_val > 53)
+				if (scan_val.uint_val > 53)
 					err = 1;
 				break;
 			case 'x':

@@ -76,7 +76,7 @@
  *	simplicity we keep the controlling list-of-lists in TopTransactionContext.
  *
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -94,7 +94,7 @@
 #include "storage/smgr.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
-#include "utils/relcache.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 
@@ -160,16 +160,25 @@ static TransInvalidationInfo *transInvalInfo = NULL;
  * assumes there won't be very many of these at once; could improve if needed.
  */
 
-#define MAX_CACHE_CALLBACKS 20
+#define MAX_SYSCACHE_CALLBACKS 20
+#define MAX_RELCACHE_CALLBACKS 5
 
-static struct CACHECALLBACK
+static struct SYSCACHECALLBACK
 {
-	int16		id;				/* cache number or message type id */
-	CacheCallbackFunction function;
+	int16		id;				/* cache number */
+	SyscacheCallbackFunction function;
 	Datum		arg;
-}	cache_callback_list[MAX_CACHE_CALLBACKS];
+}	syscache_callback_list[MAX_SYSCACHE_CALLBACKS];
 
-static int	cache_callback_count = 0;
+static int	syscache_callback_count = 0;
+
+static struct RELCACHECALLBACK
+{
+	RelcacheCallbackFunction function;
+	Datum		arg;
+}	relcache_callback_list[MAX_RELCACHE_CALLBACKS];
+
+static int	relcache_callback_count = 0;
 
 /* info values for 2PC callback */
 #define TWOPHASE_INFO_MSG			0	/* SharedInvalidationMessage */
@@ -203,7 +212,7 @@ AddInvalidationMessage(InvalidationChunk **listHdr,
 	if (chunk == NULL)
 	{
 		/* First time through; create initial chunk */
-#define FIRSTCHUNKSIZE 16
+#define FIRSTCHUNKSIZE 32
 		chunk = (InvalidationChunk *)
 			MemoryContextAlloc(CurTransactionContext,
 							   sizeof(InvalidationChunk) +
@@ -272,6 +281,23 @@ AppendInvalidationMessageList(InvalidationChunk **destHdr,
 				SharedInvalidationMessage *msg = &_chunk->msgs[_cindex]; \
 				codeFragment; \
 			} \
+		} \
+	} while (0)
+
+/*
+ * Process a list of invalidation messages group-wise.
+ *
+ * As above, but the code fragment can handle an array of messages.
+ * The fragment should refer to the messages as msgs[], with n entries.
+ */
+#define ProcessMessageListMulti(listHdr, codeFragment) \
+	do { \
+		InvalidationChunk *_chunk; \
+		for (_chunk = (listHdr); _chunk != NULL; _chunk = _chunk->next) \
+		{ \
+			SharedInvalidationMessage *msgs = _chunk->msgs; \
+			int		n = _chunk->nitems; \
+			codeFragment; \
 		} \
 	} while (0)
 
@@ -371,6 +397,18 @@ ProcessInvalidationMessages(InvalidationListHeader *hdr,
 	ProcessMessageList(hdr->rclist, func(msg));
 }
 
+/*
+ * As above, but the function is able to process an array of messages
+ * rather than just one at a time.
+ */
+static void
+ProcessInvalidationMessagesMulti(InvalidationListHeader *hdr,
+				 void (*func) (const SharedInvalidationMessage *msgs, int n))
+{
+	ProcessMessageListMulti(hdr->cclist, func(msgs, n));
+	ProcessMessageListMulti(hdr->rclist, func(msgs, n));
+}
+
 /* ----------------------------------------------------------------
  *					  private support functions
  * ----------------------------------------------------------------
@@ -404,9 +442,9 @@ RegisterRelcacheInvalidation(Oid dbId, Oid relId)
 
 	/*
 	 * Most of the time, relcache invalidation is associated with system
-	 * catalog updates, but there are a few cases where it isn't.  Quick
-	 * hack to ensure that the next CommandCounterIncrement() will think
-	 * that we need to do CommandEndInvalidationMessages().
+	 * catalog updates, but there are a few cases where it isn't.  Quick hack
+	 * to ensure that the next CommandCounterIncrement() will think that we
+	 * need to do CommandEndInvalidationMessages().
 	 */
 	(void) GetCurrentCommandId(true);
 
@@ -455,12 +493,13 @@ LocalExecuteInvalidationMessage(SharedInvalidationMessage *msg)
 									 msg->cc.hashValue,
 									 &msg->cc.tuplePtr);
 
-			for (i = 0; i < cache_callback_count; i++)
+			for (i = 0; i < syscache_callback_count; i++)
 			{
-				struct CACHECALLBACK *ccitem = cache_callback_list + i;
+				struct SYSCACHECALLBACK *ccitem = syscache_callback_list + i;
 
 				if (ccitem->id == msg->cc.id)
-					(*ccitem->function) (ccitem->arg, InvalidOid);
+					(*ccitem->function) (ccitem->arg,
+										 msg->cc.id, &msg->cc.tuplePtr);
 			}
 		}
 	}
@@ -470,12 +509,11 @@ LocalExecuteInvalidationMessage(SharedInvalidationMessage *msg)
 		{
 			RelationCacheInvalidateEntry(msg->rc.relId);
 
-			for (i = 0; i < cache_callback_count; i++)
+			for (i = 0; i < relcache_callback_count; i++)
 			{
-				struct CACHECALLBACK *ccitem = cache_callback_list + i;
+				struct RELCACHECALLBACK *ccitem = relcache_callback_list + i;
 
-				if (ccitem->id == SHAREDINVALRELCACHE_ID)
-					(*ccitem->function) (ccitem->arg, msg->rc.relId);
+				(*ccitem->function) (ccitem->arg, msg->rc.relId);
 			}
 		}
 	}
@@ -510,9 +548,16 @@ InvalidateSystemCaches(void)
 	ResetCatalogCaches();
 	RelationCacheInvalidate();	/* gets smgr cache too */
 
-	for (i = 0; i < cache_callback_count; i++)
+	for (i = 0; i < syscache_callback_count; i++)
 	{
-		struct CACHECALLBACK *ccitem = cache_callback_list + i;
+		struct SYSCACHECALLBACK *ccitem = syscache_callback_list + i;
+
+		(*ccitem->function) (ccitem->arg, ccitem->id, NULL);
+	}
+
+	for (i = 0; i < relcache_callback_count; i++)
+	{
+		struct RELCACHECALLBACK *ccitem = relcache_callback_list + i;
 
 		(*ccitem->function) (ccitem->arg, InvalidOid);
 	}
@@ -792,7 +837,7 @@ inval_twophase_postcommit(TransactionId xid, uint16 info,
 		case TWOPHASE_INFO_MSG:
 			msg = (SharedInvalidationMessage *) recdata;
 			Assert(len == sizeof(SharedInvalidationMessage));
-			SendSharedInvalidMessage(msg);
+			SendSharedInvalidMessages(msg, 1);
 			break;
 		case TWOPHASE_INFO_FILE_BEFORE:
 			RelationCacheInitFileInvalidate(true);
@@ -850,8 +895,8 @@ AtEOXact_Inval(bool isCommit)
 		AppendInvalidationMessages(&transInvalInfo->PriorCmdInvalidMsgs,
 								   &transInvalInfo->CurrentCmdInvalidMsgs);
 
-		ProcessInvalidationMessages(&transInvalInfo->PriorCmdInvalidMsgs,
-									SendSharedInvalidMessage);
+		ProcessInvalidationMessagesMulti(&transInvalInfo->PriorCmdInvalidMsgs,
+										 SendSharedInvalidMessages);
 
 		if (transInvalInfo->RelcacheInitFileInval)
 			RelationCacheInitFileInvalidate(false);
@@ -970,7 +1015,7 @@ CommandEndInvalidationMessages(void)
  *		Prepare for invalidation messages for nontransactional updates.
  *
  * A nontransactional invalidation is one that must be sent whether or not
- * the current transaction eventually commits.  We arrange for all invals
+ * the current transaction eventually commits.	We arrange for all invals
  * queued between this call and EndNonTransactionalInvalidation() to be sent
  * immediately when the latter is called.
  *
@@ -1024,17 +1069,17 @@ EndNonTransactionalInvalidation(void)
 	Assert(transInvalInfo->PriorCmdInvalidMsgs.rclist == NULL);
 
 	/*
-	 * At present, this function is only used for CTID-changing updates;
-	 * since the relcache init file doesn't store any tuple CTIDs, we
-	 * don't have to invalidate it.  That might not be true forever
-	 * though, in which case we'd need code similar to AtEOXact_Inval.
+	 * At present, this function is only used for CTID-changing updates; since
+	 * the relcache init file doesn't store any tuple CTIDs, we don't have to
+	 * invalidate it.  That might not be true forever though, in which case
+	 * we'd need code similar to AtEOXact_Inval.
 	 */
 
 	/* Send out the invals */
 	ProcessInvalidationMessages(&transInvalInfo->CurrentCmdInvalidMsgs,
 								LocalExecuteInvalidationMessage);
-	ProcessInvalidationMessages(&transInvalInfo->CurrentCmdInvalidMsgs,
-								SendSharedInvalidMessage);
+	ProcessInvalidationMessagesMulti(&transInvalInfo->CurrentCmdInvalidMsgs,
+									 SendSharedInvalidMessages);
 
 	/* Clean up and release memory */
 	for (chunk = transInvalInfo->CurrentCmdInvalidMsgs.cclist;
@@ -1148,26 +1193,25 @@ CacheInvalidateRelcacheByRelid(Oid relid)
 /*
  * CacheRegisterSyscacheCallback
  *		Register the specified function to be called for all future
- *		invalidation events in the specified cache.
+ *		invalidation events in the specified cache.  The cache ID and the
+ *		TID of the tuple being invalidated will be passed to the function.
  *
- * NOTE: currently, the OID argument to the callback routine is not
- * provided for syscache callbacks; the routine doesn't really get any
- * useful info as to exactly what changed.	It should treat every call
- * as a "cache flush" request.
+ * NOTE: NULL will be passed for the TID if a cache reset request is received.
+ * In this case the called routines should flush all cached state.
  */
 void
 CacheRegisterSyscacheCallback(int cacheid,
-							  CacheCallbackFunction func,
+							  SyscacheCallbackFunction func,
 							  Datum arg)
 {
-	if (cache_callback_count >= MAX_CACHE_CALLBACKS)
-		elog(FATAL, "out of cache_callback_list slots");
+	if (syscache_callback_count >= MAX_SYSCACHE_CALLBACKS)
+		elog(FATAL, "out of syscache_callback_list slots");
 
-	cache_callback_list[cache_callback_count].id = cacheid;
-	cache_callback_list[cache_callback_count].function = func;
-	cache_callback_list[cache_callback_count].arg = arg;
+	syscache_callback_list[syscache_callback_count].id = cacheid;
+	syscache_callback_list[syscache_callback_count].function = func;
+	syscache_callback_list[syscache_callback_count].arg = arg;
 
-	++cache_callback_count;
+	++syscache_callback_count;
 }
 
 /*
@@ -1180,15 +1224,14 @@ CacheRegisterSyscacheCallback(int cacheid,
  * In this case the called routines should flush all cached state.
  */
 void
-CacheRegisterRelcacheCallback(CacheCallbackFunction func,
+CacheRegisterRelcacheCallback(RelcacheCallbackFunction func,
 							  Datum arg)
 {
-	if (cache_callback_count >= MAX_CACHE_CALLBACKS)
-		elog(FATAL, "out of cache_callback_list slots");
+	if (relcache_callback_count >= MAX_RELCACHE_CALLBACKS)
+		elog(FATAL, "out of relcache_callback_list slots");
 
-	cache_callback_list[cache_callback_count].id = SHAREDINVALRELCACHE_ID;
-	cache_callback_list[cache_callback_count].function = func;
-	cache_callback_list[cache_callback_count].arg = arg;
+	relcache_callback_list[relcache_callback_count].function = func;
+	relcache_callback_list[relcache_callback_count].arg = arg;
 
-	++cache_callback_count;
+	++relcache_callback_count;
 }

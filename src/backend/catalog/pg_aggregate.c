@@ -3,7 +3,7 @@
  * pg_aggregate.c
  *	  routines to support manipulation of the pg_aggregate relation
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,6 +21,7 @@
 #include "catalog/pg_language.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_proc_fn.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "parser/parse_coerce.h"
@@ -29,6 +30,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 
@@ -52,13 +54,14 @@ AggregateCreate(const char *aggName,
 {
 	Relation	aggdesc;
 	HeapTuple	tup;
-	char		nulls[Natts_pg_aggregate];
+	bool		nulls[Natts_pg_aggregate];
 	Datum		values[Natts_pg_aggregate];
 	Form_pg_proc proc;
 	Oid			transfn;
 	Oid			finalfn = InvalidOid;	/* can be omitted */
 	Oid			sortop = InvalidOid;	/* can be omitted */
 	bool		hasPolyArg;
+	bool		hasInternalArg;
 	Oid			rettype;
 	Oid			finaltype;
 	Oid		   *fnArgs;
@@ -76,15 +79,15 @@ AggregateCreate(const char *aggName,
 	if (!aggtransfnName)
 		elog(ERROR, "aggregate must have a transition function");
 
-	/* check for polymorphic arguments */
+	/* check for polymorphic and INTERNAL arguments */
 	hasPolyArg = false;
+	hasInternalArg = false;
 	for (i = 0; i < numArgs; i++)
 	{
 		if (IsPolymorphicType(aggArgTypes[i]))
-		{
 			hasPolyArg = true;
-			break;
-		}
+		else if (aggArgTypes[i] == INTERNALOID)
+			hasInternalArg = true;
 	}
 
 	/*
@@ -175,6 +178,18 @@ AggregateCreate(const char *aggName,
 				 errdetail("An aggregate returning a polymorphic type "
 						   "must have at least one polymorphic argument.")));
 
+	/*
+	 * Also, the return type can't be INTERNAL unless there's at least one
+	 * INTERNAL argument.  This is the same type-safety restriction we enforce
+	 * for regular functions, but at the level of aggregates.  We must test
+	 * this explicitly because we allow INTERNAL as the transtype.
+	 */
+	if (finaltype == INTERNALOID && !hasInternalArg)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+				 errmsg("unsafe use of pseudo-type \"internal\""),
+				 errdetail("A function returning \"internal\" must have at least one \"internal\" argument.")));
+
 	/* handle sortop, if supplied */
 	if (aggsortopName)
 	{
@@ -200,8 +215,9 @@ AggregateCreate(const char *aggName,
 							  INTERNALlanguageId,		/* languageObjectId */
 							  InvalidOid,		/* no validator */
 							  "aggregate_dummy",		/* placeholder proc */
-							  "-",		/* probin */
+							  NULL,		/* probin */
 							  true,		/* isAgg */
+							  false,	/* isWindowFunc */
 							  false,	/* security invoker (currently not
 										 * definable for agg) */
 							  false,	/* isStrict (not needed for agg) */
@@ -212,6 +228,7 @@ AggregateCreate(const char *aggName,
 							  PointerGetDatum(NULL),	/* allParamTypes */
 							  PointerGetDatum(NULL),	/* parameterModes */
 							  PointerGetDatum(NULL),	/* parameterNames */
+							  NIL,		/* parameterDefaults */
 							  PointerGetDatum(NULL),	/* proconfig */
 							  1,	/* procost */
 							  0);		/* prorows */
@@ -223,7 +240,7 @@ AggregateCreate(const char *aggName,
 	/* initialize nulls and values */
 	for (i = 0; i < Natts_pg_aggregate; i++)
 	{
-		nulls[i] = ' ';
+		nulls[i] = false;
 		values[i] = (Datum) NULL;
 	}
 	values[Anum_pg_aggregate_aggfnoid - 1] = ObjectIdGetDatum(procOid);
@@ -232,15 +249,14 @@ AggregateCreate(const char *aggName,
 	values[Anum_pg_aggregate_aggsortop - 1] = ObjectIdGetDatum(sortop);
 	values[Anum_pg_aggregate_aggtranstype - 1] = ObjectIdGetDatum(aggTransType);
 	if (agginitval)
-		values[Anum_pg_aggregate_agginitval - 1] =
-			DirectFunctionCall1(textin, CStringGetDatum(agginitval));
+		values[Anum_pg_aggregate_agginitval - 1] = CStringGetTextDatum(agginitval);
 	else
-		nulls[Anum_pg_aggregate_agginitval - 1] = 'n';
+		nulls[Anum_pg_aggregate_agginitval - 1] = true;
 
 	aggdesc = heap_open(AggregateRelationId, RowExclusiveLock);
 	tupDesc = aggdesc->rd_att;
 
-	tup = heap_formtuple(tupDesc, values, nulls);
+	tup = heap_form_tuple(tupDesc, values, nulls);
 	simple_heap_insert(aggdesc, tup);
 
 	CatalogUpdateIndexes(aggdesc, tup);
@@ -292,6 +308,7 @@ lookup_agg_function(List *fnName,
 {
 	Oid			fnOid;
 	bool		retset;
+	int			nvargs;
 	Oid		   *true_oid_array;
 	FuncDetailCode fdresult;
 	AclResult	aclresult;
@@ -304,9 +321,9 @@ lookup_agg_function(List *fnName,
 	 * function's return value.  it also returns the true argument types to
 	 * the function.
 	 */
-	fdresult = func_get_detail(fnName, NIL, nargs, input_types,
-							   &fnOid, rettype, &retset,
-							   &true_oid_array);
+	fdresult = func_get_detail(fnName, NIL, nargs, input_types, false, false,
+							   &fnOid, rettype, &retset, &nvargs,
+							   &true_oid_array, NULL);
 
 	/* only valid case is a normal function not returning a set */
 	if (fdresult != FUNCDETAIL_NORMAL || !OidIsValid(fnOid))

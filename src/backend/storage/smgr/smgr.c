@@ -6,7 +6,7 @@
  *	  All file system operations in POSTGRES dispatch through these
  *	  routines.
  *
- * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -17,15 +17,13 @@
  */
 #include "postgres.h"
 
-#include "access/xact.h"
 #include "access/xlogutils.h"
+#include "catalog/catalog.h"
 #include "commands/tablespace.h"
 #include "storage/bufmgr.h"
-#include "storage/freespace.h"
 #include "storage/ipc.h"
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
-#include "utils/memutils.h"
 
 
 /*
@@ -42,21 +40,24 @@ typedef struct f_smgr
 {
 	void		(*smgr_init) (void);	/* may be NULL */
 	void		(*smgr_shutdown) (void);		/* may be NULL */
-	void		(*smgr_close) (SMgrRelation reln);
-	void		(*smgr_create) (SMgrRelation reln, bool isRedo);
-	void		(*smgr_unlink) (RelFileNode rnode, bool isRedo);
-	void		(*smgr_extend) (SMgrRelation reln, BlockNumber blocknum,
-											char *buffer, bool isTemp);
-	void		(*smgr_read) (SMgrRelation reln, BlockNumber blocknum,
-										  char *buffer);
-	void		(*smgr_write) (SMgrRelation reln, BlockNumber blocknum,
-										   char *buffer, bool isTemp);
-	BlockNumber (*smgr_nblocks) (SMgrRelation reln);
-	void		(*smgr_truncate) (SMgrRelation reln, BlockNumber nblocks,
-											  bool isTemp);
-	void		(*smgr_immedsync) (SMgrRelation reln);
-	void		(*smgr_commit) (void);	/* may be NULL */
-	void		(*smgr_abort) (void);	/* may be NULL */
+	void		(*smgr_close) (SMgrRelation reln, ForkNumber forknum);
+	void		(*smgr_create) (SMgrRelation reln, ForkNumber forknum,
+											bool isRedo);
+	bool		(*smgr_exists) (SMgrRelation reln, ForkNumber forknum);
+	void		(*smgr_unlink) (RelFileNode rnode, ForkNumber forknum,
+											bool isRedo);
+	void		(*smgr_extend) (SMgrRelation reln, ForkNumber forknum,
+							BlockNumber blocknum, char *buffer, bool isTemp);
+	void		(*smgr_prefetch) (SMgrRelation reln, ForkNumber forknum,
+											  BlockNumber blocknum);
+	void		(*smgr_read) (SMgrRelation reln, ForkNumber forknum,
+										  BlockNumber blocknum, char *buffer);
+	void		(*smgr_write) (SMgrRelation reln, ForkNumber forknum,
+							BlockNumber blocknum, char *buffer, bool isTemp);
+	BlockNumber (*smgr_nblocks) (SMgrRelation reln, ForkNumber forknum);
+	void		(*smgr_truncate) (SMgrRelation reln, ForkNumber forknum,
+										   BlockNumber nblocks, bool isTemp);
+	void		(*smgr_immedsync) (SMgrRelation reln, ForkNumber forknum);
 	void		(*smgr_pre_ckpt) (void);		/* may be NULL */
 	void		(*smgr_sync) (void);	/* may be NULL */
 	void		(*smgr_post_ckpt) (void);		/* may be NULL */
@@ -65,9 +66,9 @@ typedef struct f_smgr
 
 static const f_smgr smgrsw[] = {
 	/* magnetic disk */
-	{mdinit, NULL, mdclose, mdcreate, mdunlink, mdextend,
-		mdread, mdwrite, mdnblocks, mdtruncate, mdimmedsync,
-		NULL, NULL, mdpreckpt, mdsync, mdpostckpt
+	{mdinit, NULL, mdclose, mdcreate, mdexists, mdunlink, mdextend,
+		mdprefetch, mdread, mdwrite, mdnblocks, mdtruncate, mdimmedsync,
+		mdpreckpt, mdsync, mdpostckpt
 	}
 };
 
@@ -79,66 +80,10 @@ static const int NSmgr = lengthof(smgrsw);
  */
 static HTAB *SMgrRelationHash = NULL;
 
-/*
- * We keep a list of all relations (represented as RelFileNode values)
- * that have been created or deleted in the current transaction.  When
- * a relation is created, we create the physical file immediately, but
- * remember it so that we can delete the file again if the current
- * transaction is aborted.	Conversely, a deletion request is NOT
- * executed immediately, but is just entered in the list.  When and if
- * the transaction commits, we can delete the physical file.
- *
- * To handle subtransactions, every entry is marked with its transaction
- * nesting level.  At subtransaction commit, we reassign the subtransaction's
- * entries to the parent nesting level.  At subtransaction abort, we can
- * immediately execute the abort-time actions for all entries of the current
- * nesting level.
- *
- * NOTE: the list is kept in TopMemoryContext to be sure it won't disappear
- * unbetimes.  It'd probably be OK to keep it in TopTransactionContext,
- * but I'm being paranoid.
- */
-
-typedef struct PendingRelDelete
-{
-	RelFileNode relnode;		/* relation that may need to be deleted */
-	int			which;			/* which storage manager? */
-	bool		isTemp;			/* is it a temporary relation? */
-	bool		atCommit;		/* T=delete at commit; F=delete at abort */
-	int			nestLevel;		/* xact nesting level of request */
-	struct PendingRelDelete *next;		/* linked-list link */
-} PendingRelDelete;
-
-static PendingRelDelete *pendingDeletes = NULL; /* head of linked list */
-
-
-/*
- * Declarations for smgr-related XLOG records
- *
- * Note: we log file creation and truncation here, but logging of deletion
- * actions is handled by xact.c, because it is part of transaction commit.
- */
-
-/* XLOG gives us high 4 bits */
-#define XLOG_SMGR_CREATE	0x10
-#define XLOG_SMGR_TRUNCATE	0x20
-
-typedef struct xl_smgr_create
-{
-	RelFileNode rnode;
-} xl_smgr_create;
-
-typedef struct xl_smgr_truncate
-{
-	BlockNumber blkno;
-	RelFileNode rnode;
-} xl_smgr_truncate;
-
-
 /* local function prototypes */
 static void smgrshutdown(int code, Datum arg);
-static void smgr_internal_unlink(RelFileNode rnode, int which,
-					 bool isTemp, bool isRedo);
+static void smgr_internal_unlink(RelFileNode rnode, ForkNumber forknum,
+					 int which, bool isTemp, bool isRedo);
 
 
 /*
@@ -211,10 +156,15 @@ smgropen(RelFileNode rnode)
 	/* Initialize it if not present before */
 	if (!found)
 	{
+		int			forknum;
+
 		/* hash_search already filled in the lookup key */
 		reln->smgr_owner = NULL;
 		reln->smgr_which = 0;	/* we only have md.c at present */
-		reln->md_fd = NULL;		/* mark it not open */
+
+		/* mark it not open */
+		for (forknum = 0; forknum <= MAX_FORKNUM; forknum++)
+			reln->md_fd[forknum] = NULL;
 	}
 
 	return reln;
@@ -244,14 +194,25 @@ smgrsetowner(SMgrRelation *owner, SMgrRelation reln)
 }
 
 /*
+ *	smgrexists() -- Does the underlying file for a fork exist?
+ */
+bool
+smgrexists(SMgrRelation reln, ForkNumber forknum)
+{
+	return (*(smgrsw[reln->smgr_which].smgr_exists)) (reln, forknum);
+}
+
+/*
  *	smgrclose() -- Close and delete an SMgrRelation object.
  */
 void
 smgrclose(SMgrRelation reln)
 {
 	SMgrRelation *owner;
+	ForkNumber	forknum;
 
-	(*(smgrsw[reln->smgr_which].smgr_close)) (reln);
+	for (forknum = 0; forknum <= MAX_FORKNUM; forknum++)
+		(*(smgrsw[reln->smgr_which].smgr_close)) (reln, forknum);
 
 	owner = reln->smgr_owner;
 
@@ -315,20 +276,21 @@ smgrclosenode(RelFileNode rnode)
  *	smgrcreate() -- Create a new relation.
  *
  *		Given an already-created (but presumably unused) SMgrRelation,
- *		cause the underlying disk file or other storage to be created.
+ *		cause the underlying disk file or other storage for the fork
+ *		to be created.
  *
  *		If isRedo is true, it is okay for the underlying file to exist
- *		already because we are in a WAL replay sequence.  In this case
- *		we should make no PendingRelDelete entry; the WAL sequence will
- *		tell whether to drop the file.
+ *		already because we are in a WAL replay sequence.
  */
 void
-smgrcreate(SMgrRelation reln, bool isTemp, bool isRedo)
+smgrcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 {
-	XLogRecPtr	lsn;
-	XLogRecData rdata;
-	xl_smgr_create xlrec;
-	PendingRelDelete *pending;
+	/*
+	 * Exit quickly in WAL replay mode if we've already opened the file. If
+	 * it's open, it surely must exist.
+	 */
+	if (isRedo && reln->md_fd[forknum] != NULL)
+		return;
 
 	/*
 	 * We may be using the target table space for the first time in this
@@ -343,114 +305,43 @@ smgrcreate(SMgrRelation reln, bool isTemp, bool isRedo)
 							reln->smgr_rnode.dbNode,
 							isRedo);
 
-	(*(smgrsw[reln->smgr_which].smgr_create)) (reln, isRedo);
-
-	if (isRedo)
-		return;
-
-	/*
-	 * Make an XLOG entry showing the file creation.  If we abort, the file
-	 * will be dropped at abort time.
-	 */
-	xlrec.rnode = reln->smgr_rnode;
-
-	rdata.data = (char *) &xlrec;
-	rdata.len = sizeof(xlrec);
-	rdata.buffer = InvalidBuffer;
-	rdata.next = NULL;
-
-	lsn = XLogInsert(RM_SMGR_ID, XLOG_SMGR_CREATE, &rdata);
-
-	/* Add the relation to the list of stuff to delete at abort */
-	pending = (PendingRelDelete *)
-		MemoryContextAlloc(TopMemoryContext, sizeof(PendingRelDelete));
-	pending->relnode = reln->smgr_rnode;
-	pending->which = reln->smgr_which;
-	pending->isTemp = isTemp;
-	pending->atCommit = false;	/* delete if abort */
-	pending->nestLevel = GetCurrentTransactionNestLevel();
-	pending->next = pendingDeletes;
-	pendingDeletes = pending;
-}
-
-/*
- *	smgrscheduleunlink() -- Schedule unlinking a relation at xact commit.
- *
- *		The relation is marked to be removed from the store if we
- *		successfully commit the current transaction.
- *
- * This also implies smgrclose() on the SMgrRelation object.
- */
-void
-smgrscheduleunlink(SMgrRelation reln, bool isTemp)
-{
-	PendingRelDelete *pending;
-
-	/* Add the relation to the list of stuff to delete at commit */
-	pending = (PendingRelDelete *)
-		MemoryContextAlloc(TopMemoryContext, sizeof(PendingRelDelete));
-	pending->relnode = reln->smgr_rnode;
-	pending->which = reln->smgr_which;
-	pending->isTemp = isTemp;
-	pending->atCommit = true;	/* delete if commit */
-	pending->nestLevel = GetCurrentTransactionNestLevel();
-	pending->next = pendingDeletes;
-	pendingDeletes = pending;
-
-	/*
-	 * NOTE: if the relation was created in this transaction, it will now be
-	 * present in the pending-delete list twice, once with atCommit true and
-	 * once with atCommit false.  Hence, it will be physically deleted at end
-	 * of xact in either case (and the other entry will be ignored by
-	 * smgrDoPendingDeletes, so no error will occur).  We could instead remove
-	 * the existing list entry and delete the physical file immediately, but
-	 * for now I'll keep the logic simple.
-	 */
-
-	/* Now close the file and throw away the hashtable entry */
-	smgrclose(reln);
+	(*(smgrsw[reln->smgr_which].smgr_create)) (reln, forknum, isRedo);
 }
 
 /*
  *	smgrdounlink() -- Immediately unlink a relation.
  *
- *		The relation is removed from the store.  This should not be used
- *		during transactional operations, since it can't be undone.
+ *		The specified fork of the relation is removed from the store.  This
+ *		should not be used during transactional operations, since it can't be
+ *		undone.
  *
  *		If isRedo is true, it is okay for the underlying file to be gone
  *		already.
- *
- * This also implies smgrclose() on the SMgrRelation object.
  */
 void
-smgrdounlink(SMgrRelation reln, bool isTemp, bool isRedo)
+smgrdounlink(SMgrRelation reln, ForkNumber forknum, bool isTemp, bool isRedo)
 {
 	RelFileNode rnode = reln->smgr_rnode;
 	int			which = reln->smgr_which;
 
-	/* Close the file and throw away the hashtable entry */
-	smgrclose(reln);
+	/* Close the fork */
+	(*(smgrsw[which].smgr_close)) (reln, forknum);
 
-	smgr_internal_unlink(rnode, which, isTemp, isRedo);
+	smgr_internal_unlink(rnode, forknum, which, isTemp, isRedo);
 }
 
 /*
  * Shared subroutine that actually does the unlink ...
  */
 static void
-smgr_internal_unlink(RelFileNode rnode, int which, bool isTemp, bool isRedo)
+smgr_internal_unlink(RelFileNode rnode, ForkNumber forknum,
+					 int which, bool isTemp, bool isRedo)
 {
 	/*
 	 * Get rid of any remaining buffers for the relation.  bufmgr will just
 	 * drop them without bothering to write the contents.
 	 */
-	DropRelFileNodeBuffers(rnode, isTemp, 0);
-
-	/*
-	 * Tell the free space map to forget this relation.  It won't be accessed
-	 * any more anyway, but we may as well recycle the map space quickly.
-	 */
-	FreeSpaceMapForgetRel(&rnode);
+	DropRelFileNodeBuffers(rnode, forknum, isTemp, 0);
 
 	/*
 	 * It'd be nice to tell the stats collector to forget it immediately, too.
@@ -466,7 +357,7 @@ smgr_internal_unlink(RelFileNode rnode, int which, bool isTemp, bool isRedo)
 	 * ERROR, because we've already decided to commit or abort the current
 	 * xact.
 	 */
-	(*(smgrsw[which].smgr_unlink)) (rnode, isRedo);
+	(*(smgrsw[which].smgr_unlink)) (rnode, forknum, isRedo);
 }
 
 /*
@@ -479,9 +370,20 @@ smgr_internal_unlink(RelFileNode rnode, int which, bool isTemp, bool isRedo)
  *		causes intervening file space to become filled with zeroes.
  */
 void
-smgrextend(SMgrRelation reln, BlockNumber blocknum, char *buffer, bool isTemp)
+smgrextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+		   char *buffer, bool isTemp)
 {
-	(*(smgrsw[reln->smgr_which].smgr_extend)) (reln, blocknum, buffer, isTemp);
+	(*(smgrsw[reln->smgr_which].smgr_extend)) (reln, forknum, blocknum,
+											   buffer, isTemp);
+}
+
+/*
+ *	smgrprefetch() -- Initiate asynchronous read of the specified block of a relation.
+ */
+void
+smgrprefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+{
+	(*(smgrsw[reln->smgr_which].smgr_prefetch)) (reln, forknum, blocknum);
 }
 
 /*
@@ -493,9 +395,10 @@ smgrextend(SMgrRelation reln, BlockNumber blocknum, char *buffer, bool isTemp)
  *		return pages in the format that POSTGRES expects.
  */
 void
-smgrread(SMgrRelation reln, BlockNumber blocknum, char *buffer)
+smgrread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+		 char *buffer)
 {
-	(*(smgrsw[reln->smgr_which].smgr_read)) (reln, blocknum, buffer);
+	(*(smgrsw[reln->smgr_which].smgr_read)) (reln, forknum, blocknum, buffer);
 }
 
 /*
@@ -514,9 +417,11 @@ smgrread(SMgrRelation reln, BlockNumber blocknum, char *buffer)
  *		made to fsync the write before checkpointing.
  */
 void
-smgrwrite(SMgrRelation reln, BlockNumber blocknum, char *buffer, bool isTemp)
+smgrwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+		  char *buffer, bool isTemp)
 {
-	(*(smgrsw[reln->smgr_which].smgr_write)) (reln, blocknum, buffer, isTemp);
+	(*(smgrsw[reln->smgr_which].smgr_write)) (reln, forknum, blocknum,
+											  buffer, isTemp);
 }
 
 /*
@@ -524,9 +429,9 @@ smgrwrite(SMgrRelation reln, BlockNumber blocknum, char *buffer, bool isTemp)
  *					 supplied relation.
  */
 BlockNumber
-smgrnblocks(SMgrRelation reln)
+smgrnblocks(SMgrRelation reln, ForkNumber forknum)
 {
-	return (*(smgrsw[reln->smgr_which].smgr_nblocks)) (reln);
+	return (*(smgrsw[reln->smgr_which].smgr_nblocks)) (reln, forknum);
 }
 
 /*
@@ -534,43 +439,18 @@ smgrnblocks(SMgrRelation reln)
  *					  of blocks
  */
 void
-smgrtruncate(SMgrRelation reln, BlockNumber nblocks, bool isTemp)
+smgrtruncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks,
+			 bool isTemp)
 {
 	/*
 	 * Get rid of any buffers for the about-to-be-deleted blocks. bufmgr will
 	 * just drop them without bothering to write the contents.
 	 */
-	DropRelFileNodeBuffers(reln->smgr_rnode, isTemp, nblocks);
-
-	/*
-	 * Tell the free space map to forget anything it may have stored for the
-	 * about-to-be-deleted blocks.	We want to be sure it won't return bogus
-	 * block numbers later on.
-	 */
-	FreeSpaceMapTruncateRel(&reln->smgr_rnode, nblocks);
+	DropRelFileNodeBuffers(reln->smgr_rnode, forknum, isTemp, nblocks);
 
 	/* Do the truncation */
-	(*(smgrsw[reln->smgr_which].smgr_truncate)) (reln, nblocks, isTemp);
-
-	if (!isTemp)
-	{
-		/*
-		 * Make an XLOG entry showing the file truncation.
-		 */
-		XLogRecPtr	lsn;
-		XLogRecData rdata;
-		xl_smgr_truncate xlrec;
-
-		xlrec.blkno = nblocks;
-		xlrec.rnode = reln->smgr_rnode;
-
-		rdata.data = (char *) &xlrec;
-		rdata.len = sizeof(xlrec);
-		rdata.buffer = InvalidBuffer;
-		rdata.next = NULL;
-
-		lsn = XLogInsert(RM_SMGR_ID, XLOG_SMGR_TRUNCATE, &rdata);
-	}
+	(*(smgrsw[reln->smgr_which].smgr_truncate)) (reln, forknum, nblocks,
+												 isTemp);
 }
 
 /*
@@ -597,187 +477,11 @@ smgrtruncate(SMgrRelation reln, BlockNumber nblocks, bool isTemp)
  *		otherwise the sync is not very meaningful.
  */
 void
-smgrimmedsync(SMgrRelation reln)
+smgrimmedsync(SMgrRelation reln, ForkNumber forknum)
 {
-	(*(smgrsw[reln->smgr_which].smgr_immedsync)) (reln);
+	(*(smgrsw[reln->smgr_which].smgr_immedsync)) (reln, forknum);
 }
 
-
-/*
- *	PostPrepare_smgr -- Clean up after a successful PREPARE
- *
- * What we have to do here is throw away the in-memory state about pending
- * relation deletes.  It's all been recorded in the 2PC state file and
- * it's no longer smgr's job to worry about it.
- */
-void
-PostPrepare_smgr(void)
-{
-	PendingRelDelete *pending;
-	PendingRelDelete *next;
-
-	for (pending = pendingDeletes; pending != NULL; pending = next)
-	{
-		next = pending->next;
-		pendingDeletes = next;
-		/* must explicitly free the list entry */
-		pfree(pending);
-	}
-}
-
-
-/*
- *	smgrDoPendingDeletes() -- Take care of relation deletes at end of xact.
- *
- * This also runs when aborting a subxact; we want to clean up a failed
- * subxact immediately.
- */
-void
-smgrDoPendingDeletes(bool isCommit)
-{
-	int			nestLevel = GetCurrentTransactionNestLevel();
-	PendingRelDelete *pending;
-	PendingRelDelete *prev;
-	PendingRelDelete *next;
-
-	prev = NULL;
-	for (pending = pendingDeletes; pending != NULL; pending = next)
-	{
-		next = pending->next;
-		if (pending->nestLevel < nestLevel)
-		{
-			/* outer-level entries should not be processed yet */
-			prev = pending;
-		}
-		else
-		{
-			/* unlink list entry first, so we don't retry on failure */
-			if (prev)
-				prev->next = next;
-			else
-				pendingDeletes = next;
-			/* do deletion if called for */
-			if (pending->atCommit == isCommit)
-				smgr_internal_unlink(pending->relnode,
-									 pending->which,
-									 pending->isTemp,
-									 false);
-			/* must explicitly free the list entry */
-			pfree(pending);
-			/* prev does not change */
-		}
-	}
-}
-
-/*
- * smgrGetPendingDeletes() -- Get a list of relations to be deleted.
- *
- * The return value is the number of relations scheduled for termination.
- * *ptr is set to point to a freshly-palloc'd array of RelFileNodes.
- * If there are no relations to be deleted, *ptr is set to NULL.
- *
- * If haveNonTemp isn't NULL, the bool it points to gets set to true if
- * there is any non-temp table pending to be deleted; false if not.
- *
- * Note that the list does not include anything scheduled for termination
- * by upper-level transactions.
- */
-int
-smgrGetPendingDeletes(bool forCommit, RelFileNode **ptr, bool *haveNonTemp)
-{
-	int			nestLevel = GetCurrentTransactionNestLevel();
-	int			nrels;
-	RelFileNode *rptr;
-	PendingRelDelete *pending;
-
-	nrels = 0;
-	if (haveNonTemp)
-		*haveNonTemp = false;
-	for (pending = pendingDeletes; pending != NULL; pending = pending->next)
-	{
-		if (pending->nestLevel >= nestLevel && pending->atCommit == forCommit)
-			nrels++;
-	}
-	if (nrels == 0)
-	{
-		*ptr = NULL;
-		return 0;
-	}
-	rptr = (RelFileNode *) palloc(nrels * sizeof(RelFileNode));
-	*ptr = rptr;
-	for (pending = pendingDeletes; pending != NULL; pending = pending->next)
-	{
-		if (pending->nestLevel >= nestLevel && pending->atCommit == forCommit)
-			*rptr++ = pending->relnode;
-		if (haveNonTemp && !pending->isTemp)
-			*haveNonTemp = true;
-	}
-	return nrels;
-}
-
-/*
- * AtSubCommit_smgr() --- Take care of subtransaction commit.
- *
- * Reassign all items in the pending-deletes list to the parent transaction.
- */
-void
-AtSubCommit_smgr(void)
-{
-	int			nestLevel = GetCurrentTransactionNestLevel();
-	PendingRelDelete *pending;
-
-	for (pending = pendingDeletes; pending != NULL; pending = pending->next)
-	{
-		if (pending->nestLevel >= nestLevel)
-			pending->nestLevel = nestLevel - 1;
-	}
-}
-
-/*
- * AtSubAbort_smgr() --- Take care of subtransaction abort.
- *
- * Delete created relations and forget about deleted relations.
- * We can execute these operations immediately because we know this
- * subtransaction will not commit.
- */
-void
-AtSubAbort_smgr(void)
-{
-	smgrDoPendingDeletes(false);
-}
-
-/*
- *	smgrcommit() -- Prepare to commit changes made during the current
- *					transaction.
- *
- *		This is called before we actually commit.
- */
-void
-smgrcommit(void)
-{
-	int			i;
-
-	for (i = 0; i < NSmgr; i++)
-	{
-		if (smgrsw[i].smgr_commit)
-			(*(smgrsw[i].smgr_commit)) ();
-	}
-}
-
-/*
- *	smgrabort() -- Clean up after transaction abort.
- */
-void
-smgrabort(void)
-{
-	int			i;
-
-	for (i = 0; i < NSmgr; i++)
-	{
-		if (smgrsw[i].smgr_abort)
-			(*(smgrsw[i].smgr_abort)) ();
-	}
-}
 
 /*
  *	smgrpreckpt() -- Prepare for checkpoint.
@@ -822,86 +526,4 @@ smgrpostckpt(void)
 		if (smgrsw[i].smgr_post_ckpt)
 			(*(smgrsw[i].smgr_post_ckpt)) ();
 	}
-}
-
-
-void
-smgr_redo(XLogRecPtr lsn, XLogRecord *record)
-{
-	uint8		info = record->xl_info & ~XLR_INFO_MASK;
-
-	if (info == XLOG_SMGR_CREATE)
-	{
-		xl_smgr_create *xlrec = (xl_smgr_create *) XLogRecGetData(record);
-		SMgrRelation reln;
-
-		reln = smgropen(xlrec->rnode);
-		smgrcreate(reln, false, true);
-	}
-	else if (info == XLOG_SMGR_TRUNCATE)
-	{
-		xl_smgr_truncate *xlrec = (xl_smgr_truncate *) XLogRecGetData(record);
-		SMgrRelation reln;
-
-		reln = smgropen(xlrec->rnode);
-
-		/*
-		 * Forcibly create relation if it doesn't exist (which suggests that
-		 * it was dropped somewhere later in the WAL sequence).  As in
-		 * XLogOpenRelation, we prefer to recreate the rel and replay the log
-		 * as best we can until the drop is seen.
-		 */
-		smgrcreate(reln, false, true);
-
-		/* Can't use smgrtruncate because it would try to xlog */
-
-		/*
-		 * First, force bufmgr to drop any buffers it has for the to-be-
-		 * truncated blocks.  We must do this, else subsequent XLogReadBuffer
-		 * operations will not re-extend the file properly.
-		 */
-		DropRelFileNodeBuffers(xlrec->rnode, false, xlrec->blkno);
-
-		/*
-		 * Tell the free space map to forget anything it may have stored for
-		 * the about-to-be-deleted blocks.	We want to be sure it won't return
-		 * bogus block numbers later on.
-		 */
-		FreeSpaceMapTruncateRel(&reln->smgr_rnode, xlrec->blkno);
-
-		/* Do the truncation */
-		(*(smgrsw[reln->smgr_which].smgr_truncate)) (reln,
-													 xlrec->blkno,
-													 false);
-
-		/* Also tell xlogutils.c about it */
-		XLogTruncateRelation(xlrec->rnode, xlrec->blkno);
-	}
-	else
-		elog(PANIC, "smgr_redo: unknown op code %u", info);
-}
-
-void
-smgr_desc(StringInfo buf, uint8 xl_info, char *rec)
-{
-	uint8		info = xl_info & ~XLR_INFO_MASK;
-
-	if (info == XLOG_SMGR_CREATE)
-	{
-		xl_smgr_create *xlrec = (xl_smgr_create *) rec;
-
-		appendStringInfo(buf, "file create: %u/%u/%u",
-						 xlrec->rnode.spcNode, xlrec->rnode.dbNode,
-						 xlrec->rnode.relNode);
-	}
-	else if (info == XLOG_SMGR_TRUNCATE)
-	{
-		xl_smgr_truncate *xlrec = (xl_smgr_truncate *) rec;
-
-		appendStringInfo(buf, "file truncate: %u/%u/%u to %u blocks",
-						 xlrec->rnode.spcNode, xlrec->rnode.dbNode,
-						 xlrec->rnode.relNode, xlrec->blkno);
-	}
-	else
-		appendStringInfo(buf, "UNKNOWN");
 }
