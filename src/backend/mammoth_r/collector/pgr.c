@@ -1306,7 +1306,8 @@ PGRDumpHeaders(int cmd_type, char *relpath, int command_id, int natts, bool tran
 
 /*
  * Add a relation to the current table list, checking if it should raise dump
- * (not empty) or not
+ * (not empty) or not.
+ * XXX: Alvaro thinks that we have to get rid of this function.
  */
 void
 AddRelationToMasterTableList(Relation rel, bool enable)
@@ -1321,8 +1322,7 @@ AddRelationToMasterTableList(Relation rel, bool enable)
 		HeapScanDesc	scan;
 		Snapshot		current;
 	
-		current = GetTransactionSnapshot();
-		PushActiveSnapshot(current);
+		current = RegisterSnapshot(GetTransactionSnapshot());
 
 		scan = heap_beginscan(rel, current, 0, NULL);
 
@@ -1334,7 +1334,7 @@ AddRelationToMasterTableList(Relation rel, bool enable)
 
 		heap_endscan(scan);
 		
-		PopActiveSnapshot();
+		UnregisterSnapshot(current);
 		
 	}
 	else
@@ -1431,7 +1431,7 @@ make_diff_tuple(HeapTuple oldtuple, HeapTuple newtuple,
 	 */
 	for (i = 0, j = -1; i < new_natts; i++)
 	{
-		Oid				cmp_oid;
+		Oid				cmp_opid;
 		RegProcedure	cmp_proc;
 
 		if (tupdesc->attrs[i]->attisdropped)
@@ -1508,7 +1508,7 @@ make_diff_tuple(HeapTuple oldtuple, HeapTuple newtuple,
 		
 		cmp_proc = get_opcode(cmp_opid);
 		
-		if (!RegProcedureValid(cmp_proc))
+		if (!RegProcedureIsValid(cmp_proc))
 		{
 			sendmask[j] = true;
 			send_nulls[i] = false;

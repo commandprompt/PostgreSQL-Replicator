@@ -102,6 +102,7 @@ PGRDumpAll(MCPQueue *master_mcpq)
 /* 
  * Add roles and members to the dump. Note that the relation locking order 
  * is important, keep it coherent with the code in users.c to avoid deadlocks.
+ * MERGE: GetTransactionSnapshot was replaced with SnapshotNow for catalog access.
  */
 static void
 DumpRoles(MCPQueue *q)
@@ -135,9 +136,6 @@ DumpRoles(MCPQueue *q)
 	/* Put transaction file to the queue */
 	LWLockAcquire(ReplicationCommitLock, LW_EXCLUSIVE);
 
-	snap = GetTransactionSnapshot();
-	PushActiveSnapshot(snap);
-
 	txdata = MCPLocalQueueGetFile(MasterLocalQueue);
 	recno = MCPQueueCommit(q, txdata, InvalidRecno);
 
@@ -148,7 +146,7 @@ DumpRoles(MCPQueue *q)
 
 	/* get list of replicated roles from repl_slave_roles */
 	replRolesRel = heap_open(ReplSlaveRolesRelationId, AccessShareLock);
-	scan = heap_beginscan(replRolesRel, snap, 0, NULL);
+	scan = heap_beginscan(replRolesRel, SnapshotNow, 0, NULL);
 
 	while (HeapTupleIsValid(scantuple = 
 							heap_getnext(scan, ForwardScanDirection)))
@@ -244,8 +242,6 @@ DumpRoles(MCPQueue *q)
 	}
 	MCPLocalQueueSwitchFile(MasterLocalQueue);
 
-	PopActiveSnapshot();
-
 	CommitTransactionCommand();
 	TXLOGSetCommitted(recno);
 	
@@ -285,12 +281,11 @@ PGRDumpTables(MCPQueue *queue)
 
 	MemoryContextSwitchTo(dumpcxt);
 	
-	snap = GetTransactionSnapshot();
-	PushActiveSnapshot(snap);
+	snap = RegisterSnapshot(GetTransactionSnapshot());
 	
 	relids = get_replicated_relids(snap);
 	
-	PopActiveSnapshot();
+	UnregisterSnapshot(snap);
 
 	foreach(cell, relids)
 	{
@@ -300,8 +295,7 @@ PGRDumpTables(MCPQueue *queue)
 		ullong		recno;
 
 		LWLockAcquire(ReplicationCommitLock, LW_EXCLUSIVE);
-		snap = GetTransactionSnapshot();
-		PushActiveSnapshot(snap);
+		snap = RegisterSnapshot(GetTransactionSnapshot());
 
 		data_file = MCPLocalQueueGetFile(MasterLocalQueue);
 		recno = MCPQueueCommit(queue, data_file, InvalidRecno);
@@ -312,8 +306,11 @@ PGRDumpTables(MCPQueue *queue)
 
 		/* the table does not exist anymore -- skip it */
 		if (!RelationIsValid(rel))
+		{
+			/* Avoid leaking a snapshot by unregistering it first */
+			UnregisterSnapshot(snap);
 			continue;
-
+		}
 		LockRelation(rel, ShareUpdateExclusiveLock);
 
 		if (rel->rd_rel->relkind == RELKIND_SEQUENCE)
@@ -338,7 +335,7 @@ PGRDumpTables(MCPQueue *queue)
 		/* Create a new file with the original path for the local queue. */
 		MCPLocalQueueSwitchFile(MasterLocalQueue);
 		
-		PopActiveSnapshot();
+		UnregisterSnapshot(snap);
 
 		CommitTransactionCommand();
 

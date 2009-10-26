@@ -115,7 +115,7 @@ get_catalog_relids(List *relids)
  * This is quite straightforward -- scan pg_catalog.repl_relations and return
  * the mentioned relids that have enable=true.  Note: we do not include the
  * replication catalogs in this list.
- * XXX: can we get rid of the only parameter by calling GetTransactionSnapshot() ?
+ * XXX: can we use SnapshotNow and remove the only parameter?
  */
 List *
 get_replicated_relids(Snapshot snap)
@@ -165,8 +165,7 @@ get_replicated_relids(Snapshot snap)
  *
  * Here we scan pg_catalog.repl_slave_relations and look for tuples with the
  * given slave ID.
- * MERGE: usage of SerializableSnapshot has been replaced to GetTransactionSnapshot calls.
- * Why both SnapshotNow and CurrentSnapshot are used in this file ?
+ * MERGE: SerializableSnapshot was replaced by SnapshotNow for catalog access.
  */
 List *
 get_slave_replicated_relids(int slave)
@@ -176,9 +175,6 @@ get_slave_replicated_relids(int slave)
 	HeapTuple	tuple;
 	List	   *relids = NIL;
 	ScanKeyData key[2];
-	Snapshot 	CurrentSnapshot = GetTransactionSnapshot();
-
-	Assert(CurrentSnapshot != NULL);
 
 	ScanKeyInit(&key[0],
 				Anum_repl_slave_relations_slave,
@@ -190,7 +186,7 @@ get_slave_replicated_relids(int slave)
 				BoolGetDatum(true));
 
 	rels = heap_open(ReplSlaveRelationsId, AccessShareLock);
-	scan = systable_beginscan(rels, InvalidOid, false, CurrentSnapshot,
+	scan = systable_beginscan(rels, InvalidOid, false, SnapshotNow,
 							  2, key);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
