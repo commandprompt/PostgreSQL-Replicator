@@ -16,10 +16,4 @@ OBJS = mcp_api.o mcp_queue.o mcp_compress.o \
    	   mcp_connection.o mcp_file.o common_tables.o \
 	   backend_tables.o mcp_lists.o txlog.o
 
-all: SUBSYS.o
-
-SUBSYS.o: $(OBJS)
-	$(LD) $(LDREL) $(LDOUT) SUBSYS.o $(OBJS)
-
-clean:
-	rm -f SUBSYS.o $(OBJS)
+include $(top_srcdir)/src/backend/common.mk

@@ -14,17 +14,4 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = pgr.o master.o slave.o promotion.o repl_tuples.o common.o
 
-all: SUBSYS.o
-
-SUBSYS.o: $(OBJS)
-	$(LD) $(LDREL) $(LDOUT) SUBSYS.o $(OBJS)
-
-dep depend:
-	$(CC) -MM $(CFLAGS) *.c >depend
-
-clean:
-	rm -f SUBSYS.o $(OBJS)
-
-ifeq (depend,$(wildcard depend))
-include depend
-endif
+include $(top_srcdir)/src/backend/common.mk
