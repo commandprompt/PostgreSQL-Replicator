@@ -487,23 +487,4 @@ DATA(insert ( 1259 tableoid			26 0  4  -7 0 -1 -1 t p i t f f t 0 _null_));
 { 4552, {"authkey"},  25, -1,		   -1, 4, 0, -1, -1, false, 'x', 'i', false, false, false, true, 0 }, \
 { 4552, {"ssl"},	  16, -1,		    1, 5, 0, -1, -1,  true, 'p', 'c',  true, false, false, true, 0 }
 
-#define Natts_pg_attribute				17
-#define Anum_pg_attribute_attrelid		1
-#define Anum_pg_attribute_attname		2
-#define Anum_pg_attribute_atttypid		3
-#define Anum_pg_attribute_attstattarget 4
-#define Anum_pg_attribute_attlen		5
-#define Anum_pg_attribute_attnum		6
-#define Anum_pg_attribute_attndims		7
-#define Anum_pg_attribute_attcacheoff	8
-#define Anum_pg_attribute_atttypmod		9
-#define Anum_pg_attribute_attbyval		10
-#define Anum_pg_attribute_attstorage	11
-#define Anum_pg_attribute_attalign		12
-#define Anum_pg_attribute_attnotnull	13
-#define Anum_pg_attribute_atthasdef		14
-#define Anum_pg_attribute_attisdropped	15
-#define Anum_pg_attribute_attislocal	16
-#define Anum_pg_attribute_attinhcount	17
-
 #endif   /* PG_ATTRIBUTE_H */

@@ -882,14 +882,15 @@ BuildFlatFiles(bool database_only)
 	rnode.spcNode = GLOBALTABLESPACE_OID;
 	rnode.dbNode = 0;
 	rnode.relNode = ReplForwarderId;
-	rel_fw = XLogOpenRelation(rnode);
+	rel_fw = CreateFakeRelcacheEntry(rnode);
 	/*
 	 * XLogOpenRelation does not build a descriptor, but
 	 * write_forwarder_file needs it, so we need to construct one manually.
 	 */
 	rel_fw->rd_att = GetReplForwarderDescriptor();
 	write_forwarder_file(rel_fw);
-
+	FreeFakeRelcacheEntry(rel_fw);
+	
 	CurrentResourceOwner = NULL;
 	ResourceOwnerDelete(owner);
 }

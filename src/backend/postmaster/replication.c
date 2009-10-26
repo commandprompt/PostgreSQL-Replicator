@@ -44,6 +44,7 @@
 #include "utils/ps_status.h"
 #include "utils/relcache.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 #include <signal.h>
 #include <sys/stat.h>

@@ -46,7 +46,9 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
 static void		PGRUpdateLORef(int lo_oid, int cmd, 
@@ -1317,8 +1319,12 @@ AddRelationToMasterTableList(Relation rel, bool enable)
 	else if (enable)
 	{
 		HeapScanDesc	scan;
+		Snapshot		current;
+	
+		current = GetTransactionSnapshot();
+		PushActiveSnapshot(current);
 
-		scan = heap_beginscan(rel, SerializableSnapshot, 0, NULL);
+		scan = heap_beginscan(rel, current, 0, NULL);
 
 		/* Raise dump if the table is not empty */
 		if (HeapTupleIsValid(heap_getnext(scan, ForwardScanDirection)))
@@ -1327,6 +1333,9 @@ AddRelationToMasterTableList(Relation rel, bool enable)
             raise_dump = TableNoDump;
 
 		heap_endscan(scan);
+		
+		PopActiveSnapshot();
+		
 	}
 	else
 		raise_dump = TableExpired;
@@ -1422,7 +1431,8 @@ make_diff_tuple(HeapTuple oldtuple, HeapTuple newtuple,
 	 */
 	for (i = 0, j = -1; i < new_natts; i++)
 	{
-		Operator		oper;
+		Oid				cmp_oid;
+		RegProcedure	cmp_proc;
 
 		if (tupdesc->attrs[i]->attisdropped)
 		{
@@ -1484,10 +1494,21 @@ make_diff_tuple(HeapTuple oldtuple, HeapTuple newtuple,
 		 * The hard case: both are not null, so we have to check them for
 		 * equality
 		 */
-		oper = equality_oper(tupdesc->attrs[i]->atttypid, true);
-
+		get_sort_group_operators(tupdesc->attrs[i]->atttypid, false, false,
+								 false, NULL, &cmp_opid, NULL);
+		
 		/* if we can't find the operator, send the value */
-		if (oper == NULL)
+		if (!OidIsValid(cmp_opid))
+		{
+			sendmask[j] = true;
+			send_nulls[i] = false;
+			send_values[i] = new_values[i];
+			continue;
+		}
+		
+		cmp_proc = get_opcode(cmp_opid);
+		
+		if (!RegProcedureValid(cmp_proc))
 		{
 			sendmask[j] = true;
 			send_nulls[i] = false;
@@ -1496,7 +1517,7 @@ make_diff_tuple(HeapTuple oldtuple, HeapTuple newtuple,
 		}
 
 		/* Finally call the equality function */
-		if (DatumGetBool(OidFunctionCall2(oprfuncid(oper), old_values[i],
+		if (DatumGetBool(OidFunctionCall2(cmp_proc, old_values[i],
 										  new_values[i])))
 		{
 			/* Values are equal -- send a NULL, but mask it out */
@@ -1511,8 +1532,6 @@ make_diff_tuple(HeapTuple oldtuple, HeapTuple newtuple,
 			send_nulls[i] = false;
 			send_values[i] = new_values[i];
 		}
-
-		ReleaseSysCache(oper);
 	}
 
 	*send_mask = sendmask;

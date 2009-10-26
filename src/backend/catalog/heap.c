@@ -2570,11 +2570,11 @@ heap_pgr_truncate(Oid rid)
 	/* Open relation for processing, and grab exclusive access on it. */
 	rel = heap_open(rid, ExclusiveLock);
 
-	/*
-	 * Release any buffers associated with this relation.  If they're
-	 * dirty, they're just dropped without bothering to flush to disk.
+	/* 
+	 * MERGE: we used to call DropFileNodeBuffes here, but apparently
+	 * this function is called from RelationTruncate, so that call
+	 * has been removed here.
 	 */
-	DropRelFileNodeBuffers(rel->rd_node, false, 0);
 
 	/* Now truncate the actual data and set blocks to zero */
 	RelationTruncate(rel, 0);

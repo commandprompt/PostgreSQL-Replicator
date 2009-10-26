@@ -2659,7 +2659,7 @@ ATCheckReplication(Relation rel, AlterTableType subtype)
 			/* OK on slave actually */
 			elog(ERROR, "cannot DROP CONSTRAINT on a replicated table");
 			break;
-		case AT_DropConstraintQuietly:	/* DROP CONSTRAINT for child */
+		case AT_DropConstraintRecurse:	/* DROP CONSTRAINT for child */
 			/* should not happen */
 			elog(ERROR, "cannot DROP CONSTRAINT QUIETLY on a replicated table");
 			break;

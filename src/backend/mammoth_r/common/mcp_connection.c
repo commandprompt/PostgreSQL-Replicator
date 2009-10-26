@@ -287,7 +287,7 @@ ActOnErrorMessageFn(int elevel, const char *filename, int lineno,
 	} while (1);
 	pq_getmsgend(&msg);
 
-	errstart(elevel, filename, lineno, funcname);
+	errstart(elevel, filename, lineno, funcname, PG_TEXTDOMAIN("postgres"));
 	if (errormsg != NULL)
 		errmsg("remote error: %s", errormsg);
 	if (errordetail != NULL)

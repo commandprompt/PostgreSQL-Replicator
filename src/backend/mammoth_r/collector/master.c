@@ -30,8 +30,10 @@
 #include "mammoth_r/txlog.h"
 #include "nodes/makefuncs.h"
 #include "postmaster/replication.h"
+#include "storage/lmgr.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 bool	PGRUseDumpMode = false;
@@ -133,7 +135,8 @@ DumpRoles(MCPQueue *q)
 	/* Put transaction file to the queue */
 	LWLockAcquire(ReplicationCommitLock, LW_EXCLUSIVE);
 
-	snap = CopySnapshot(GetTransactionSnapshot());
+	snap = GetTransactionSnapshot();
+	PushActiveSnapshot(snap);
 
 	txdata = MCPLocalQueueGetFile(MasterLocalQueue);
 	recno = MCPQueueCommit(q, txdata, InvalidRecno);
@@ -241,6 +244,8 @@ DumpRoles(MCPQueue *q)
 	}
 	MCPLocalQueueSwitchFile(MasterLocalQueue);
 
+	PopActiveSnapshot();
+
 	CommitTransactionCommand();
 	TXLOGSetCommitted(recno);
 	
@@ -279,7 +284,13 @@ PGRDumpTables(MCPQueue *queue)
 	StartTransactionCommand();
 
 	MemoryContextSwitchTo(dumpcxt);
-	relids = get_replicated_relids(CopySnapshot(GetTransactionSnapshot()));
+	
+	snap = GetTransactionSnapshot();
+	PushActiveSnapshot(snap);
+	
+	relids = get_replicated_relids(snap);
+	
+	PopActiveSnapshot();
 
 	foreach(cell, relids)
 	{
@@ -289,7 +300,8 @@ PGRDumpTables(MCPQueue *queue)
 		ullong		recno;
 
 		LWLockAcquire(ReplicationCommitLock, LW_EXCLUSIVE);
-		snap = CopySnapshot(GetTransactionSnapshot());
+		snap = GetTransactionSnapshot();
+		PushActiveSnapshot(snap);
 
 		data_file = MCPLocalQueueGetFile(MasterLocalQueue);
 		recno = MCPQueueCommit(queue, data_file, InvalidRecno);
@@ -325,6 +337,8 @@ PGRDumpTables(MCPQueue *queue)
 
 		/* Create a new file with the original path for the local queue. */
 		MCPLocalQueueSwitchFile(MasterLocalQueue);
+		
+		PopActiveSnapshot();
 
 		CommitTransactionCommand();
 

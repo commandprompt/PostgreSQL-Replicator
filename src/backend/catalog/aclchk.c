@@ -1067,6 +1067,17 @@ ExecGrant_Relation(InternalGrant *istmt)
 
 			newtuple = heap_modify_tuple(tuple, RelationGetDescr(relation),
 										 values, nulls, replaces);
+										
+			if (replication_enable && replication_master)
+			{
+				char *namespace;
+
+				namespace = get_namespace_name(pg_class_tuple->relnamespace);
+				if (namespace == NULL)
+					elog(ERROR, "cache lookup failed for namespace %u",
+						 pg_class_tuple->relnamespace);
+				replicate_grant(namespace, NameStr(pg_class_tuple->relname), new_acl);
+			}
 
 			simple_heap_update(relation, &newtuple->t_self, newtuple);
 
@@ -1251,17 +1262,6 @@ ExecGrant_Database(InternalGrant *istmt)
 
 		newtuple = heap_modify_tuple(tuple, RelationGetDescr(relation), values,
 									 nulls, replaces);
-
-	    if (replication_enable && replication_master)
-		{
-			char *namespace;
-
-			namespace = get_namespace_name(pg_class_tuple->relnamespace);
-			if (namespace == NULL)
-				elog(ERROR, "cache lookup failed for namespace %u",
-					 pg_class_tuple->relnamespace);
-			replicate_grant(namespace, NameStr(pg_class_tuple->relname), new_acl);
-		}
 
 		simple_heap_update(relation, &newtuple->t_self, newtuple);
 
