@@ -48,13 +48,12 @@
 #include "nodes/makefuncs.h"
 #include "parser/parse_oper.h"
 #include "storage/large_object.h"
-#include "stroage/lgmr.h"
+#include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/flatfiles.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
-#include "utils/lmgr.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
@@ -191,7 +190,7 @@ PGRRestoreData(MCPQueue *mcpq, int slaveno)
     if (replicated_list_changed)
         StoreTableList(REPLICATED_LIST_PATH, tl_replicated);
 
-	PopActiveSnapshot()
+	PopActiveSnapshot();
 
 	/* Commit the current transaction */
 	CommitTransactionCommand();

@@ -119,7 +119,6 @@ DumpRoles(MCPQueue *q)
 
 	MCPFile		   *txdata;
 	ullong			recno;
-	Snapshot		snap;
 	
 	int				roles_no = 0;
 
@@ -202,7 +201,7 @@ DumpRoles(MCPQueue *q)
 		Relation 	authMembersRel;
 		
 		authMembersRel = heap_open(AuthMemRelationId, AccessShareLock);
-		scan = heap_beginscan(authMembersRel, snap, 0, NULL);
+		scan = heap_beginscan(authMembersRel, SnapshotNow, 0, NULL);
 		/* scan auth_members and look for replication roles */
 		while (HeapTupleIsValid(scantuple = 
 								heap_getnext(scan, ForwardScanDirection)))

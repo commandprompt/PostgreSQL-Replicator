@@ -137,11 +137,6 @@ extern TimeLineID ThisTimeLineID;		/* current TLI */
 extern bool InRecovery;
 extern XLogRecPtr XactLastRecEnd;
 
-/*
- * We maintain an image of pg_control in shared memory.
- */
-extern ControlFileData *ControlFile;
-
 /* these variables are GUC parameters related to XLOG */
 extern int	CheckPointSegments;
 extern int	XLOGbuffers;
