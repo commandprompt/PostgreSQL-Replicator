@@ -13,6 +13,7 @@
 
 #include "access/heapam.h"
 #include "mammoth_r/collcommon.h"
+#include "storage/lmgr.h"
 #include "utils/lsyscache.h"
 #include "utils/relcache.h"
 

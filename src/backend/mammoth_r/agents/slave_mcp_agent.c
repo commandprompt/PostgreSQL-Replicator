@@ -42,6 +42,7 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/snapmgr.h"
 
 
 typedef enum
@@ -338,7 +339,7 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 
 	/* grab our sysid */
 	LWLockAcquire(ControlFileLock, LW_SHARED);
-	sysid = ControlFile->system_identifier;
+	sysid = repl_get_sysid();
 	LWLockRelease(ControlFileLock);
 
 	/* authenticate to server */
@@ -679,8 +680,9 @@ SlaveSendTablelist(SlaveState *state)
 	/* OK, go ahead */
 	elog(DEBUG2, "sending table list to MCP");
 	StartTransactionCommand();
-	ActiveSnapshot = CopySnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(GetTransactionSnapshot());
 	SlaveSendTablesToMCP();
+	PopActiveSnapshot();
 	CommitTransactionCommand();
 }
 

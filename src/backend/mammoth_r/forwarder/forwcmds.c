@@ -30,7 +30,8 @@
 #include "utils/flatfiles.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
-#include "utils/relcache.h"
+#include "utils/rel.h"
+#include "utils/tqual.h"
 
 
 void

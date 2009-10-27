@@ -48,14 +48,17 @@
 #include "nodes/makefuncs.h"
 #include "parser/parse_oper.h"
 #include "storage/large_object.h"
+#include "stroage/lgmr.h"
 #include "utils/builtins.h"
 #include "utils/flatfiles.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
+#include "utils/lmgr.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 
@@ -153,7 +156,7 @@ PGRRestoreData(MCPQueue *mcpq, int slaveno)
     	tl_replicated = RestoreTableList(REPLICATED_LIST_PATH);
 	
 	/* Make sure we have a snapshot set. */
-	ActiveSnapshot = CopySnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(GetTransactionSnapshot());
 
 	while (true)
 	{
@@ -187,6 +190,8 @@ PGRRestoreData(MCPQueue *mcpq, int slaveno)
 
     if (replicated_list_changed)
         StoreTableList(REPLICATED_LIST_PATH, tl_replicated);
+
+	PopActiveSnapshot()
 
 	/* Commit the current transaction */
 	CommitTransactionCommand();
@@ -315,7 +320,7 @@ SlaveTruncateAll(int slaveno)
 	/* Start transaction */
 	StartTransactionCommand();
 
-	snap = CopySnapshot(GetTransactionSnapshot());
+	snap = RegisterSnapshot(GetTransactionSnapshot());
 
 	/* Get lists of relations replicated on master and on this slave */
 	repl_master_oids = get_replicated_relids(snap);
@@ -342,6 +347,7 @@ SlaveTruncateAll(int slaveno)
 			heap_pgr_truncate(relid);
 		}
 	}
+	UnregisterSnapshot(snap);
 	/* Finish transaction */
 	CommitTransactionCommand();
 
@@ -445,7 +451,7 @@ PGRRestoreGetRelation(char *cmd_relpath)
 	Assert(nspname != NULL);
 	Assert(relname != NULL);
 
-	rv = makeRangeVar(nspname, relname);
+	rv = makeRangeVar(nspname, relname, -1);
 	relid = ReplRangeVarGetRelid(rv, true);
 	pfree(rv);
 
@@ -545,8 +551,7 @@ PGRRestoreInitExecutor(Relation relation)
 	/* Everything else will be in the per-query context */
 	MemoryContextSwitchTo(state->es_query_cxt);
 
-	ActiveSnapshot = CopySnapshot(GetTransactionSnapshot());
-	state->es_snapshot = ActiveSnapshot;
+	state->es_snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
 	/*
 	 * Create a ResultRelInfo which will be used in the ExecutorState.
@@ -640,7 +645,7 @@ restore_get_tuple(Relation relation, Relation index_rel, EState *state,
 	{
 		int			ind = index_rel->rd_index->indkey.values[i];
 		Datum		value;
-		Operator	oper;
+		Oid			cmp_opid;
 		bool		isnull;
 
 		value = heap_getattr(valtuple, ind, tdesc, &isnull);
@@ -670,18 +675,18 @@ restore_get_tuple(Relation relation, Relation index_rel, EState *state,
 			}
 		}
 
-		oper = equality_oper(index_rel->rd_att->attrs[i]->atttypid, true);
-		if (oper == NULL)
+		get_sort_group_operators(index_rel->rd_att->attrs[i]->atttypid, false, false,
+								 false, NULL, &cmp_opid, NULL);
+		if (!OidIsValid(cmp_opid))
 			elog(ERROR, "can't find an equality operator for type %u",
 				 index_rel->rd_att->attrs[i]->atttypid);
 
 		ScanKeyEntryInitialize(&keys[i], 0, i + 1,
 							   BTEqualStrategyNumber,
 							   InvalidOid,
-							   oprfuncid(oper),
+							   get_opcode(cmp_opid),
 							   value);
 
-		ReleaseSysCache(oper);
 	}
 
 	/* Proceed with the index scan for the PK */
@@ -1458,7 +1463,7 @@ PGRRestoreTruncateLO(void)
 	/* Make sure we cleanup the LO state properly after this stuff */
 	lo_noop();
 
-	ActiveSnapshot = GetTransactionSnapshot();
+	PushActiveSnapshot(GetTransactionSnapshot());
 
 	/* Get the list of slave LO oids to delete */
 	slave_loids = LOoidGetSlaveOids();
@@ -1473,6 +1478,8 @@ PGRRestoreTruncateLO(void)
 
 	/* Truncate slave_lo_refs */
 	heap_truncate(list_make1_oid(ReplSlaveLoRefsId));
+	
+	PopActiveSnapshot();
 
 	/* clean up */
 	list_free(slave_loids);

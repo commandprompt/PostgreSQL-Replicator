@@ -225,5 +225,6 @@ extern XLogRecPtr GetInsertRecPtr(void);
 extern void GetNextXidAndEpoch(TransactionId *xid, uint32 *epoch);
 
 extern void StartupProcessMain(void);
+extern uint64 repl_get_sysid(void);
 
 #endif   /* XLOG_H */

@@ -369,7 +369,7 @@ static XLogCtlData *XLogCtl = NULL;
 /*
  * We maintain an image of pg_control in shared memory.
  */
-ControlFileData *ControlFile = NULL;
+static ControlFileData *ControlFile = NULL;
 
 /*
  * Macros for managing XLogInsert state.  In most cases, the calling routine
@@ -8091,4 +8091,11 @@ StartupProcessMain(void)
 	 * successfully.
 	 */
 	proc_exit(0);
+}
+
+/* return system identifier for replication processes */
+uint64
+repl_get_sysid(void)
+{
+	return ControlFile->system_identifier;
 }

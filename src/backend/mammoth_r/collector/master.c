@@ -35,6 +35,7 @@
 #include "utils/relcache.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 bool	PGRUseDumpMode = false;
 
@@ -412,7 +413,7 @@ PGRDumpCatalogs(MCPQueue *master_mcpq, CommitDumpMode mode)
 	 	 * by the caller.
 	 	 */
 
-		serializable = CopySnapshot(GetTransactionSnapshot());
+		serializable = RegisterSnapshot(GetTransactionSnapshot());
 
 		/*
 		 * Remove data which would become obsolete after processing a dump
@@ -448,7 +449,7 @@ PGRDumpCatalogs(MCPQueue *master_mcpq, CommitDumpMode mode)
 		 * replication catalogs.
 		 */
 		Assert(LWLockHeldByMe(ReplicationCommitLock));
-		serializable = CopySnapshot(GetTransactionSnapshot());
+		serializable = RegisterSnapshot(GetTransactionSnapshot());
 
 		dump_recno = InvalidRecno;
 	}
@@ -490,6 +491,8 @@ PGRDumpCatalogs(MCPQueue *master_mcpq, CommitDumpMode mode)
 		/* Create a new file with the original path for the local queue. */
 		MCPLocalQueueSwitchFile(MasterLocalQueue);
 	}
+	
+	UnregisterSnapshot(serializable);
 
 	elog(DEBUG5, "CATALOG DUMP collected");
 	return dump_recno;
@@ -542,7 +545,7 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
      * guarantees us that the data will be restored in the correct
      * order on the slave.
      */
-	snap = CopySnapshot(GetTransactionSnapshot());
+	snap = RegisterSnapshot(GetTransactionSnapshot());
 
     dumpfile = MCPLocalQueueGetFile(MasterLocalQueue);
 
@@ -566,7 +569,7 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
      * Open a target relation and grab a lock (preventing vacuum
      * to run on this relation concurrently with this transaction).
      */
-    rv = makeRangeVar(relname, nspname);
+    rv = makeRangeVar(relname, nspname, -1);
     rel = heap_openrv(rv, ShareUpdateExclusiveLock);
 
     if (RelationIsValid(rel))
@@ -597,6 +600,7 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
         PG_CATCH();
         {
             PGRUseDumpMode = false;
+			UnregisterSnapshot(snap);
             PG_RE_THROW();
         }
         PG_END_TRY();
@@ -617,6 +621,8 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
         elog(WARNING, "\"%s\" doesn't exist", relpath);
         apply = false;
     }
+
+	UnregisterSnapshot(snap);
 
     CommitTransactionCommand();
 

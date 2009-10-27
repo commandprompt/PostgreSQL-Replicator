@@ -276,7 +276,7 @@ ReplicationMasterMain(MCPQueue *q)
 
 	/* grab our sysid */
 	LWLockAcquire(ControlFileLock, LW_SHARED);
-	sysid = ControlFile->system_identifier;
+	sysid = repl_get_sysid();
 	LWLockRelease(ControlFileLock);
 
 	/* grab queue data */

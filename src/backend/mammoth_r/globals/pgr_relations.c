@@ -75,7 +75,7 @@ replicate_relations(PG_FUNCTION_ARGS)
 	 * it.
 	 */
 	rv = makeRangeVar(NameStr(relForm->namespace),
-					  NameStr(relForm->relation));
+					  NameStr(relForm->relation), -1);
 
 	relid = ReplRangeVarGetRelid(rv, true);
 
@@ -224,7 +224,7 @@ replicate_slave_relations(PG_FUNCTION_ARGS)
 	 * it.
 	 */
 	rv = makeRangeVar(NameStr(relForm->namespace),
-					  NameStr(relForm->relation));
+					  NameStr(relForm->relation), -1);
 
 	relid = ReplRangeVarGetRelid(rv, true);
 
@@ -404,7 +404,7 @@ replicate_lo_columns(PG_FUNCTION_ARGS)
 
 	/* fetch the local OID of the table, and update the tuple to reflect it */
 	rv = makeRangeVar(NameStr(relForm->namespace),
-					  NameStr(relForm->relation));
+					  NameStr(relForm->relation), -1);
 
 	relid = ReplRangeVarGetRelid(rv, true);
 

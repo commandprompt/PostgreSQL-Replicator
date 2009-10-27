@@ -165,7 +165,7 @@ get_replicated_relids(Snapshot snap)
  *
  * Here we scan pg_catalog.repl_slave_relations and look for tuples with the
  * given slave ID.
- * MERGE: SerializableSnapshot was replaced by SnapshotNow for catalog access.
+ * MERGE: SerializableSnapshot was replaced by usage of SnapshotNow for catalog access.
  */
 List *
 get_slave_replicated_relids(int slave)
@@ -233,6 +233,8 @@ get_slave_replicated_relids(int slave)
 /*
  * Return list of oids for relations replicated by both master and the slave
  * with a gived ID.
+ * MERGE: GetTransactionSnapshot call was replaced by usage of SnapshotNow
+ * for catalog access
  */
 List *
 get_master_and_slave_replicated_relids(int slaveno)
@@ -241,9 +243,6 @@ get_master_and_slave_replicated_relids(int slaveno)
     List       *relids = NIL;
     List       *slave_relids;
     ListCell   *cell;
-	Snapshot	CurrentSnapshot = GetTransactionSnapshot();
-
-    Assert(CurrentSnapshot != NULL);
 
     /* Get a list of relations enabled in repl_slave_relations */
     slave_relids = get_slave_replicated_relids(slaveno);
@@ -272,7 +271,7 @@ get_master_and_slave_replicated_relids(int slaveno)
                     ObjectIdGetDatum(relid));
 
         scan = systable_beginscan(repl_rels, ReplRelationsRelidIndexId,
-                                  true, CurrentSnapshot, 1, keys);
+                                  true, SnapshotNow, 1, keys);
 
         while (HeapTupleIsValid(tuple = systable_getnext(scan)))
         {

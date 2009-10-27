@@ -30,8 +30,6 @@ int			optreset;
 /* PID can be negative for standalone backend */
 typedef long pgpid_t;
 
-#define _(x) gettext((x))
-
 /* MCP server version ident string */
 #define MAMMOTH_VERSIONSTR "mcp_server (Mammoth Replicator) " PG_VERSION "-" MAMMOTH_VERSION "\n"
 
