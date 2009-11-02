@@ -21,11 +21,6 @@ typedef struct
 #define HSTORE_MAX_KEY_LEN 65535
 #define HSTORE_MAX_VALUE_LEN 65535
 
-/* these are determined by the sizes of the keylen and vallen fields */
-/* in struct HEntry and struct Pairs */
-#define HSTORE_MAX_KEY_LEN 65535
-#define HSTORE_MAX_VALUE_LEN 65535
-
 
 typedef struct
 {
@@ -57,9 +52,6 @@ int			uniquePairs(Pairs *a, int4 l, int4 *buflen);
 
 size_t		hstoreCheckKeyLen(size_t len);
 size_t		hstoreCheckValLen(size_t len);
-
-size_t      hstoreCheckKeyLen(size_t len);
-size_t      hstoreCheckValLen(size_t len);
 
 #define HStoreContainsStrategyNumber	7
 #define HStoreExistsStrategyNumber		9
