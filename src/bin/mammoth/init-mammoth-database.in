@@ -1,7 +1,7 @@
 #!/bin/sh
 
 my_name=`basename $0`
-my_version="8.3"
+my_version="8.4"
 grep="@EGREP@"
 LN_S="@LN_S@"
 

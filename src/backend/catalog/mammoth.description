@@ -1,10 +1,10 @@
-820	pg_proc	0	fixes repl_relations entry on slaves
-821	pg_proc	0	fixes repl_slave_relations entry on slaves
+826	pg_proc	0	fixes repl_relations entry on slaves
+827	pg_proc	0	fixes repl_slave_relations entry on slaves
 323	pg_proc	0	fixes repl_lo_columns entry on slaves
 196	pg_proc	0	creates roles from tuples in repl_authid
 324	pg_proc	0	creates role members from tuples in repl_auth_members
 276	pg_proc	0	updates ACL in tables from tuples in repl_acl
-824	pg_proc	0	drops a role on deleting a corresponding tuple from repl_roles
+828	pg_proc	0	drops a role on deleting a corresponding tuple from repl_roles
 2965	pg_proc	0	reports current replication status for the forwarder
 2966	pg_proc	0	reports current replication status
 2967	pg_proc	0	reports current status of forwarder host connections

@@ -50,6 +50,7 @@
 #include "storage/fd.h"
 #include "storage/lmgr.h"
 #include "storage/pmsignal.h"
+#include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/flatfiles.h"
 #include "utils/relcache.h"
@@ -883,12 +884,19 @@ BuildFlatFiles(bool database_only)
 	rnode.dbNode = 0;
 	rnode.relNode = ReplForwarderId;
 	rel_fw = CreateFakeRelcacheEntry(rnode);
+	
+	/* Create on-disk file if necessary */
+	RelationOpenSmgr(rel_fw);
+	/* XXX: what about other relation forks ? */
+	smgrcreate(rel_fw->rd_smgr, MAIN_FORKNUM, true);
 	/*
-	 * XLogOpenRelation does not build a descriptor, but
+	 * CreateFakeRelcacheEntry does not build a descriptor, but
 	 * write_forwarder_file needs it, so we need to construct one manually.
 	 */
 	rel_fw->rd_att = GetReplForwarderDescriptor();
 	write_forwarder_file(rel_fw);
+	/* Close the relation at smgr level */ 
+	RelationCloseSmgr(rel_fw);
 	FreeFakeRelcacheEntry(rel_fw);
 	
 	CurrentResourceOwner = NULL;
