@@ -160,6 +160,7 @@ static Dllist *BackendList;
 typedef struct ForwarderChild
 {
 	pid_t		pid;			/* process id of child */
+	int			child_slot;		/* PMChildSlot for this child, if any */
 } ForwarderChild;
 
 static Dllist *ForwarderChildren;
@@ -3470,6 +3471,8 @@ ForwarderChildStartup(Port *port)
 		return STATUS_ERROR;
 	}
 
+	fp->child_slot = MyPMChildSlot = AssignPostmasterChildSlot();
+
 	pid = fork_process();
 	if (pid == 0)		/* in child */
 	{
@@ -3494,6 +3497,7 @@ ForwarderChildStartup(Port *port)
 		/* in parent, fork failed */
 		int		save_errno = errno;
 
+		(void) ReleasePostmasterChildSlot(fp->child_slot);
 		free(fp);
 		errno = save_errno;
 		ereport(LOG,
