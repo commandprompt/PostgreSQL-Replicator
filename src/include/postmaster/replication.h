@@ -35,6 +35,8 @@ extern ReplicationMode replication_mode;
 extern bool replication_process_enable;
 extern bool replication_encoding_conversion_enable;
 
+extern int	ReplicationChildSlot;	/* PMChildSlot stuff (see pmsignal.c) */
+
 #define replication_master (replication_mode == REPLICATION_MODE_MASTER)
 #define replication_slave (replication_mode == REPLICATION_MODE_SLAVE)
 

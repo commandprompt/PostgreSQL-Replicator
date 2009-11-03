@@ -72,6 +72,9 @@ bool replication_process_enable;
 /* Turn off encoding conversion if database is SQL_ASCII */
 bool replication_encoding_conversion_enable = true;
 
+/* the PostmasterChildSlot for the replication process */
+int	ReplicationChildSlot = 0;
+
 /*
  * Some global variables for replication status.
  */
@@ -165,6 +168,7 @@ replication_start(void)
 	if (currtime - time_replic_stop < MIN_REPLIC_WAIT)
 		return 0;
 
+	ReplicationChildSlot = AssignPostmasterChildSlot();
 	elog(LOG, "starting replication process");
 
 #ifdef EXEC_BACKEND
@@ -183,6 +187,7 @@ replication_start(void)
 			/* in postmaster child ... */
 			/* Close the postmaster's sockets */
 			ClosePostmasterPorts(false);
+			MyPMChildSlot = ReplicationChildSlot;
 
 			ReplicationMain(0, NULL);
 			break;

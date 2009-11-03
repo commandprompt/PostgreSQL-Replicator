@@ -1568,7 +1568,7 @@ ServerLoop(void)
 		/*
 		 * If we have lost the replication process, try to start a new one.
 		 */
-		if (replication_enable && replication_process_enable &&
+		if (ReplicationActive() && replication_process_enable &&
 			ReplicationPID == 0 && pmState == PM_RUN)
 			ReplicationPID = replication_start();
 
@@ -2787,16 +2787,16 @@ CleanupForwarderChild(int pid, int exitstatus)
 		{
 			LogChildExit(DEBUG2, _("replication forwarder child"), pid, exitstatus);
 
-			if (!EXIT_STATUS_0(exitstatus) && !EXIT_STATUS_1(exitstatus))
+			if ((!EXIT_STATUS_0(exitstatus) && !EXIT_STATUS_1(exitstatus)) ||
+				!ReleasePostmasterChildSlot(fp->child_slot))
 			{
 				HandleChildCrash(pid, exitstatus, _("replication forwarder child"));
+				return true;
 			}
-			else
-			{
-				DLRemove(curr);
-				free(fp);
-				DLFreeElem(curr);
-			}
+
+			DLRemove(curr);
+			free(fp);
+			DLFreeElem(curr);
 			return true;
 		}
 	}
@@ -2885,6 +2885,7 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 		if (pid == fp->pid)
 		{
 			/* Found entry for freshly dead child; remove it */
+			(void) ReleasePostmasterChildSlot(fp->child_slot);
 			DLRemove(curr);
 			free(fp);
 			/* Keep looping so we can signal remaining backends */
@@ -2983,7 +2984,10 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 
 	/* Take care of the replication process */
 	if (pid == ReplicationPID)
+	{
+		(void) ReleasePostmasterChildSlot(ReplicationChildSlot);
 		ReplicationPID = 0;
+	}
 	else if (ReplicationPID != 0 && !FatalError)
 	{
 		ereport(DEBUG2,
