@@ -90,7 +90,7 @@ ForwarderHelperMain(int argc, char *argv)
 		{
 			ullong 	confirmed_recno;
 			
-			elog(LOG, "running optimization checks");
+			elog(DEBUG3, "running optimization checks");
 
 			/* XXX: too many locks here, can we get rid of some of them ? */
 			LWLockAcquire(MCPServerLock, LW_SHARED);
