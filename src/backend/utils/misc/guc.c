@@ -2571,6 +2571,54 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
+		{"forwarder_listen_addresses", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Sets the host name or IP address(es) that the replication forwarder listens to."),
+			NULL,
+			GUC_LIST_INPUT
+		},
+		&ForwarderListenAddresses,
+		"localhost", NULL, NULL
+	},
+
+	{
+		{"forwarder_promote_acl", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Defines the list of replication slaves allowed to promote."),
+			NULL,
+			GUC_LIST_INPUT
+		},
+		&ForwarderPromoteACL,
+		"0", NULL, NULL
+	},
+
+	{
+		{"forwarder_master_address", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Defines the accepted address for the replication master."),
+			NULL
+		},
+		&ForwarderMasterAddress,
+		"localhost", NULL, NULL
+	},
+
+	{
+		{"forwarder_slave_addresses", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Defines the list of accepted addresses for replication slaves."),
+			NULL,
+			GUC_LIST_INPUT
+		},
+		&ForwarderSlaveAddresses,
+		"0:localhost", NULL, NULL
+	},
+
+	{
+		{"forwarder_auth_key", PGC_POSTMASTER, REPLICATION_FORWARDER,
+			gettext_noop("Authentication key for replication clients."),
+			NULL
+		},
+		&ForwarderAuthKey,
+		"", NULL, NULL
+	},
+
+	{
 		{"custom_variable_classes", PGC_SIGHUP, CUSTOM_OPTIONS,
 			gettext_noop("Sets the list of known custom variable classes."),
 			NULL,
