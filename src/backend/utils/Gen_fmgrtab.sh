@@ -97,7 +97,7 @@ prosrc=`egrep '^#define Anum_pg_proc_prosrc[ 	]' $INFILE | $AWK '{print $3+1}'`
 # Note assumption here that INTERNALlanguageId == 12.
 #
 egrep '^DATA' $INFILE | \
-sed 	-e 's/^[^O]*OID[^=]*=[ 	]*//' \
+sed 	-e 's/^[^(]*([^O]*OID[^=]*=[ 	]*//' \
 	-e 's/(//' \
 	-e 's/"[^"]*"/"xxx"/g' | \
 $AWK "\$$prolang == \"12\" { print }" | \
