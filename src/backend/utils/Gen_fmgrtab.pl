@@ -62,7 +62,7 @@ open(I, $infile) || die "Could not open $infile: $!";
 while (<I>)
 {
     next unless (/^DATA/);
-    s/^[^O]*OID[^=]*=[ \t]*//;
+    s/^[^(]*([^O]*OID[^=]*=[ \t]*//;
     s/\(//;
     s/"[^"]*"/"xxx"/g;
     my @p = split;
