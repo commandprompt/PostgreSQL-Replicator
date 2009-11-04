@@ -22,6 +22,7 @@
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_largeobject.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_type.h"
 #include "catalog/replication.h"
 #include "catalog/repl_relations.h"
 #include "catalog/repl_slave_relations.h"
@@ -642,10 +643,11 @@ restore_get_tuple(Relation relation, Relation index_rel, EState *state,
 
 	for (i = 0; i < natts; i++)
 	{
-		int			ind = index_rel->rd_index->indkey.values[i];
-		Datum		value;
-		Oid			cmp_opid;
-		bool		isnull;
+		int				ind = index_rel->rd_index->indkey.values[i];
+		Datum			value;
+		Oid				cmp_opid;
+		RegProcedure	opcode;
+		bool			isnull;
 
 		value = heap_getattr(valtuple, ind, tdesc, &isnull);
 		if (isnull)
@@ -673,18 +675,29 @@ restore_get_tuple(Relation relation, Relation index_rel, EState *state,
 									ind, DatumGetObjectId(value))));
 			}
 		}
+		
+		/* HACK: use nameeq to compare cstrings, since this type doesn't have a built-in
+		 * comparison operator. 62 is the oid of nameeq
+		 */
+		if (index_rel->rd_att->attrs[i]->atttypid == CSTRINGOID)
+			opcode = (RegProcedure) 62;
+		else
+		{
 
-		get_sort_group_operators(index_rel->rd_att->attrs[i]->atttypid, false, false,
+			get_sort_group_operators(index_rel->rd_att->attrs[i]->atttypid, false, false,
 								 false, NULL, &cmp_opid, NULL);
-		if (!OidIsValid(cmp_opid))
-			elog(ERROR, "can't find an equality operator for type %u",
-				 index_rel->rd_att->attrs[i]->atttypid);
-
+			if (!OidIsValid(cmp_opid))
+				elog(ERROR, "can't find an equality operator for type %u",
+				 	 index_rel->rd_att->attrs[i]->atttypid);
+			opcode = get_opcode(cmp_opid);
+		}
+		
 		ScanKeyEntryInitialize(&keys[i], 0, i + 1,
-							   BTEqualStrategyNumber,
-							   InvalidOid,
-							   get_opcode(cmp_opid),
-							   value);
+					   		   BTEqualStrategyNumber,
+					   		   InvalidOid,
+					   		   opcode,
+					   		   value);
+		
 
 	}
 

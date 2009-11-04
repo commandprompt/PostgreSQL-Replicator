@@ -132,7 +132,7 @@ ForwarderHelperMain(int argc, char *argv)
 		}
 
 		/* sleep for a bit */
-		pg_usleep(ForwarderOptimizerNaptime * 1000L);
+		pg_usleep(ForwarderOptimizerNaptime * 1000000L);
 	}
 	
 	WriteForwarderStateFile();	
