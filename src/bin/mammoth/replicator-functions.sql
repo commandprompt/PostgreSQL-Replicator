@@ -1,5 +1,5 @@
 -------------------------------------------------------------------------------
--- Mammoth Replicator 8.1-1.7 functions
+-- Mammoth Replicator functions
 -------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION is_replicated(REGCLASS) RETURNS BOOL AS $$
   DECLARE
@@ -84,7 +84,7 @@ CREATE OR REPLACE FUNCTION enable_replication_by_schema(NAME, INTEGER[]) RETURNS
     -- if no schema specified - report an error
     IF $1 IS NULL OR (0 = char_length($1))
     THEN
-      RAISE EXCEPTION 'Schema name can\'t be an empty string.';
+      RAISE EXCEPTION E'Schema name can\'t be an empty string.';
     END IF;
 
 	SELECT 1 INTO res
@@ -184,7 +184,7 @@ CREATE OR REPLACE FUNCTION disable_replication_by_schema(NAME) RETURNS VOID AS $
     -- if no schema specified - report an error
     IF $1 IS NULL OR (0 = char_length($1))
     THEN
-      RAISE EXCEPTION 'Schema name can\'t be an empty string.';
+      RAISE EXCEPTION E'Schema name can\'t be an empty string.';
     END IF;
 
 	SELECT 1 INTO res
