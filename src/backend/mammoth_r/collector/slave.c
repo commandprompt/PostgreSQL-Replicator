@@ -615,6 +615,9 @@ PGRRestoreEndExecutor(EState *state)
 	/* Free a tuple table slot if it was created previously */
 	if (state->es_trig_tuple_slot != NULL)
 		ExecDropSingleTupleTableSlot(state->es_trig_tuple_slot);
+		
+	/* Unregister the executor snapshot */
+	UnregisterSnapshot(state->es_snapshot);
 	
 	/* free executor state */
 	FreeExecutorState(state);
