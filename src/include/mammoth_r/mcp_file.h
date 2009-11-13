@@ -26,6 +26,7 @@ extern char	   *MCPFileGetPath(MCPFile *mcpf);
 extern bool		MCPFileRead(MCPFile *mcpf, void *buf, size_t bytes,
 							bool eof_allowed);
 extern void		MCPFileWrite(MCPFile *mcpf, const void *buf, size_t num);
+extern void		MCPFileSync(MCPFile *mcpf);
 extern off_t	MCPFileSeek(MCPFile *mcpf, off_t offset, int whence);
 extern void		MCPFileUnlink(MCPFile *mcpf);
 extern void		MCPFileRename(MCPFile *mcpf, char *mf_newpath);

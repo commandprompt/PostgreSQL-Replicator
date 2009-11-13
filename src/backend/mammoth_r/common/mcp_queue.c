@@ -254,6 +254,7 @@ MCPQueueFlush(MCPQueue *q)
 
 	MCPFileSeek(q->txhdr, 0, SEEK_SET);
 	MCPFileWrite(q->txhdr, q->txqueue_hdr, sizeof(TxQueueHeader));
+	MCPFileSync(q->txhdr);
 }
 
 /*
@@ -469,6 +470,9 @@ MCPQueueCommit(MCPQueue *q, MCPFile *txdata, ullong recno)
 	new_name = MCPQDatafileName(q, recno);
 	MCPFileRename(txdata, new_name);
 	pfree(new_name);
+
+	/* fsync the data file so that it persists on crash */
+	MCPFileSync(txdata);
 
 	elog(DEBUG4, "Transaction is placed in queue, recno "UNI_LLU, recno);
 	return recno;

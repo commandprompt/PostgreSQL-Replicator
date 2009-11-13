@@ -20,6 +20,7 @@
 #include <fcntl.h>
 
 #include "mammoth_r/mcp_file.h"
+#include "storage/fd.h"
 
 /*
  * struct MCPFile
@@ -290,6 +291,12 @@ MCPFileWrite(MCPFile *mcpf, const void *buf, size_t num)
 		elog(ERROR,
 			 "could not write all bytes to MCPFile %s (wanted %d, wrote %d)",
 			 mcpf->mf_path, (int32) num, (int32) ret);
+}
+
+void
+MCPFileSync(MCPFile *mcpf)
+{
+	pg_fsync(mcpf->mf_fd);
 }
 
 /*
