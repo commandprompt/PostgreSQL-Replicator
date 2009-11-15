@@ -395,7 +395,7 @@ MCPHostsSetSync(MCPHosts *h, int hostno, MCPQSync sync)
 {
 	ASSERT_HOST_LOCK_HELD(h, hostno);
 
-	elog(DEBUG4, "MCPQueueSetSync %s -> %s",
+	elog(DEBUG4, "MCPHostSetSync %s -> %s",
 		 MCPQSyncAsString(h->txhosts_tab[hostno].sync),
 		 MCPQSyncAsString(sync));
 	h->txhosts_tab[hostno].sync = sync;
@@ -414,12 +414,12 @@ MCPHostsLogTabStatus(int elevel, MCPHosts *h, int hostno, char *prefix, pid_t *n
 	if (hostno == -1)
 	{
 		startpoint = 0;
-		endpoint = h->txhosts_hdr->maxhosts;
+		endpoint = h->txhosts_hdr->maxhosts - 1;
 	}
 	else
 		startpoint = endpoint = hostno;
 
-	for (hostno = startpoint; hostno < endpoint; hostno++)
+	for (hostno = startpoint; hostno <= endpoint; hostno++)
 	{
 		if (node_pid[hostno + 1] == 0)
 			continue;

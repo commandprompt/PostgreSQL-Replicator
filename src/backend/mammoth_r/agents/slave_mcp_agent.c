@@ -362,11 +362,12 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 
 	/*
 	 * Send the initial recno, or InvalidRecno if not in sync.  The MCP process
-	 * is expected to start sending a dump if required.
+	 * is expected to start sending a dump if required. Otherwise it is expected
+	 * to start sending data starting from this recno.
 	 */
 	LockReplicationQueue(q, LW_SHARED);
 	initial_recno = MCPQueueGetSync(q) == MCPQSynced ?
-		MCPQueueGetLastRecno(q) : InvalidRecno;
+		MCPQueueGetLastRecno(q) + 1 : InvalidRecno;
 	UnlockReplicationQueue(q);
 	MCPSendInitialRecno(initial_recno);
 

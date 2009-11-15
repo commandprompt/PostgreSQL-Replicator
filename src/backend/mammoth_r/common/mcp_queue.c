@@ -732,12 +732,13 @@ MCPQueueSetEmpty(MCPQueue *q, bool empty)
 void
 MCPQueueLogHdrStatus(int elevel, MCPQueue *queue, char *prefix)
 {
-	elog(elevel, "%s: recnos l="UNI_LLU" f="UNI_LLU" v="UNI_LLU" b="UNI_LLU,
+	elog(elevel, "%s: recnos l="UNI_LLU" f="UNI_LLU" v="UNI_LLU" b="UNI_LLU" sync = %s",
 		 prefix,
 		 queue->txqueue_hdr->lrecno,
 		 queue->txqueue_hdr->frecno,
 		 queue->txqueue_hdr->vrecno,
-		 queue->txqueue_hdr->brecno);
+		 queue->txqueue_hdr->brecno,
+		 MCPQSyncAsString(queue->txqueue_hdr->sync));
 }
 
 /* Returns a timestamp of the latest queue 'write' operation */

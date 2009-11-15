@@ -10,7 +10,7 @@ the backend instead.  That gets rid of some portability problems (for example
 we will not have to write all the EXEC_BACKEND code for the MCP server to run
 on Windows).  It'll probably also help us build a cascading system.
 
-Separate the responsability of Replicator processes: right now,
+Separate the responsibility of Replicator processes: right now,
  * in the master, we have one process talking to the network, and the same
    process generating some dumps (thus running transactions).
  * in the slave, we have one process listening from the network, and
