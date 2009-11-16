@@ -16,6 +16,7 @@
 /* Xlog flags */
 #define RLOG_ZEROPAGE 0x00
 #define RLOG_TRUNCATE 0x10
+#define RLOG_COMMIT   0x20
 
 extern void BootstrapTXLOG(void);
 

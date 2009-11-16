@@ -68,6 +68,7 @@ static SlruCtlData 	ForwarderTxlogSlruData;
 /* TXLOG related functions */
 static void WriteZeroPageXlogRecord(int page);
 static void WriteTruncateXlogRecord(int cutoffpage);
+static void	WriteCommitXlogRecord(ullong recno);
 
 static const TxlogCtlData BackendTxlogCtlData =
 {
@@ -102,6 +103,13 @@ typedef struct TxlogRedoData
 
 typedef TxlogRedoData *TxlogRedo;
 
+typedef struct TxlogRedoCommitData
+{
+	bool	isforwarder;
+	ullong	recno;
+} TxlogRedoCommitData;
+
+typedef TxlogRedoCommitData *TxlogRedoCommit;
 
 static bool TXLOGPagePrecedes(int page1, int page2);
 static void TXLOGSetStatus(ullong recno, bool committed);
@@ -409,6 +417,27 @@ WriteZeroPageXlogRecord(int page)
 	
 	/* insert a wal record */
 	ptr = XLogInsert(RM_RLOG_ID, RLOG_ZEROPAGE, &rdata);
+	/* XXX: The code in clog doesn't call XLogFlush here, neither do we */
+}
+
+/* Insert 'rlog commit' record */
+static void
+WriteCommitXlogRecord(ullong recno)
+{
+	XLogRecPtr			ptr;
+	XLogRecData			rdata;
+	TxlogRedoCommitData	redo;
+	
+	redo.isforwarder = TXLOGIsForwarder();
+	redo.recno = recno;
+	
+	rdata.data = (char *)&redo;
+	rdata.len = sizeof(TxlogRedoCommitData);
+	/* we don't write shared memory buffers */
+	rdata.buffer = InvalidBuffer;
+	rdata.next = NULL;
+	
+	ptr = XLogInsert(RM_RLOG_ID, RLOG_COMMIT, &rdata);
 	/* make sure it's flushed to disk */
 	XLogFlush(ptr);
 }
@@ -456,6 +485,39 @@ rlog_redo(XLogRecPtr lsn, XLogRecord *rec)
 		ctl->slruCtl->shared->latest_page_number = redo.pageno;
 		SimpleLruTruncate(ctl->slruCtl, redo.pageno);
 	}
+	else if (info == RLOG_COMMIT)
+	{
+		int 				pageno,
+							slotno,
+							byteno,
+							bshift;
+		char 			   *byteptr;
+		
+		TxlogRedoCommitData	redo;
+		const TxlogCtlData	*ctl;
+		
+		memcpy(&redo, XLogRecGetData(rec), sizeof(TxlogRedoCommitData));
+		
+		ctl = (redo.isforwarder) ? ForwarderTxlogCtl : BackendTxlogCtl;
+		
+		pageno = RecnoToPage(redo.recno);
+		byteno = RecnoToByte(redo.recno);
+		bshift = RecnoToBIndex(redo.recno) * TXLOG_BITS_PER_XACT;
+		
+		LWLockAcquire(ctl->lock, LW_EXCLUSIVE);
+		
+		slotno = SimpleLruReadPage(ctl->slruCtl, pageno, false, InvalidTransactionId);
+		byteptr = ctl->slruCtl->shared->page_buffer[slotno] + byteno;
+		*byteptr |= (1 << bshift);
+		ctl->slruCtl->shared->page_dirty[slotno] = true;
+		
+		/* XXX: is it necessary to write a page here ? */
+		SimpleLruWritePage(ctl->slruCtl, slotno, NULL);
+		Assert(!ctl->slruCtl->shared->page_dirty[slotno]);
+		
+		LWLockRelease(ctl->lock);
+		
+	}
 	else
 		elog(PANIC, "rlog_redo: unknown op code %u", info);
 }
@@ -484,6 +546,14 @@ rlog_desc(StringInfo buf, uint8 xl_info, char *rec)
 						 (redo.isforwarder ? "forwarder" : "backend"),
 						redo.pageno);
 	} 
+	else if (info == RLOG_COMMIT)
+	{
+		TxlogRedoCommitData	redo;
+		memcpy(&redo, rec, sizeof(TxlogRedoCommitData));
+		appendStringInfo(buf, "%s commit: "UINT64_FORMAT,
+						  (redo.isforwarder ? "forwarder" : "backend"),
+						redo.recno);	
+	}
 	else
 		appendStringInfo(buf, "UNKNOWN");
 }
