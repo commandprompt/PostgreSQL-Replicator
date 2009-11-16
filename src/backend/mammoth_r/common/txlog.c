@@ -65,6 +65,10 @@ typedef struct TxlogCtlData
 static SlruCtlData	BackendTxlogSlruData;
 static SlruCtlData 	ForwarderTxlogSlruData;
 
+/* TXLOG related functions */
+static void WriteZeroPageXlogRecord(int page);
+static void WriteTruncateXlogRecord(int cutoffpage);
+
 static const TxlogCtlData BackendTxlogCtlData =
 {
 	&BackendTxlogSlruData,
@@ -81,11 +85,22 @@ static const TxlogCtlData ForwarderTxlogCtlData =
 	ForwarderTxlogControlLock
 };
 
+#define BackendTxlogCtl (&BackendTxlogCtlData)
+#define ForwarderTxlogCtl (&ForwarderTxlogCtlData)
+
 /*
- * Only one TXLOG can be in use in any one process.  We initialize this to
+ * Only one TXLOG can be in use active any one process.  We initialize this to
  * NULL and have interested processes select at runtime the one to use.
  */
-static const TxlogCtlData		*activeTxlog = NULL;
+static const TxlogCtlData		*activeTxlogCtl = NULL;
+
+typedef struct TxlogRedoData
+{
+	bool 	isforwarder;
+	int		pageno;
+} TxlogRedoData;
+
+typedef TxlogRedoData *TxlogRedo;
 
 
 static bool TXLOGPagePrecedes(int page1, int page2);
@@ -126,19 +141,26 @@ txlog_shmem_init(const TxlogCtlData *ctl)
 void
 TXLOGShmemInit(void)
 {
-	txlog_shmem_init(&ForwarderTxlogCtlData);
-	txlog_shmem_init(&BackendTxlogCtlData);
+	txlog_shmem_init(ForwarderTxlogCtl);
+	txlog_shmem_init(BackendTxlogCtl);
 }
 
 /*
- * SelectActiveTxlog
+ * SelectactiveTxlog
  * 		Choose a TXLOG for the lifetime of this process.
  */
 void
 SelectActiveTxlog(bool forwarder)
 {
-	Assert(activeTxlog == NULL);
-	activeTxlog = forwarder ? &ForwarderTxlogCtlData : &BackendTxlogCtlData;
+	Assert(activeTxlogCtl == NULL);
+	activeTxlogCtl = forwarder ? ForwarderTxlogCtl : BackendTxlogCtl;
+}
+
+bool
+TXLOGIsForwarder(void)
+{
+	Assert(activeTxlogCtl != NULL);
+	return (activeTxlogCtl == ForwarderTxlogCtl);
 }
 
 static void
@@ -168,8 +190,8 @@ txlog_create(const TxlogCtlData *ctl)
 void
 BootstrapTXLOG(void)
 {
-	txlog_create(&ForwarderTxlogCtlData);
-	txlog_create(&BackendTxlogCtlData);
+	txlog_create(ForwarderTxlogCtl);
+	txlog_create(BackendTxlogCtl);
 }
 
 /* Startup function */
@@ -181,13 +203,13 @@ TXLOGStartup(ullong recno)
 	/* XXX: assume that frecno is not zero */
    	pageno = RecnoToPage(recno);
 
-	LWLockAcquire(activeTxlog->lock, LW_EXCLUSIVE);
+	LWLockAcquire(activeTxlogCtl->lock, LW_EXCLUSIVE);
 
 	/* Was the startup already performed ? */
-	if (activeTxlog->slruCtl->shared->latest_page_number == INVALID_PAGE_NUMBER)
-		activeTxlog->slruCtl->shared->latest_page_number = pageno;	
+	if (activeTxlogCtl->slruCtl->shared->latest_page_number == INVALID_PAGE_NUMBER)
+		activeTxlogCtl->slruCtl->shared->latest_page_number = pageno;	
 
-	LWLockRelease(activeTxlog->lock);
+	LWLockRelease(activeTxlogCtl->lock);
 }
 
 /*
@@ -220,16 +242,16 @@ TXLOGSetStatus(ullong recno, bool committed)
 			byteno,
 			bshift;
 	char   *byteptr;
-	SlruCtlData *slru = activeTxlog->slruCtl;
+	SlruCtlData *slru = activeTxlogCtl->slruCtl;
 
 	pageno = RecnoToPage(recno);
 	byteno = RecnoToByte(recno);
 	bshift = RecnoToBIndex(recno) * TXLOG_BITS_PER_XACT;
 
 	/* Make a new txlog segment if needed */
-	TXLOGExtend(activeTxlog, recno, false);
+	TXLOGExtend(activeTxlogCtl, recno, false);
 
-	LWLockAcquire(activeTxlog->lock, LW_EXCLUSIVE);
+	LWLockAcquire(activeTxlogCtl->lock, LW_EXCLUSIVE);
 
 	slotno = SimpleLruReadPage(slru, pageno, false, InvalidTransactionId);
 	byteptr = slru->shared->page_buffer[slotno] + byteno;
@@ -248,7 +270,7 @@ TXLOGSetStatus(ullong recno, bool committed)
 	
 	slru->shared->page_dirty[slotno] = true;
 	
-	LWLockRelease(activeTxlog->lock);
+	LWLockRelease(activeTxlogCtl->lock);
 }
 
 /* Set committed status for a transaction identified by the recno */
@@ -277,20 +299,20 @@ TXLOGIsCommitted(ullong recno)
 			bshift;
 	char   *byteptr;
 	char	status;
-	SlruCtlData *slru = activeTxlog->slruCtl;
+	SlruCtlData *slru = activeTxlogCtl->slruCtl;
 	
 	pageno = RecnoToPage(recno);
 	byteno = RecnoToByte(recno);
 	bshift = RecnoToBIndex(recno) * TXLOG_BITS_PER_XACT;
 
-	LWLockAcquire(activeTxlog->lock, LW_EXCLUSIVE);
+	LWLockAcquire(activeTxlogCtl->lock, LW_EXCLUSIVE);
 
 	slotno = SimpleLruReadPage(slru, pageno, false, InvalidTransactionId);
 	byteptr = slru->shared->page_buffer[slotno] + byteno;
 
 	status = (*byteptr >> bshift) & TXLOG_XACT_BITMASK;
 
-	LWLockRelease(activeTxlog->lock);
+	LWLockRelease(activeTxlogCtl->lock);
 	
 	elog(DEBUG5, "Checking transaction "UNI_LLU" committed %d", recno, status);
 	return status;
@@ -313,7 +335,7 @@ TXLOGExtend(const TxlogCtlData *txlog, ullong freshRecno, bool force)
 
 	/* If we hit a new page, zero it */
 	pageno = RecnoToPage(freshRecno);
-
+	
 	LWLockAcquire(txlog->lock, LW_EXCLUSIVE);
 	SimpleLruZeroPage(txlog->slruCtl, pageno);
 	LWLockRelease(txlog->lock);
@@ -326,13 +348,13 @@ TXLOGTruncate(ullong oldestRecno)
 	int		cutoffpage;
 
 	cutoffpage = RecnoToPage(oldestRecno);
-	if (!SlruScanDirectory(activeTxlog->slruCtl, cutoffpage, false))
+	if (!SlruScanDirectory(activeTxlogCtl->slruCtl, cutoffpage, false))
 		return;
 
 	/* Write all dirty pages on disk */
 	CheckPointTXLOG();
 
-	SimpleLruTruncate(activeTxlog->slruCtl, cutoffpage);
+	SimpleLruTruncate(activeTxlogCtl->slruCtl, cutoffpage);
 }
 
 /*
@@ -342,5 +364,126 @@ TXLOGTruncate(ullong oldestRecno)
 void
 TXLOGZeroPageByRecno(ullong recno)
 {
-	TXLOGExtend(activeTxlog, recno, true);
+	TXLOGExtend(activeTxlogCtl, recno, true);
+}
+
+/* Insert a truncate wal record */
+static void
+WriteTruncateXlogRecord(int cutoffpage)
+{
+	XLogRecPtr 		ptr;
+	XLogRecData 	rdata;
+	TxlogRedoData 	redo;
+	
+	redo.isforwarder = TXLOGIsForwarder();
+	redo.pageno = cutoffpage;
+	
+	rdata.data = (char *) &redo;
+	rdata.len = sizeof(TxlogRedoData);
+	/* we don't write shared memory buffers */
+	rdata.buffer = InvalidBuffer;
+	rdata.next = NULL;
+	
+	/* insert a wal record */
+	ptr = XLogInsert(RM_RLOG_ID, RLOG_TRUNCATE, &rdata);
+	/* make sure it's flushed to disk */
+	XLogFlush(ptr);
+}
+
+/* Ditto for zeropage */
+static void
+WriteZeroPageXlogRecord(int page)
+{
+	XLogRecPtr 		ptr;
+	XLogRecData 	rdata;
+	TxlogRedoData 	redo;
+	
+	redo.isforwarder = TXLOGIsForwarder();
+	redo.pageno = page;
+	
+	rdata.data = (char *) &redo;
+	rdata.len = sizeof(TxlogRedoData);
+	/* we don't write shared memory buffers */
+	rdata.buffer = InvalidBuffer;
+	rdata.next = NULL;
+	
+	/* insert a wal record */
+	ptr = XLogInsert(RM_RLOG_ID, RLOG_ZEROPAGE, &rdata);
+	/* make sure it's flushed to disk */
+	XLogFlush(ptr);
+}
+
+/* RLOG resource-manager's routines */
+void
+rlog_redo(XLogRecPtr lsn, XLogRecord *rec)
+{
+	uint8	info = rec->xl_info & ~XLR_INFO_MASK;
+	
+	/* we don't ever write full buffer contents */
+	Assert(!(info & XLR_BKP_BLOCK_MASK));
+	
+	if (info == RLOG_ZEROPAGE)
+	{
+		int 				slotno;
+		TxlogRedoData		redo;
+		const TxlogCtlData	*ctl;
+		
+		memcpy(&redo, XLogRecGetData(rec), sizeof(TxlogRedoData));
+		
+		ctl = (redo.isforwarder) ? ForwarderTxlogCtl : BackendTxlogCtl;
+		
+		LWLockAcquire(ctl->lock, LW_EXCLUSIVE);
+		slotno = SimpleLruZeroPage(ctl->slruCtl, redo.pageno);
+		SimpleLruWritePage(ctl->slruCtl, slotno, NULL);
+		
+		Assert(!ctl->slruCtl->shared->page_dirty[slotno]);
+		
+		LWLockRelease(ctl->lock);		
+	} 
+	else if (info == RLOG_TRUNCATE)
+	{
+		TxlogRedoData		redo;
+		const TxlogCtlData	*ctl;
+		
+		memcpy(&redo, XLogRecGetData(rec), sizeof(TxlogRedoData));
+		
+		ctl = (redo.isforwarder) ? ForwarderTxlogCtl : BackendTxlogCtl;
+		
+		/* 
+		 * During XLOG reply, latest_page_number isn't set up yet; insert a
+		 * suitable value to bypass the sanity check in SimpleLruTruncate
+		 */
+		ctl->slruCtl->shared->latest_page_number = redo.pageno;
+		SimpleLruTruncate(ctl->slruCtl, redo.pageno);
+	}
+	else
+		elog(PANIC, "rlog_redo: unknown op code %u", info);
+}
+
+void
+rlog_desc(StringInfo buf, uint8 xl_info, char *rec)
+{
+	uint8 info 	= xl_info & ~XLR_INFO_MASK;
+	
+	if (info == RLOG_ZEROPAGE)
+	{
+		TxlogRedoData 	redo;
+		
+		memcpy(&redo, rec, sizeof(TxlogRedoData));
+		appendStringInfo(buf, "%s zeropage: %d", 
+						(redo.isforwarder ? "forwarder" : "backend"), 
+						redo.pageno);
+		
+	} 
+	else if (info == RLOG_TRUNCATE)
+	{
+		TxlogRedoData 	redo;
+		
+		memcpy(&redo, rec, sizeof(TxlogRedoData));
+		appendStringInfo(buf, "%s truncate: %d",
+						 (redo.isforwarder ? "forwarder" : "backend"),
+						redo.pageno);
+	} 
+	else
+		appendStringInfo(buf, "UNKNOWN");
 }

@@ -9,7 +9,13 @@
 #ifndef TXLOG_H
 #define TXLOG_H
 
+#include "access/xlog.h"
+
 #define NUM_TXLOG_BUFFERS 8
+
+/* Xlog flags */
+#define RLOG_ZEROPAGE 0x00
+#define RLOG_TRUNCATE 0x10
 
 extern void BootstrapTXLOG(void);
 
@@ -27,5 +33,12 @@ extern void TXLOGZeroPageByRecno(ullong recno);
 extern void TXLOGSetCommitted(ullong recno);
 extern void TXLOGClearCommitted(ullong recno);
 extern bool TXLOGIsCommitted(ullong recno);
+
+extern bool	TXLOGIsForwarder(void);
+
+/* Xlog-related functions */
+extern void rlog_redo(XLogRecPtr lsn, XLogRecord *rec);
+extern void rlog_desc(StringInfo buf, uint8 xl_info, char *rec);
+
 
 #endif /* TXLOG_H */
