@@ -267,9 +267,12 @@ TXLOGSetStatus(ullong recno, bool committed)
 	/* XXX: The following assumes we use only 1 bit per transaction. */
 	if (committed)	
 	{
+		/* WAL-log the commit. XXX: is it ok to hold txlog->lock here ? */
+		WriteCommitXlogRecord(recno);
+		
 		/* Transaction should not be marked as committed yet */
-		Assert(((*byteptr >> bshift) & TXLOG_XACT_BITMASK) == REPL_TX_STATE_EMPTY);
-
+		Assert(((*byteptr >> bshift) & TXLOG_XACT_BITMASK) == REPL_TX_STATE_EMPTY);		
+		
 		/* XXX: This assumes we use only 1 bit per transaction. */
 		*byteptr |= (1 << bshift);
 	}
@@ -344,6 +347,9 @@ TXLOGExtend(const TxlogCtlData *txlog, ullong freshRecno, bool force)
 	/* If we hit a new page, zero it */
 	pageno = RecnoToPage(freshRecno);
 	
+	/* wal-log new page creation */
+	WriteZeroPageXlogRecord(pageno);
+	
 	LWLockAcquire(txlog->lock, LW_EXCLUSIVE);
 	SimpleLruZeroPage(txlog->slruCtl, pageno);
 	LWLockRelease(txlog->lock);
@@ -361,6 +367,9 @@ TXLOGTruncate(ullong oldestRecno)
 
 	/* Write all dirty pages on disk */
 	CheckPointTXLOG();
+	
+	/* Wal-log the truncation */
+	WriteTruncateXlogRecord(cutoffpage);
 
 	SimpleLruTruncate(activeTxlogCtl->slruCtl, cutoffpage);
 }
