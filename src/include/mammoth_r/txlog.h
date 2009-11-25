@@ -14,9 +14,9 @@
 #define NUM_TXLOG_BUFFERS 8
 
 /* Xlog flags */
-#define RLOG_ZEROPAGE 0x00
-#define RLOG_TRUNCATE 0x10
-#define RLOG_COMMIT   0x20
+#define TXLOG_ZEROPAGE 0x00
+#define TXLOG_TRUNCATE 0x10
+#define TXLOG_COMMIT   0x20
 
 extern void BootstrapTXLOG(void);
 
@@ -38,8 +38,8 @@ extern bool TXLOGIsCommitted(ullong recno);
 extern bool	TXLOGIsForwarder(void);
 
 /* Xlog-related functions */
-extern void rlog_redo(XLogRecPtr lsn, XLogRecord *rec);
-extern void rlog_desc(StringInfo buf, uint8 xl_info, char *rec);
+extern void txlog_redo(XLogRecPtr lsn, XLogRecord *rec);
+extern void txlog_desc(StringInfo buf, uint8 xl_info, char *rec);
 
 
 #endif /* TXLOG_H */
