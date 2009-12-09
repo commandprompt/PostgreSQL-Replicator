@@ -90,7 +90,7 @@ static const TxlogCtlData ForwarderTxlogCtlData =
 #define ForwarderTxlogCtl (&ForwarderTxlogCtlData)
 
 /*
- * Only one TXLOG can be in use active any one process.  We initialize this to
+ * Only one TXLOG can be in active use in a process.  We initialize this to
  * NULL and have interested processes select at runtime the one to use.
  */
 static const TxlogCtlData		*activeTxlogCtl = NULL;
