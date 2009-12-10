@@ -167,7 +167,7 @@ bool
 TXLOGIsForwarder(void)
 {
 	Assert(activeTxlogCtl != NULL);
-	return (activeTxlogCtl == ForwarderTxlogCtl);
+	return activeTxlogCtl == ForwarderTxlogCtl;
 }
 
 static void
@@ -238,7 +238,7 @@ CheckPointTXLOG(void)
 static bool
 TXLOGPagePrecedes(int page1, int page2)
 {
-	return (page1 < page2);
+	return page1 < page2;
 }
 
 
@@ -486,13 +486,12 @@ txlog_redo(XLogRecPtr lsn, XLogRecord *rec)
 							byteno,
 							bshift;
 		char 			   *byteptr;
-		
 		TxlogRedoCommitData	redo;
 		const TxlogCtlData	*ctl;
 		
 		memcpy(&redo, XLogRecGetData(rec), sizeof(TxlogRedoCommitData));
 		
-		ctl = (redo.isforwarder) ? ForwarderTxlogCtl : BackendTxlogCtl;
+		ctl = redo.isforwarder ? ForwarderTxlogCtl : BackendTxlogCtl;
 		
 		pageno = RecnoToPage(redo.recno);
 		byteno = RecnoToByte(redo.recno);
