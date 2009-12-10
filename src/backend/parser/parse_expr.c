@@ -164,18 +164,23 @@ transformExpr(ParseState *pstate, Node *expr)
 					elementType = get_element_type(targetType);
 					if (OidIsValid(elementType))
 					{
-						result = transformArrayExpr(pstate,
-													(A_ArrayExpr *) tc->arg,
-													targetType,
-													elementType,
-													targetTypmod);
-						break;
+						/*
+						 * tranformArrayExpr doesn't know how to check domain
+						 * constraints, so ask it to return the base type
+						 * instead. transformTypeCast below will cast it to
+						 * the domain. In the usual case that the target is
+						 * not a domain, transformTypeCast is a no-op.
+						 */
+						targetType = getBaseTypeAndTypmod(targetType,
+														 &targetTypmod);
+							
+						tc = copyObject(tc);
+						tc->arg = transformArrayExpr(pstate,
+													 (A_ArrayExpr *) tc->arg,
+													 targetType,
+													 elementType,
+													 targetTypmod);
 					}
-
-					/*
-					 * Corner case: ARRAY[] cast to a non-array type. Fall
-					 * through to do it the standard way.
-					 */
 				}
 
 				result = transformTypeCast(pstate, tc);
@@ -301,6 +306,7 @@ transformExpr(ParseState *pstate, Node *expr)
 		case T_ArrayCoerceExpr:
 		case T_ConvertRowtypeExpr:
 		case T_CaseTestExpr:
+		case T_ArrayExpr:
 		case T_CoerceToDomain:
 		case T_CoerceToDomainValue:
 		case T_SetToDefault:

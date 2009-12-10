@@ -252,7 +252,7 @@ su - postgres
       class="osname">Linux</>, <systemitem class="osname">NetBSD</>,
       <systemitem class="osname">Solaris</>), for other systems you
       can download an add-on package from <ulink
-      url="http://developer.postgresql.org/~petere/bsd-gettext/"></ulink>.
+      url="http://www.gnu.org/software/gettext/"></ulink>.
       If you are using the <application>Gettext</> implementation in
       the <acronym>GNU</acronym> C library then you will additionally
       need the <productname>GNU Gettext</productname> package for some
@@ -326,12 +326,12 @@ su - postgres
 
   <para>
    Also check that you have sufficient disk space. You will need about
-   65 MB for the source tree during compilation and about 15 MB for
+   100 MB for the source tree during compilation and about 20 MB for
    the installation directory. An empty database cluster takes about
-   25 MB; databases take about five times the amount of space that a
+   35 MB; databases take about five times the amount of space that a
    flat text file with the same data would take. If you are going to
    run the regression tests you will temporarily need up to an extra
-   90 MB. Use the <command>df</command> command to check free disk
+   150 MB. Use the <command>df</command> command to check free disk
    space.
   </para>
  </sect1>
@@ -356,6 +356,11 @@ su - postgres
    with the <productname>PostgreSQL</> sources.
    Change into that directory for the rest
    of the installation procedure.
+  </para>
+
+  <para>
+   You can also get the source directly from the version control repository, see
+   <xref linkend="cvs">.
   </para>
  </sect1>
 ]]>
@@ -2725,8 +2730,8 @@ cc-1020 cc: ERROR File = pqcomm.c, Line = 427
      example, gzip, gunzip, GNU Make, Flex, and Bison are all
      included.  For UnixWare 7.1, this CD is now labeled "Open License
      Software Supplement".  If you do not have this CD, the software
-     on it is available via anonymous FTP
-     from <ulink url="ftp://ftp.sco.com/skunkware"></ulink>.
+     on it is available
+     from <ulink url="http://www.sco.com/skunkware/"></ulink>.
     </para>
 
     <para>
