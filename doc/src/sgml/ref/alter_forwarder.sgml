@@ -1,0 +1,64 @@
+<!--
+$PostgreSQL$
+PostgreSQL documentation
+-->
+
+<refentry id="SQL-ALTERFORWARDER">
+ <refmeta>
+  <refentrytitle id="sql-alterforwarder-title">ALTER FORWARDER</refentrytitle>
+  <manvolnum>7</manvolnum>
+  <refmiscinfo>SQL - Language Statements</refmiscinfo>
+ </refmeta>
+
+ <refnamediv>
+  <refname>ALTER FORWARDER</refname>
+  <refpurpose>change a replication forwarder</refpurpose>
+ </refnamediv>
+
+ <indexterm zone="sql-alterforwarder">
+  <primary>ALTER FORWARDER</primary>
+ </indexterm>
+
+ <indexterm zone="sql-alterforwarder">
+  <primary>FORWARDER</primary>
+  <secondary>ALTER</secondary>
+ </indexterm>
+
+ <refsynopsisdiv>
+<synopsis>
+ALTER FORWARDER <replaceable class="PARAMETER">name</replaceable> ( <replaceable>option</replaceable>=value [, ... ] )
+
+where <replaceable class="PARAMETER">option</replaceable> can be:
+       host = <replaceable class="PARAMETER">host address</replaceable>
+     | port = <replaceable class="PARAMETER">port number</replaceable>
+     | authkey = <replaceable class="PARAMETER">authorization key</replaceable>
+     | ssl = <replaceable class="PARAMETER">true/false</replaceable>
+</synopsis>
+ </refsynopsisdiv>
+
+ <refsect1>
+  <title>Description</title>
+
+  <para>
+   <command>ALTER FORWADER</command> changes the attributes of a replication
+   forwarder.
+  </para>
+ </refsect1>
+ 
+ <refsect1>
+  <title>Compatibility</title>
+  
+  <para>
+   The <command>ALTER FORWARDER</command> statement is a
+   <productname>Mammoth Replicator</productname> extension.
+  </para>
+ </refsect1>
+
+ <refsect1>
+  <title>See Also</title>
+
+  <simplelist type="inline">
+   <member><xref linkend="sql-createforwarder" endterm="sql-createforwarder-title"></member>
+  </simplelist>
+ </refsect1>
+</refentry>

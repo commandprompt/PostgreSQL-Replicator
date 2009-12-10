@@ -39,6 +39,7 @@
    &alterDatabase;
    &alterDomain;
    &alterForeignDataWrapper;
+   &alterForwarder;
    &alterFunction;
    &alterGroup;
    &alterIndex;
@@ -77,6 +78,7 @@
    &createDatabase;
    &createDomain;
    &createForeignDataWrapper;
+   &createForwarder;
    &createFunction;
    &createGroup;
    &createIndex;
@@ -111,6 +113,7 @@
    &dropDatabase;
    &dropDomain;
    &dropForeignDataWrapper;
+   &dropForwarder;
    &dropFunction;
    &dropGroup;
    &dropIndex;

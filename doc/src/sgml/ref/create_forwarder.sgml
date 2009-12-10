@@ -1,0 +1,65 @@
+<!--
+$PostgreSQL$
+PostgreSQL documentation
+-->
+
+<refentry id="SQL-CREATEFORWARDER">
+ <refmeta>
+  <refentrytitle id="sql-createforwarder-title">CREATE FORWARDER</refentrytitle>
+  <manvolnum>7</manvolnum>
+  <refmiscinfo>SQL - Language Statements</refmiscinfo>
+ </refmeta>
+
+ <refnamediv>
+  <refname>CREATE FORWARDER</refname>
+  <refpurpose>define a new replication forwarder</refpurpose>
+ </refnamediv>
+
+ <indexterm zone="sql-createforwarder">
+  <primary>CREATE FORWARDER</primary>
+ </indexterm>
+
+ <indexterm zone="sql-createforwarder">
+  <primary>FORWARDER</primary>
+  <secondary>CREATE</secondary>
+ </indexterm>
+
+ <refsynopsisdiv>
+<synopsis>
+CREATE FORWARDER <replaceable class="PARAMETER">name</replaceable> ( <replaceable>option</replaceable>=value [, ... ] )
+
+where <replaceable class="PARAMETER">option</replaceable> can be:
+       host = <replaceable class="PARAMETER">host address</replaceable>
+     | port = <replaceable class="PARAMETER">port number</replaceable>
+     | authkey = <replaceable class="PARAMETER">authorization key</replaceable>
+     | ssl = <replaceable class="PARAMETER">true/false</replaceable>
+</synopsis>
+ </refsynopsisdiv>
+
+ <refsect1>
+  <title>Description</title>
+
+  <para>
+   <command>CREATE FORWADER</command> creates a new replication forwarder
+   definition.
+  </para>
+ </refsect1>
+ 
+ <refsect1>
+  <title>Compatibility</title>
+  
+  <para>
+   The <command>CREATE FORWARDER</command> statement is a
+   <productname>Mammoth Replicator</productname> extension.
+  </para>
+ </refsect1>
+
+ <refsect1>
+  <title>See Also</title>
+
+  <simplelist type="inline">
+   <member><xref linkend="sql-dropforwarder" endterm="sql-dropforwarder-title"></member>
+   <member><xref linkend="sql-alterforwarder" endterm="sql-alterforwarder-title"></member>
+  </simplelist>
+ </refsect1>
+</refentry>

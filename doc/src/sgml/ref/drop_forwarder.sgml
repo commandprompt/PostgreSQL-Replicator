@@ -1,0 +1,58 @@
+<!--
+$PostgreSQL$
+PostgreSQL documentation
+-->
+
+<refentry id="SQL-DROPFORWARDER">
+ <refmeta>
+  <refentrytitle id="sql-dropforwarder-title">DROP FORWARDER</refentrytitle>
+  <manvolnum>7</manvolnum>
+  <refmiscinfo>SQL - Language Statements</refmiscinfo>
+ </refmeta>
+
+ <refnamediv>
+  <refname>DROP FORWARDER</refname>
+  <refpurpose>remove a replication forwarder</refpurpose>
+ </refnamediv>
+
+ <indexterm zone="sql-dropforwarder">
+  <primary>DROP FORWARDER</primary>
+ </indexterm>
+
+ <indexterm zone="sql-dropforwarder">
+  <primary>FORWARDER</primary>
+  <secondary>DROP</secondary>
+ </indexterm>
+
+ <refsynopsisdiv>
+<synopsis>
+DROP FORWARDER <replaceable class="PARAMETER">name</replaceable>
+</synopsis>
+ </refsynopsisdiv>
+
+ <refsect1>
+  <title>Description</title>
+
+  <para>
+   <command>DROP FORWADER</command> removes the specified replication
+   forwarder.
+  </para>
+ </refsect1>
+ 
+ <refsect1>
+  <title>Compatibility</title>
+  
+  <para>
+   The <command>DROP FORWARDER</command> statement is a
+   <productname>Mammoth Replicator</productname> extension.
+  </para>
+ </refsect1>
+
+ <refsect1>
+  <title>See Also</title>
+
+  <simplelist type="inline">
+   <member><xref linkend="sql-createforwarder" endterm="sql-createforwarder-title"></member>
+  </simplelist>
+ </refsect1>
+</refentry>

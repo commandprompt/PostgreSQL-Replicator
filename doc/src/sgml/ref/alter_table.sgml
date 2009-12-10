@@ -420,7 +420,8 @@ where <replaceable class="PARAMETER">action</replaceable> is one of:
     <listitem>
      <para>
       This form declares the table as globally replicated, that is, the
-      master will broadcast any changes on this table to the MCP server.
+      master will broadcast any changes on this table to the active
+      replication forwarder.
       If no slaves are configured to receive the changes on this table,
       this command raises an error.  The table must have a primary key.
      </para>
@@ -442,7 +443,8 @@ where <replaceable class="PARAMETER">action</replaceable> is one of:
     <listitem>
      <para>
       This form declares that the changes of this table should be sent
-      by the MCP server to the given slave, if the table is globally replicated.
+      by the active replication forwarder to the given slave, if the table is
+      globally replicated.
       The table must have a primary key.
      </para>
     </listitem>
