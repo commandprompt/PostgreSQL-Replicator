@@ -504,9 +504,10 @@ txlog_redo(XLogRecPtr lsn, XLogRecord *rec)
 		*byteptr |= (1 << bshift);
 		ctl->slruCtl->shared->page_dirty[slotno] = true;
 		
-		/* XXX: is it necessary to write a page here ? */
-		SimpleLruWritePage(ctl->slruCtl, slotno, NULL);
-		Assert(!ctl->slruCtl->shared->page_dirty[slotno]);
+		/*
+		 * Note that it's not necessary to write the page here, because it
+		 * will be written and flushed by the next restartpoint.
+		 */
 		
 		LWLockRelease(ctl->lock);
 		
