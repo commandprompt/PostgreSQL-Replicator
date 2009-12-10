@@ -529,6 +529,7 @@ static const pgsql_thing_t words_after_create[] = {
 	{"DICTIONARY", Query_for_list_of_ts_dictionaries, NULL, true},
 	{"DOMAIN", NULL, &Query_for_list_of_domains},
 	{"FOREIGN DATA WRAPPER", NULL, NULL},
+	{"FORWARDER", NULL, NULL}, /* Don't query the name, since the catalog might not exist at this point */
 	{"FUNCTION", NULL, &Query_for_list_of_functions},
 	{"GROUP", Query_for_list_of_roles},
 	{"LANGUAGE", Query_for_list_of_languages},
@@ -693,8 +694,8 @@ psql_completion(char *text, int start, int end)
 			 pg_strcasecmp(prev3_wd, "TABLE") != 0)
 	{
 		static const char *const list_ALTER[] =
-		{"AGGREGATE", "CONVERSION", "DATABASE", "DOMAIN", "FOREIGN DATA WRAPPER", "FUNCTION",
-			"GROUP", "INDEX", "LANGUAGE", "OPERATOR", "ROLE", "SCHEMA", "SERVER", "SEQUENCE", "TABLE",
+		{"AGGREGATE", "CONVERSION", "DATABASE", "DOMAIN", "FOREIGN DATA WRAPPER", "FORWARDER", "FUNCTION",
+		 "GROUP", "INDEX", "LANGUAGE", "OPERATOR", "ROLE", "SCHEMA", "SERVER", "SEQUENCE", "TABLE",
 		"TABLESPACE", "TEXT SEARCH", "TRIGGER", "TYPE", "USER", "USER MAPPING FOR", "VIEW", NULL};
 
 		COMPLETE_WITH_LIST(list_ALTER);
@@ -1088,7 +1089,10 @@ psql_completion(char *text, int start, int end)
 			  pg_strcasecmp(prev2_wd, "DROP") == 0) &&
 			 pg_strcasecmp(prev_wd, "USER") == 0)
 		COMPLETE_WITH_QUERY(Query_for_list_of_roles);
-
+	/* complete ALTER FORWARDER <foo> SET */	
+	else if (pg_strcasecmp(prev3_wd, "ALTER") == 0 &&
+			 pg_strcasecmp(prev2_wd, "FORWARDER") == 0)
+		COMPLETE_WITH_CONST("SET ACTIVE");
 /* MCP */
 	/* complete with (REFRESH|BATCHUPDATE) */
 	else if (pg_strcasecmp(prev_wd, "MCP") == 0)

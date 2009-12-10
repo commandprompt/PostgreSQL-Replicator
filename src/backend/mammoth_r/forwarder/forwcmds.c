@@ -51,6 +51,7 @@ CreateForwarder(CreateForwarderStmt *stmt)
 	namestrcpy(&pname, stmt->name);
 
 	values[Anum_repl_forwarder_name - 1] = NameGetDatum(&pname);
+	values[Anum_repl_forwarder_active - 1] = BoolGetDatum(false);
 
 	foreach (pl, stmt->parameters)
 	{
@@ -292,6 +293,88 @@ AlterForwarder(AlterForwarderStmt *stmt)
 			(errmsg("forwarder \"%s\" does not exist", stmt->name)));
 }
 
+/* Choose an active forwarder, resetting the active flag from the previous one */
+void
+AlterForwarderSet(AlterForwarderSetStmt *stmt)
+{
+	Relation		fwrel;
+	HeapTuple		scantup;
+	HeapScanDesc	heapscan;
+	TupleDesc		descr;
+	
+	Datum			values[Natts_repl_forwarder];
+	bool			nulls[Natts_repl_forwarder];
+	bool			replace[Natts_repl_forwarder];
+	
+	bool			found = false;
+	
+	MemSet(values, 0, sizeof(values));
+	MemSet(nulls, 0, sizeof(nulls));
+	MemSet(replace, 0, sizeof(replace));
+	
+	/* We only change 'active' */
+	replace[Anum_repl_forwarder_active - 1] = true;
+	nulls[Anum_repl_forwarder_active - 1] = false;
+	
+	fwrel = heap_open(ReplForwarderId, RowExclusiveLock);
+	descr = RelationGetDescr(fwrel);
+	
+	/* 
+	 * For each tuple either set active if it matches the forwarder name, 
+	 * or reset active if it's already set.
+	 */
+	heapscan = heap_beginscan(fwrel, SnapshotNow, 0, NULL);
+	while (HeapTupleIsValid(scantup = heap_getnext(heapscan, ForwardScanDirection)))
+	{
+		char 			   *fwname;
+		bool				isnull,
+							active;
+		HeapTuple			newtup;
+		Datum				attr;
+		
+		attr = heap_getattr(scantup, Anum_repl_forwarder_name, descr, &isnull);
+		fwname = DatumGetCString(attr);
+		
+		attr = heap_getattr(scantup, Anum_repl_forwarder_active, descr, &isnull);
+		active = DatumGetBool(attr);
+				
+		if (strncmp(fwname, stmt->name, NAMEDATALEN) == 0)
+		{
+			found = true;
+			/* Do nothing it if it's already active */
+			if (!active)
+				values[Anum_repl_forwarder_active - 1] = BoolGetDatum(true);
+			else
+				continue;
+		}
+		else if (active)
+			values[Anum_repl_forwarder_active - 1] = BoolGetDatum(false);
+		else 
+			continue;
+		
+		newtup = heap_modify_tuple(scantup, RelationGetDescr(fwrel), 
+								   values, nulls, replace);
+		simple_heap_update(fwrel, &scantup->t_self, newtup);
+		CatalogUpdateIndexes(fwrel, newtup);
+	}
+	
+	heap_endscan(heapscan);
+	heap_close(fwrel, RowExclusiveLock);
+	
+	/* mark the flatfile for update at transaction commit */
+	forw_file_update_needed();
+	
+	/* 
+	 * Note that if the role doesn't exist then transaction abort will 
+	 * revert the changes we've made
+	 */
+	if (!found)	
+		ereport(ERROR,
+		 		(errmsg("cannot find forwarder \"%s\"", stmt->name)));
+		
+	return;
+}
+
 /*
  * Read the forwarder config and return the selected forwarder info.
  *
@@ -305,6 +388,7 @@ init_forwarder_config(char **name, char **address, int *port, char **key, bool *
 {
 	char	*filename;
 	FILE	*ffile;
+	bool	active = false;
 
 	filename = forw_getflatfilename();
 	ffile = AllocateFile(filename, "r");
@@ -312,8 +396,17 @@ init_forwarder_config(char **name, char **address, int *port, char **key, bool *
 		ereport(FATAL,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", filename)));
-	/* XXX we read a single line and just use that */
-	read_repl_forwarder_line(ffile, name, address, port, key, ssl);
+
+	/* read until we find an active forwarder or reach eofr */
+	while (!active)
+	{
+		if (!read_repl_forwarder_line(ffile, name, address, port, key, ssl, &active))
+			break;
+	}
+	
+	/* Simulate empty file if we found no active forwarders*/
+	if (!active)
+		*name = NULL;
 
 	FreeFile(ffile);
 	pfree(filename);
@@ -338,7 +431,7 @@ check_forwarder_config(void)
 		/* note: this is a crock and should be refined somehow */
 		Assert(!IsUnderPostmaster);
 		ereport(WARNING,
-				(errmsg("replication process disabled due to missing forwarder configuration")));
+				(errmsg("replication process disabled due to missing active forwarder configuration")));
 		/* if there's an existing connection, ensure that it's closed */
 		if (replication_process_enable)
 		{

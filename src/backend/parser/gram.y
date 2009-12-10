@@ -210,7 +210,7 @@ static TypeName *TableFuncTypeName(List *columns);
 		DeallocateStmt PrepareStmt ExecuteStmt
 		DropOwnedStmt ReassignOwnedStmt
 		AlterTSConfigurationStmt AlterTSDictionaryStmt
-		CreateForwarderStmt DropForwarderStmt AlterForwarderStmt
+		CreateForwarderStmt DropForwarderStmt AlterForwarderStmt AlterForwarderSetStmt
 
 %type <node>	select_no_parens select_with_parens select_clause
 				simple_select values_clause
@@ -426,7 +426,7 @@ static TypeName *TableFuncTypeName(List *columns);
  */
 
 /* ordinary key words in alphabetical order */
-%token <keyword> ABORT_P ABSOLUTE_P ACCESS ACTION ADD_P ADMIN AFTER
+%token <keyword> ABORT_P ABSOLUTE_P ACCESS ACTION ACTIVE ADD_P ADMIN AFTER
 	AGGREGATE ALL ALSO ALTER ALWAYS ANALYSE ANALYZE AND ANY ARRAY AS ASC
 	ASSERTION ASSIGNMENT ASYMMETRIC AT AUTHORIZATION
 
@@ -705,6 +705,7 @@ stmt :
 			| CreateForwarderStmt
 			| DropForwarderStmt
 			| AlterForwarderStmt
+			| AlterForwarderSetStmt
 			| /*EMPTY*/
 				{ $$ = NULL; }
 		;
@@ -6538,6 +6539,8 @@ PromoteStmt: PROMOTE opt_force
  *		QUERY:
  *				CREATE FORWARDER name (host = 'ip-address', port = nn, ...)
  *				DROP FORWARDER name
+ *				ALTER FORWARDER name (parameters)
+ *				ALTER FORWARDER name SET ACTIVE
  *****************************************************************************/
 CreateForwarderStmt: CREATE FORWARDER name definition
 					{
@@ -6564,7 +6567,14 @@ AlterForwarderStmt: ALTER FORWARDER name definition
 						$$ = (Node *) n;
 					}
 			;
-
+AlterForwarderSetStmt: ALTER FORWARDER name SET ACTIVE
+					{
+						AlterForwarderSetStmt *n = makeNode(AlterForwarderSetStmt);
+						n->name = $3;
+						$$ = (Node *) n;
+					}
+			;
+			
 /*****************************************************************************
  *
  *		QUERY:
@@ -10261,6 +10271,7 @@ unreserved_keyword:
 			| ABSOLUTE_P
 			| ACCESS
 			| ACTION
+			| ACTIVE
 			| ADD_P
 			| ADMIN
 			| AFTER

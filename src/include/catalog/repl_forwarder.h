@@ -45,6 +45,7 @@ CATALOG(repl_forwarder,4552) BKI_SHARED_RELATION BKI_WITHOUT_OIDS
 	int4		port;
 	text		authkey;
 	bool		ssl;
+	bool		active;
 } FormData_repl_forwarder;
 
 /* ----------------
@@ -58,12 +59,13 @@ typedef FormData_repl_forwarder *Form_repl_forwarder;
  *		compiler constants for repl_forwarder
  * ----------------
  */
-#define Natts_repl_forwarder				5
+#define Natts_repl_forwarder				6
 #define Anum_repl_forwarder_name			1
 #define Anum_repl_forwarder_host			2
 #define Anum_repl_forwarder_port			3
 #define Anum_repl_forwarder_authkey			4
 #define Anum_repl_forwarder_ssl				5
+#define Anum_repl_forwarder_active			6
 
 /* ----------------
  *		initial contents of repl_forwarder are NOTHING.

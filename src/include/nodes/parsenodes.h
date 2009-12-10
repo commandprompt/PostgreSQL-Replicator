@@ -2239,6 +2239,12 @@ typedef struct AlterForwarderStmt
 	List	   *options;
 } AlterForwarderStmt;
 
+typedef struct AlterForwarderSetStmt
+{
+	NodeTag		type;
+	char	   *name;
+} AlterForwarderSetStmt;
+
 /* ----------------------
  *		Explain Statement
  * ----------------------

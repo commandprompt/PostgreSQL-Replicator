@@ -1427,7 +1427,7 @@ read_pg_database_line(FILE *fp, char *dbname, Oid *dboid,
  * */
 bool
 read_repl_forwarder_line(FILE *fp, char **name, char **address,
-						 int *port, char **authkey, bool *ssl)
+						 int *port, char **authkey, bool *ssl, bool *active)
 {
 	char		buf[MAX_TOKEN];
 
@@ -1474,6 +1474,16 @@ read_repl_forwarder_line(FILE *fp, char **name, char **address,
 			*ssl = true;
 		else
 			*ssl = false;
+	}
+	
+	/* active */
+	next_token(fp, buf, sizeof(buf));
+	if (active)
+	{
+		if (buf[0] == '1')
+			*active = true;
+		else
+			*active = false;
 	}
 
 	/* expect EOL next */

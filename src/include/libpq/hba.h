@@ -71,7 +71,7 @@ extern int	hba_getauthmethod(hbaPort *port);
 extern bool read_pg_database_line(FILE *fp, char *dbname, Oid *dboid,
 					  Oid *dbtablespace, TransactionId *dbfrozenxid);
 extern bool read_repl_forwarder_line(FILE *fp, char **name, char **address,
-						 int *port, char **authkey, bool *ssl);
+						 int *port, char **authkey, bool *ssl, bool *active);
 extern int check_usermap(const char *usermap_name,
 			  const char *pg_role, const char *auth_user,
 			  bool case_sensitive);

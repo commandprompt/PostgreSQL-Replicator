@@ -930,6 +930,10 @@ ProcessUtility(Node *parsetree,
 		case T_AlterForwarderStmt:
 			AlterForwarder((AlterForwarderStmt *) parsetree);
 			break;
+			
+		case T_AlterForwarderSetStmt:
+			AlterForwarderSet((AlterForwarderSetStmt *) parsetree);
+			break;
 
 		case T_ExplainStmt:
 			ExplainQuery((ExplainStmt *) parsetree, queryString, params, dest);
@@ -2012,6 +2016,10 @@ CreateCommandTag(Node *parsetree)
 
 		case T_AlterForwarderStmt:
 			tag = "ALTER FORWARDER";
+			break;
+			
+		case T_AlterForwarderSetStmt:
+		tag = "ALTER FORWARDER SET";
 			break;
 
 		case T_ExecuteStmt:

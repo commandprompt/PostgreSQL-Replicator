@@ -362,6 +362,7 @@ write_forwarder_file(Relation frel)
 		Datum		port;
 		Datum		authkey;
 		Datum		ssl;
+		Datum		active;
 		bool		isnull;
 
 		named = heap_getattr(tuple, Anum_repl_forwarder_name, tupdesc, &isnull);
@@ -393,15 +394,20 @@ write_forwarder_file(Relation frel)
 		ssl = heap_getattr(tuple, Anum_repl_forwarder_ssl, tupdesc, &isnull);
 		if (isnull)
 			elog(ERROR, "invalid null SSL bit in repl_forwarder");
+		active = heap_getattr(tuple, Anum_repl_forwarder_active, tupdesc, &isnull);
+		if (isnull)
+			elog(ERROR, "invalid null active bit in repl_forwarder");
 
 		/*
-		 * The file format is: "name" addr port "authkey" ssl
+		 * The file format is: "name" addr port "authkey" ssl active
 		 */
 		fputs_quote(NameStr(*name), fp);
 		fprintf(fp, " %s", DatumGetCString(host));
 		fprintf(fp, " %u ", DatumGetInt32(port));
 		fputs_quote(DatumGetCString(authkey), fp);
 		fprintf(fp, " %d", DatumGetBool(ssl) ? 1 : 0);
+		fprintf(fp, " %d", DatumGetBool(active) ? 1: 0);
+		
 		fprintf(fp, "\n");
 
 		pfree(DatumGetPointer(authkey));
@@ -893,6 +899,7 @@ BuildFlatFiles(bool database_only)
 	 * CreateFakeRelcacheEntry does not build a descriptor, but
 	 * write_forwarder_file needs it, so we need to construct one manually.
 	 */
+	elog(LOG, "BuildFlatfiles");
 	rel_fw->rd_att = GetReplForwarderDescriptor();
 	write_forwarder_file(rel_fw);
 	/* Close the relation at smgr level */ 

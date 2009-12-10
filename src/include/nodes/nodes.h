@@ -334,6 +334,7 @@ typedef enum NodeTag
 	T_CreateForwarderStmt,
 	T_DropForwarderStmt,
 	T_AlterForwarderStmt,
+	T_AlterForwarderSetStmt,
 	T_CreateFdwStmt,
 	T_AlterFdwStmt,
 	T_DropFdwStmt,

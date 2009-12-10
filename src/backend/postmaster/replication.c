@@ -53,7 +53,7 @@
 #include <dirent.h>
 #include <time.h>
 
-#define REPLICATION_CATALOG_VERSION 2009013001
+#define REPLICATION_CATALOG_VERSION 2009120901
 
 /* GUC variables */
 bool replication_enable;

@@ -16,6 +16,7 @@
 extern void CreateForwarder(CreateForwarderStmt *stmt);
 extern void DropForwarder(DropForwarderStmt *stmt);
 extern void AlterForwarder(AlterForwarderStmt *stmt);
+extern void AlterForwarderSet(AlterForwarderSetStmt *stmt);
 extern void init_forwarder_config(char **name, char **address, int *port,
 								  char **key, bool *ssl);
 extern void check_forwarder_config(void);

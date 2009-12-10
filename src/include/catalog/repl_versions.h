@@ -60,6 +60,6 @@ typedef FormData_repl_versions *Form_repl_versions;
 #define Anum_repl_versions_version			1
 #define Anum_repl_versions_applied			2
 
-DATA(insert ( 2009013001  "2009-01-30 00:00:00.00000+00" ));
+DATA(insert ( 2009120901  "2009-12-09 00:00:00.00000+00" ));
 
 #endif   /* REPL_VERSIONS_H */
