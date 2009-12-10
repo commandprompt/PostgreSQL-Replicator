@@ -899,7 +899,6 @@ BuildFlatFiles(bool database_only)
 	 * CreateFakeRelcacheEntry does not build a descriptor, but
 	 * write_forwarder_file needs it, so we need to construct one manually.
 	 */
-	elog(LOG, "BuildFlatfiles");
 	rel_fw->rd_att = GetReplForwarderDescriptor();
 	write_forwarder_file(rel_fw);
 	/* Close the relation at smgr level */ 
