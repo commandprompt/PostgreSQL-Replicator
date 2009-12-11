@@ -27,6 +27,7 @@ PostgreSQL documentation
  <refsynopsisdiv>
 <synopsis>
 ALTER FORWARDER <replaceable class="PARAMETER">name</replaceable> ( <replaceable>option</replaceable>=value [, ... ] )
+ALTER FORWARDER <replaceable class="PARAMETER">name</replaceable> SET ACTIVE
 
 where <replaceable class="PARAMETER">option</replaceable> can be:
        host = <replaceable class="PARAMETER">host address</replaceable>
@@ -43,6 +44,14 @@ where <replaceable class="PARAMETER">option</replaceable> can be:
    <command>ALTER FORWADER</command> changes the attributes of a replication
    forwarder.
   </para>
+
+  <para>
+   The <command>SET ACTIVE</command> form activates an existing replication
+   forwarder, and deactivates any other forwarder that may have been active.
+   (Thus only one forwarder can be active at a time.)
+   Only the active forwarder is used for replication exchange.
+  </para>
+
  </refsect1>
  
  <refsect1>
