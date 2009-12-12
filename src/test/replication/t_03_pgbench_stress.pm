@@ -25,13 +25,13 @@ sub run
 		my $outputdir = $self->outputdir;
 		my $master_port;
 
-		my $pgbench = "$testname/pgbench_r/pgbench";
+		my $pgbench = $OPgsql::pgroot."/bin/pgbench";
 
 		$self->clean_output;
 
 		if (! -e $pgbench)
 		{
-			print "Build pgbench from sources at $testname/pgbench_r/ and put binary to $pgbench.\n";
+			print "pgbench not found at $pgbench.\n";
 			print "Now skipping this test.\n";
 			return;
 		}
