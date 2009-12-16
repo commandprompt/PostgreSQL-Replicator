@@ -295,8 +295,7 @@ mcpq_bootstrap(MCPQueue *q)
  * BootStrapMCPQueue
  * 		Create the necessary files for MCPQueue to begin operating.
  *
- * This must be called once in the life of each queue on a Replicator
- * installation.
+ * This must be called once in the life of a Replicator installation.
  */
 void
 BootStrapMCPQueue(void)
