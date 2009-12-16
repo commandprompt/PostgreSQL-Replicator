@@ -329,7 +329,7 @@ SlaveMainLoop(SlaveStatus *status)
  * MCPHosts says.  In this case we just adjust MCPHosts to represent what
  * the slave believes.
  *
- * (3) the slave believes it is in synced state, but have an initial recno
+ * (3) the slave believes it is in synced state, but has an initial recno
  * outside what we have in queue.  For all intents and purposes this is the
  * same as being out of sync, because we cannot serve what it wants.
  *
@@ -1007,7 +1007,7 @@ ReceiveSlaveMessage(SlaveStatus *status)
 		 * transactions (those with recno > slave's frecno). However, when
 		 * repeating a dump from the MCP's queue we lower slave's frecno down
 		 * to the mcp_dump_recno, and ACK's for the previous transactions
-		 * (before dump) would be higher then slave's frecno.  That's why we
+		 * (before dump) would be higher then slave's frecno.  So we
 		 * don't throw them away, but we also don't allow such ACK's to move
 		 * slave's vrecno, because it may be moved past the already sent data. 
 		 */
