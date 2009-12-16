@@ -12,14 +12,14 @@ top_builddir = ../../..
 subdir = src/bin/mammoth
 include $(top_builddir)/src/Makefile.global
 
-all:
+all: init-mammoth-database
 
-$(srcdir)/init-mammoth-database: % : %.in $(top_builddir)/src/Makefile.global
+init-mammoth-database: % : %.in $(top_builddir)/src/Makefile.global
 	sed -e 's,@EGREP@,$(EGREP),g' -e 's,@LN_S@,$(LN_S),g' $< >$@
 	chmod a+x $@
 
-install-scripts: $(srcdir)/init-mammoth-database
-	$(INSTALL_SCRIPT) $(top_srcdir)/$(subdir)/init-mammoth-database $(DESTDIR)$(bindir)
+install-scripts: init-mammoth-database
+	$(INSTALL_SCRIPT) init-mammoth-database $(DESTDIR)$(bindir)
 	$(INSTALL_DATA) $(top_srcdir)/$(subdir)/replicator-functions.sql $(DESTDIR)$(datadir)/replicator-functions.sql
 
 install: all installdirs install-scripts
@@ -32,5 +32,5 @@ uninstall:
 	rm -f $(DESTDIR)$(datadir)/replicator-functions.sql
 
 clean:
-	rm -f $(srcdir)/init-mammoth-database
+	rm -f init-mammoth-database
 
