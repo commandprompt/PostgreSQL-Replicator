@@ -28,6 +28,7 @@
 #include "catalog/index.h"
 #include "catalog/pg_type.h"
 #include "libpq/pqsignal.h"
+#include "mammoth_r/mcp_hosts.h"
 #include "mammoth_r/mcp_queue.h"
 #include "mammoth_r/txlog.h"
 #include "miscadmin.h"
