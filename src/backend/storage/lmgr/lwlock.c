@@ -25,6 +25,7 @@
 #include "access/multixact.h"
 #include "access/subtrans.h"
 #include "mammoth_r/txlog.h"
+#include "mammoth_r/repl_limits.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "storage/ipc.h"
@@ -180,6 +181,9 @@ NumLWLocks(void)
 	 * is 2 (for the forwarder and replication processes) 
 	 */
 	numLocks += NUM_TXLOG_BUFFERS * 2;
+
+	/* mcp_hosts.c needs one per slave */
+	numLocks += MCP_MAX_SLAVES;
 
 	/*
 	 * Add any requested by loadable modules; for backwards-compatibility

@@ -426,6 +426,7 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			bootstrap_signals();
 			BootstrapTXLOG();
 			BootStrapMCPQueue();
+			BootStrapMCPHosts();
 			StartupXLOG();
 			BootstrapModeMain(dbname);
 			proc_exit(1);		/* should never return */

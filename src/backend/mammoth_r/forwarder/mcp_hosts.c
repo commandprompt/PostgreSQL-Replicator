@@ -2,6 +2,9 @@
  * mcp_hosts.c
  * 		The Mammoth Replication MCP Hosts implementation
  *
+ * MCP Hosts is a struct for keeping track of status of slave nodes in the
+ * replication forwarder.
+ *
  * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group,
  * Copyright (c) 2006, Command Prompt, Inc.
  *
@@ -26,16 +29,6 @@
 
 int mcp_max_slaves = MCP_MAX_SLAVES;
 
-typedef struct TxHostsHeader
-{
-	int			fid;			/* id of txdata file */
-#define TXHmagic 0x54584800
-#define TXHinit  0x494E4954
-	int         maxhosts;		/* maximum hosts number which want to retrieve
-								 * data from MCP queue */
-	pg_enc		encoding;		/* encoding of the MCP queue data */
-} TxHostsHeader;
-
 typedef struct TxHostsRecord
 {
 	ullong      frecno;			/* first recno */
@@ -44,158 +37,135 @@ typedef struct TxHostsRecord
 	MCPQSync    sync;			/* synchronized status */
 } TxHostsRecord;
 
-#define TxHostsFullSize \
-	(sizeof(TxHostsHeader) + MCP_MAX_SLAVES * sizeof(TxHostsRecord))
-
-
+/* typedef appears in mcp_hosts.h */
 struct MCPHosts
 {
-	MCPFile		   *txhosts;
-	TxHostsHeader  *txhosts_hdr;
-	TxHostsRecord  *txhosts_tab;
-	LWLockId	   *txhosts_locks;
+	int				h_fid;			/* id of txdata file */
+#define TXHmagic 0x54584800
+#define TXHinit  0x494E4954
+	int         	h_maxhosts;		/* maximum hosts number which want to
+									   retrieve data from MCP queue */
+	pg_enc			h_encoding;		/* encoding of the MCP queue data */
+	TxHostsRecord	h_hosts[MCP_MAX_SLAVES];
+	LWLockId		h_locks[MCP_MAX_SLAVES];
 };
 
-static void mcp_hosts_open(MCPHosts *h);
+/* when stored on disk, it doesn't have h_locks */
+#define MCPHOSTS_DISKSZ	(offsetof(MCPHosts, h_locks))
 
 /*
  * Having a host locked means holding its individual lock or alternatively
  * holding the global lock.
  */
 #define ASSERT_HOST_LOCK_HELD(_h_, _hostno_) \
-	Assert(LWLockHeldByMe((_h_)->txhosts_locks[(_hostno_)]) || \
+	Assert(LWLockHeldByMe((_h_)->h_locks[_hostno_]) || \
 		   LWLockHeldByMe(MCPHostsLock))
 
+/* the path where this stuff lives on disk */
+#define HOSTS_FILENAME (MAMMOTH_FORWARDER_DIR "/hosts")
+
+
 /*
- * Create an empty MCPHosts struct, open it and return it.
+ * Create a MCPHosts struct, open it and return it.
  */
 MCPHosts *
 MCPHostsInit(void)
 {
 	MCPHosts   *h;
-	char		filename[64] = MAMMOTH_FORWARDER_DIR "/hosts";
+	bool		found;
 
-	h = (MCPHosts *) palloc0(sizeof(MCPHosts));
+	h = ShmemInitStruct("Hosts HDR", sizeof(MCPHosts), &found);
+	Assert(found);
 
-	h->txhosts = MCPFileCreate(filename);
+	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+	if (h->h_fid == TXHinit)
+	{
+		MCPFile		*f = MCPFileCreate(HOSTS_FILENAME);
 
-	h->txhosts_hdr = NULL;
-	h->txhosts_tab = NULL;
+		MCPFileOpen(f);
+		MCPFileRead(f, h, MCPHOSTS_DISKSZ, false);
 
-	mcp_hosts_open(h);
+		if (h->h_fid != TXHmagic)
+			elog(ERROR, "incorrect .txh file identificator %d, expected %d",
+				 h->h_fid, TXHmagic);
+
+		/* XXX anything else? */
+
+		MCPFileDestroy(f);
+	}
+	LWLockRelease(MCPHostsLock);
 
 	return h;
 }
 
-/* Initialize shared memory to hold host's header */
+/*
+ * Initialize shared memory to hold the header and per-host records
+ */
 void
 MCPHostsShmemInit(void)
 {
-	TxHostsHeader	*shared;
-	bool			found;
-	
-	shared = ShmemInitStruct("Hosts HDR", TxHostsFullSize,
-							 &found);
-	if (!IsUnderPostmaster)
+	MCPHosts   *hosts;
+	bool		found;
+
+	hosts = ShmemInitStruct("Hosts HDR", sizeof(MCPHosts), &found);
+	if (!found)
 	{
-		Assert(!found);
-		memset(shared, 0, TxHostsFullSize);
-		shared->fid = TXHinit;
+		int		i;
+
+		MemSet(hosts, 0, sizeof(MCPHosts));
+		hosts->h_fid = TXHinit;
+
+		for (i = 0; i < MCP_MAX_SLAVES; i++)
+			hosts->h_locks[i] = LWLockAssign();
 	}
-	else
-		Assert(found);
 }
 
 /*
- * Open the hosts file and map the interesting portion to a shared memory area
+ * Bootstrap an MCPHosts header.
  */
-static void
-mcp_hosts_open(MCPHosts *h)
+void
+BootStrapMCPHosts(void)
 {
-	off_t		sz;
-	int			i;
-	LWLockId   *HostLocks;
-	bool		found;
+	MCPHosts	h;
+	MCPFile	   *f = MCPFileCreate(HOSTS_FILENAME);
 
-	/* Open TxHosts file */
-	MCPFileCreateFile(h->txhosts);
-	sz = MCPFileSeek(h->txhosts, 0, SEEK_END);
-	if (sz < sizeof(TxHostsHeader))
-	{
-		TxHostsHeader   hdr;
-		TxHostsRecord   rec;
+	if (!MCPFileCreateFile(f))
+		ereport(ERROR,
+				(errmsg("could not create hosts header file \"%s\": %m",
+						MCPFileGetPath(f))));
 
-		MCPFileTruncate(h->txhosts, 0);
-		MCPFileSeek(h->txhosts, 0, SEEK_SET);
+	MemSet(&h, 0, sizeof(MCPHosts));
+	h.h_fid = TXHmagic;
+	h.h_maxhosts = MCP_MAX_SLAVES;
 
-		memset(&hdr, 0, sizeof(TxHostsHeader));
-		hdr.fid = TXHmagic;
-		hdr.maxhosts = MCP_MAX_SLAVES;
-		/* encoding is undefined for the empty hosts */
-		hdr.encoding = _PG_LAST_ENCODING_;
+	/* encoding is initially undefined */
+	h.h_encoding = _PG_LAST_ENCODING_;
 
-		MCPFileWrite(h->txhosts, &hdr, sizeof(TxHostsHeader));
+	MCPFileWrite(f, &h, MCPHOSTS_DISKSZ);
 
-		memset(&rec, 0, sizeof(TxHostsRecord));
-		for (i = 0; i < hdr.maxhosts; i++)
-			MCPFileWrite(h->txhosts, &rec, sizeof(TxHostsRecord));
-	}
-	MCPFileSeek(h->txhosts, 0, SEEK_SET);
-
-	HostLocks = (LWLockId *) palloc(sizeof(LWLockId) * MCP_MAX_SLAVES);
-
-	for (i = 0; i < MCP_MAX_SLAVES; i++)
-		HostLocks[i] = i + MCPHostsLock + 1;
-	h->txhosts_locks = HostLocks;		
-
-	/* attach to the host's shared memory */
-	h->txhosts_hdr = ShmemInitStruct("Hosts HDR", TxHostsFullSize, &found);
-
-	/* It should be already initialized */
-	Assert(found);
-
-	/* Make sure we don't have several processes performing the next check
-	 * concurrently.
-	 */
-	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
-	if (h->txhosts_hdr->fid == TXHinit)
-	{
-		/* MCPHosts is opened first time */
-		MCPFileRead(h->txhosts, h->txhosts_hdr, TxHostsFullSize, false);
-	}
-	LWLockRelease(MCPHostsLock);
-
-	if (h->txhosts_hdr->fid != TXHmagic)
-		elog(ERROR, "incorrect .txh file identificator %d, expected %d",
-			 h->txhosts_hdr->fid, TXHmagic);
-
-	h->txhosts_tab = (TxHostsRecord *)
-		((char *) h->txhosts_hdr + sizeof(TxHostsHeader));
+	MCPFileDestroy(f);
 }
 
-/* Close hosts file */
+/*
+ * Write hosts info to disk.
+ */
 void
 MCPHostsClose(MCPHosts *h)
 {
-	if (h->txhosts)
-	{
-		if (h->txhosts_hdr)
-		{
-			MCPFileSeek(h->txhosts, 0, SEEK_SET);
-			MCPFileWrite(h->txhosts, h->txhosts_hdr, TxHostsFullSize);
-		}
-		MCPFileDestroy(h->txhosts);
-		pfree(h->txhosts_locks);
-	}
+	MCPFile	   *f;
 
-	pfree(h);
+	f = MCPFileCreate(HOSTS_FILENAME);
+
+	MCPFileOpen(f);
+	MCPFileWrite(f, h, MCPHOSTS_DISKSZ);
+	MCPFileDestroy(f);
 }
 
 /* Advance slave current transaction recno to the next transaction */
 void
 MCPHostsNextTx(MCPHosts *h, MCPQueue *q, int hostno, ullong last_recno)
 {
-	if (hostno >= h->txhosts_hdr->maxhosts)
+	if (hostno >= h->h_maxhosts)
 		elog(ERROR, "hostno %d out of boundary", hostno);
 
 	ASSERT_HOST_LOCK_HELD(h, hostno);
@@ -206,11 +176,11 @@ MCPHostsNextTx(MCPHosts *h, MCPQueue *q, int hostno, ullong last_recno)
 	 */
 	Assert(MCPQueueGetDatafile(q) == NULL);
 
-	if (h->txhosts_tab[hostno].frecno > last_recno)
+	if (h->h_hosts[hostno].frecno > last_recno)
 		return;
 
-	h->txhosts_tab[hostno].frecno++;
-	h->txhosts_tab[hostno].timestamp = time(NULL);
+	h->h_hosts[hostno].frecno++;
+	h->h_hosts[hostno].timestamp = time(NULL);
 }
 
 /* 
@@ -226,17 +196,17 @@ MCPHostsGetMinAckedRecno(MCPHosts *h, pid_t *node_pid)
 
 	Assert(LWLockHeldByMe(MCPHostsLock));
 
-	/* Looking for min txhosts_tab[i].vrecno  */
-	for (i = 0; i < h->txhosts_hdr->maxhosts; i++)
+	/* Looking for min h_hosts[i].vrecno  */
+	for (i = 0; i < h->h_maxhosts; i++)
 	{
 		/* Ignore disconnected slaves */
-		if (h->txhosts_tab[i].vrecno == InvalidRecno ||
+		if (h->h_hosts[i].vrecno == InvalidRecno ||
 			node_pid[i + 1] == 0)
 			continue;
 		if (recno == InvalidRecno)
-			recno = h->txhosts_tab[i].vrecno;
-		else if (recno > h->txhosts_tab[i].vrecno)
-			recno = h->txhosts_tab[i].vrecno;
+			recno = h->h_hosts[i].vrecno;
+		else if (recno > h->h_hosts[i].vrecno)
+			recno = h->h_hosts[i].vrecno;
 	}
 	return recno;
 }
@@ -266,12 +236,12 @@ MCPHostsGetPruningRecno(MCPHosts *h, MCPQueue *q,
 		{
 			int 	i;
 			/* desync those slaves that are behind the dump */
-			for (i = 0; i < h->txhosts_hdr->maxhosts; i++) 
+			for (i = 0; i < h->h_maxhosts; i++) 
 			{
 				if ((node_pid[i] != 0) && 
-					(h->txhosts_tab[i].vrecno != InvalidRecno) &&
-					(h->txhosts_tab[i].vrecno < dump_start_recno - 1))
-						h->txhosts_tab[i].sync = MCPQUnsynced;
+					(h->h_hosts[i].vrecno != InvalidRecno) &&
+					(h->h_hosts[i].vrecno < dump_start_recno - 1))
+						h->h_hosts[i].sync = MCPQUnsynced;
 			}
 			vrecno = dump_start_recno - 1;
 		}
@@ -330,7 +300,7 @@ MCPHostsCleanup(MCPHosts *h, MCPQueue *q, ullong recno)
 
 	/* need to fix up MCPHosts before removing anything from the queue */
 	MCPHostsLockAll(h, LW_EXCLUSIVE);
-	for (; hostno < h->txhosts_hdr->maxhosts; hostno++)
+	for (; hostno < h->h_maxhosts; hostno++)
 	{
 		if (MCPHostsGetFirstRecno(h, hostno) < recno)
 			MCPHostsSetFirstRecno(h, hostno, recno);
@@ -350,7 +320,7 @@ MCPHostsGetFirstRecno(MCPHosts *h, int hostno)
 {
 	ASSERT_HOST_LOCK_HELD(h, hostno);
 
-	return h->txhosts_tab[hostno].frecno;
+	return h->h_hosts[hostno].frecno;
 }
 
 /* Set first-to-process recno for the slave */
@@ -359,7 +329,7 @@ MCPHostsSetFirstRecno(MCPHosts *h, int hostno, ullong new_frecno)
 {
 	ASSERT_HOST_LOCK_HELD(h, hostno);
 
-	h->txhosts_tab[hostno].frecno = new_frecno;
+	h->h_hosts[hostno].frecno = new_frecno;
 }
 
 /* Return acknowledged recno for the slave */
@@ -368,7 +338,7 @@ MCPHostsGetAckedRecno(MCPHosts *h, int hostno)
 {
 	ASSERT_HOST_LOCK_HELD(h, hostno);
 
-	return h->txhosts_tab[hostno].vrecno;
+	return h->h_hosts[hostno].vrecno;
 }
 
 /* Set acknowledged recno for the slave */
@@ -377,7 +347,7 @@ MCPHostsSetAckedRecno(MCPHosts *h, int hostno, ullong new_vrecno)
 {
 	ASSERT_HOST_LOCK_HELD(h, hostno);
 
-	h->txhosts_tab[hostno].vrecno = new_vrecno;
+	h->h_hosts[hostno].vrecno = new_vrecno;
 }
 
 /* Return the sync status for the slave */
@@ -386,7 +356,7 @@ MCPHostsGetSync(MCPHosts *h, int hostno)
 {
 	ASSERT_HOST_LOCK_HELD(h, hostno);
 
-	return h->txhosts_tab[hostno].sync;
+	return h->h_hosts[hostno].sync;
 }
 
 /* Set sync status for the given slave */
@@ -396,9 +366,9 @@ MCPHostsSetSync(MCPHosts *h, int hostno, MCPQSync sync)
 	ASSERT_HOST_LOCK_HELD(h, hostno);
 
 	elog(DEBUG4, "MCPHostSetSync %s -> %s",
-		 MCPQSyncAsString(h->txhosts_tab[hostno].sync),
+		 MCPQSyncAsString(h->h_hosts[hostno].sync),
 		 MCPQSyncAsString(sync));
-	h->txhosts_tab[hostno].sync = sync;
+	h->h_hosts[hostno].sync = sync;
 }
 
 /*
@@ -414,7 +384,7 @@ MCPHostsLogTabStatus(int elevel, MCPHosts *h, int hostno, char *prefix, pid_t *n
 	if (hostno == -1)
 	{
 		startpoint = 0;
-		endpoint = h->txhosts_hdr->maxhosts - 1;
+		endpoint = h->h_maxhosts - 1;
 	}
 	else
 		startpoint = endpoint = hostno;
@@ -427,9 +397,9 @@ MCPHostsLogTabStatus(int elevel, MCPHosts *h, int hostno, char *prefix, pid_t *n
 			 "%s: slave(%d), f="UNI_LLU" v="UNI_LLU" sync: %s",
 			 prefix,
 			 hostno,
-			 h->txhosts_tab[hostno].frecno,
-			 h->txhosts_tab[hostno].vrecno,
-			 MCPQSyncAsString(h->txhosts_tab[hostno].sync));
+			 h->h_hosts[hostno].frecno,
+			 h->h_hosts[hostno].vrecno,
+			 MCPQSyncAsString(h->h_hosts[hostno].sync));
 	}
 }
 
@@ -437,28 +407,28 @@ time_t
 MCPHostsGetTimestamp(MCPHosts *h, int hostno)
 {
 	ASSERT_HOST_LOCK_HELD(h, hostno);
-	return h->txhosts_tab[hostno].timestamp;
+	return h->h_hosts[hostno].timestamp;
 }
 
 int
 MCPHostsGetMaxHosts(MCPHosts *h)
 {
 	Assert(LWLockHeldByMe(MCPHostsLock));
-	return h->txhosts_hdr->maxhosts;
+	return h->h_maxhosts;
 }
 
 void
 MCPHostLock(MCPHosts *h, int hostno, LWLockMode mode)
 {
 	LWLockAcquire(MCPHostsLock, mode);
-	LWLockAcquire(h->txhosts_locks[hostno], mode);
+	LWLockAcquire(h->h_locks[hostno], mode);
 	LWLockRelease(MCPHostsLock);
 }
 
 void
 MCPHostUnlock(MCPHosts *h, int hostno)
 {
-	LWLockRelease(h->txhosts_locks[hostno]);
+	LWLockRelease(h->h_locks[hostno]);
 }
 
 void
@@ -467,8 +437,8 @@ MCPHostsLockAll(MCPHosts *h, LWLockMode mode)
 	int 	i;
 
 	LWLockAcquire(MCPHostsLock, mode);
-	for (i = 0; i < h->txhosts_hdr->maxhosts; i++)
-		LWLockAcquire(h->txhosts_locks[i], mode);
+	for (i = 0; i < h->h_maxhosts; i++)
+		LWLockAcquire(h->h_locks[i], mode);
 }
 
 void
@@ -476,8 +446,8 @@ MCPHostsUnlockAll(MCPHosts *h)
 {
 	int 	i;
 
-	for (i = 0; i < h->txhosts_hdr->maxhosts; i++)
-		LWLockRelease(h->txhosts_locks[i]);
+	for (i = 0; i < h->h_maxhosts; i++)
+		LWLockRelease(h->h_locks[i]);
 
 	LWLockRelease(MCPHostsLock);
 }
@@ -487,12 +457,12 @@ void
 MCPHostsSetEncoding(MCPHosts *h, pg_enc new_encoding)
 {
 	Assert(LWLockHeldByMe(MCPHostsLock));
-	h->txhosts_hdr->encoding = new_encoding;
+	h->h_encoding = new_encoding;
 }
 
 pg_enc
 MCPHostsGetEncoding(MCPHosts *h)
 {
 	Assert(LWLockHeldByMe(MCPHostsLock));
-	return h->txhosts_hdr->encoding;
+	return h->h_encoding;
 }

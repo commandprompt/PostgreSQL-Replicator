@@ -19,6 +19,7 @@ extern int mcp_max_slaves;
 typedef struct MCPHosts MCPHosts;
 
 extern MCPHosts *MCPHostsInit(void);
+extern void		BootStrapMCPHosts(void);
 extern void 	MCPHostsShmemInit(void);
 extern void		MCPHostsClose(MCPHosts *h);
 extern void		MCPHostsNextTx(MCPHosts *h, MCPQueue *q, int hostno,

@@ -73,8 +73,6 @@ typedef enum LWLockId
 	ForwarderTxlogControlLock,
 	MCPServerLock,
 	MCPHostsLock,
-    /* Do not put any locks between MCPHostLock and MCPHostLastLock */
-	MCPLastHostLock = MCPHostsLock + MCP_MAX_SLAVES,
     MCPTableListLock,
 	BtreeVacuumLock,
 	AddinShmemInitLock,
