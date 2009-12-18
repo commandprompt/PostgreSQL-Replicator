@@ -567,18 +567,13 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 					 errdetail("Record number "UNI_LLU, rm->recno)));
 
 			/* 
-             * Set the position of a 'cached' dump in queue, reset dump 
-             * in progress flag.
+			 * Set the position of a 'cached' dump in queue and reset the
+			 * dump-in-progress flag.
              */
 			LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
 			FullDumpSetProgress(FDnone);
-			
-			/* set dump start recno to current recno and end recno to invalid */
 			FullDumpSetStartRecno(rm->recno);
 			FullDumpSetEndRecno(InvalidRecno);
-			
-			/* reset size of the full dump */
-			FullDumpSetSize((off_t) 0);
 			LWLockRelease(MCPServerLock);
 			
 			dump_in_progress = true;
@@ -595,12 +590,12 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 		{
 			ereport(LOG,
 					(errmsg("received start of dump"),
-					errdetail("Record number "UNI_LLU, rm->recno)));
-					 					
+					 errdetail("Record number "UNI_LLU, rm->recno)));
+
 			LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
 			FullDumpSetEndRecno(rm->recno);			
 			LWLockRelease(MCPServerLock);			
-					
+
 		}
 		if (rm->flags & MCP_QUEUE_FLAG_TABLE_DUMP ||
 			rm->flags & MCP_QUEUE_FLAG_CATALOG_DUMP)
@@ -632,25 +627,18 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 		TXLOGSetCommitted(rm->recno);
 		UnlockReplicationQueue(state->ms_queue);
 
-		/* accumulate total size of dump transactions */
+		/* 
+		 * Recheck that we are still receiving a full dump.  If we aren't,
+		 * clear the dump_in_progress flag.
+		 */
 		if (dump_in_progress)
 		{
-			TxDataHeader *hdr = (TxDataHeader *) rm->data;
-			off_t txsize = hdr->dh_len;
-
 			LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
-			FullDumpSetSize(FullDumpGetSize() + txsize);
 
-			/* 
-			 * Recheck that we are still receiving a full dump.
-			 * In case we are not clear dump_in_progress flag.
-			 */
-			if ((FullDumpGetStartRecno() == InvalidRecno) || 
-				(FullDumpGetEndRecno() != InvalidRecno))
+			if (FullDumpGetStartRecno() == InvalidRecno || 
+				FullDumpGetEndRecno() != InvalidRecno)
 			{
 				dump_in_progress = false;
-				elog(DEBUG5, "full dump received, size "UINT64_FORMAT" bytes", 
-					 (uint64) FullDumpGetSize());
 			}
 			LWLockRelease(MCPServerLock);
 		}			

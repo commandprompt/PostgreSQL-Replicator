@@ -147,23 +147,6 @@ FullDumpGetEndRecno(void)
 	return DumpCtl->mcp_dump_end_recno;
 }
 
-/* Get/Set size of a full dump */
-
-void
-FullDumpSetSize(off_t size)
-{
-	Assert(LWLockHeldByMe(MCPServerLock));
-	DumpCtl->mcp_dump_size = size;
-}
-
-off_t
-FullDumpGetSize(void)
-{
-	Assert(LWLockHeldByMe(MCPServerLock));
-	return DumpCtl->mcp_dump_size;
-}
-
-
 /* Write dump variables into the forwarder state file */
 void
 WriteForwarderStateFile(void)

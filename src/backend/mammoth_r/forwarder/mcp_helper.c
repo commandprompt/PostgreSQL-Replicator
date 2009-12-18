@@ -179,7 +179,6 @@ OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno)
 		{
 			FullDumpSetStartRecno(InvalidRecno);
 			FullDumpSetEndRecno(InvalidRecno);
-			FullDumpSetSize(0);
 			elog(DEBUG4, "full dump is removed from the queue");
 		}
 	}

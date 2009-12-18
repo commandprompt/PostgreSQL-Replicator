@@ -119,9 +119,6 @@ extern ullong FullDumpGetEndRecno(void);
 extern void FullDumpSetStartRecno(ullong recno);
 extern void FullDumpSetEndRecno(ullong recno);
  
-extern off_t FullDumpGetSize(void);
-extern void  FullDumpSetSize(off_t size);
-
 extern void WriteForwarderStateFile(void);
 extern void ReadForwarderStateFile(void);
 extern void RemoveForwarderStateFile(void);
