@@ -1077,7 +1077,6 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 	MCPHosts *h = status->ss_hosts;
 	int		hostno = status->ss_hostno;
 
-	elog(DEBUG2, "slave dump request");
 	LWLockAcquire(MCPServerLock, LW_SHARED);
 	LockReplicationQueue(status->ss_queue, LW_SHARED);
 	MCPHostLock(h, hostno, LW_EXCLUSIVE);
@@ -1086,15 +1085,15 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 	host_vrecno = MCPHostsGetAckedRecno(h, hostno);
 	queue_brecno = MCPQueueGetInitialRecno(status->ss_queue);
 
-	if (stored_dump_recno != InvalidRecno)
-		elog(DEBUG2, "MCP has a dump in the queue, recno "UNI_LLU,
-			 stored_dump_recno);
-	else
-		elog(DEBUG2, "MCP doesn't have a dump in the queue");
+	/* dump at recno 0 (invalid) means no dump */
+	ereport(DEBUG2,
+			(errmsg("slave dump request"),
+			 errcontext("dump in queue: recno "UNI_LLU,
+						stored_dump_recno)));
 
-	if (stored_dump_recno != InvalidRecno && 
-		stored_dump_recno >= queue_brecno && 
-		(host_vrecno < stored_dump_recno))
+	if (stored_dump_recno != InvalidRecno &&
+		stored_dump_recno >= queue_brecno &&
+		host_vrecno < stored_dump_recno)
 	{
 		/*
 		 * If MCP has an old dump in the queue and this slave hasn't tried to
@@ -1112,19 +1111,18 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 	else
 	{
 		/* Decide whether to request a dump from master */
-		if (FullDumpGetProgress() == FDnone)
+		FullDumpProgress	progress = FullDumpGetProgress();
+
+		if (progress == FDnone)
 		{
 			/* Requesting a dump from master */
 			elog(DEBUG2, "requesting dump from master");
-
 			request = true;
 			MCPHostsSetSync(h, hostno, MCPQUnsynced);
 		}
 		else
 		{
-			FullDumpProgress progress = FullDumpGetProgress();
-			elog(DEBUG2, "dump was already requested: "
-				 "dump progress = %s",
+			elog(DEBUG2, "dump was already requested: dump progress = %s",
 				 FDProgressAsString(progress));
 			result = false;
 			/* Set the slave's sync state to unsynced */
