@@ -56,7 +56,6 @@ typedef struct MCPDumpVars
 	FullDumpProgress   mcp_dump_progress; /* need to send DESYNC to master */
 	ullong	mcp_dump_start_recno; /* start latest dump stored in the forwarder queue */
 	ullong	mcp_dump_end_recno;	  /* end of the latest dump stored in the forwarer queue */
-	off_t	mcp_dump_size;		  /* size of the latest full dump */
 	bool	table_dump_request;   /* true if a slave requested a dump of the table */
 } MCPDumpVars;
 
