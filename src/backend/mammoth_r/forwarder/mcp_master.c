@@ -589,7 +589,7 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 		else if (rm->flags & MCP_QUEUE_FLAG_DUMP_END)
 		{
 			ereport(LOG,
-					(errmsg("received start of dump"),
+					(errmsg("received end of dump"),
 					 errdetail("Record number "UNI_LLU, rm->recno)));
 
 			LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
