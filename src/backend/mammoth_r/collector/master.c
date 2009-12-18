@@ -405,11 +405,11 @@ PGRDumpCatalogs(MCPQueue *master_mcpq, CommitDumpMode mode)
 		LWLockAcquire(ReplicationCommitLock, LW_EXCLUSIVE);
 
 		/*
-	 	 * Take our "serializable" snapshot.  This must be done _after_ we have
-	 	 * acquired the ReplicationCommitLock, to make sure no transaction commits
-	 	 * between our snapshot and our putting of the dump label in the queue.
-	 	 * Note that in CommitNoDump case ReplicationCommmitLock was aleady acquired
-	 	 * by the caller.
+		 * Take our "serializable" snapshot.  This must be done _after_ we have
+		 * acquired the ReplicationCommitLock, to make sure no transaction
+		 * commits between our snapshot and our putting of the dump label in
+		 * the queue.  Note that in CommitNoDump case ReplicationCommmitLock
+		 * was already acquired by the caller.
 	 	 */
 
 		serializable = RegisterSnapshot(GetTransactionSnapshot());
@@ -427,15 +427,15 @@ PGRDumpCatalogs(MCPQueue *master_mcpq, CommitDumpMode mode)
 		data_file = MCPLocalQueueGetFile(MasterLocalQueue);
 
 		/*
-	 	 * Enqueue transaction data file. Contrary to the normal transaction we do
-	 	 * this before placing actual data into the file.
+		 * Enqueue transaction data file. Contrary to the normal transaction we
+		 * do this before placing actual data into the file.
 	 	 */
 		dump_recno = MCPQueueCommit(master_mcpq, data_file, InvalidRecno);
 
 		/*
-	 	 * We can release the ReplicationCommitLock here, because from this point on
-	 	 * it's safe that other transactions start committing things.  Their data
-	 	 * will be in the queue after our DumpLabel.
+		 * We can release the ReplicationCommitLock here, because from this
+		 * point on it's safe that other transactions start committing things.
+		 * Their data will be in the queue after our DumpLabel.
 	 	 */
 		LWLockRelease(ReplicationCommitLock);
 	}
