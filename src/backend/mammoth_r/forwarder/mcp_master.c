@@ -621,42 +621,39 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 			LWLockRelease(MCPServerLock);
 		}
 
-		/* Commit a transaction */
-		if (rm->recno != InvalidRecno)
-		{
-			/* Clear the empty state of the queue */
-			LockReplicationQueue(state->ms_queue, LW_EXCLUSIVE);
-			MCPQueueTxCommit(state->ms_queue, rm->recno);
-			TXLOGSetCommitted(rm->recno);
-			UnlockReplicationQueue(state->ms_queue);
-			
-
-			/* accumulate total size of dump transactions */
-			if (dump_in_progress)
-			{
-					TxDataHeader *hdr = (TxDataHeader *) rm->data;
-					off_t txsize = hdr->dh_len;
-							
-					LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
-					FullDumpSetSize(FullDumpGetSize() + txsize);
-					 				
-					/* 
-					 * Recheck that we are still receiving a full dump.
-					 * In case we are not clear dump_in_progress flag.
-					 */
-					if ((FullDumpGetStartRecno() == InvalidRecno) || 
-						(FullDumpGetEndRecno() != InvalidRecno))
-					{
-							dump_in_progress = false;
-							elog(DEBUG5, "full dump received, size "UINT64_FORMAT" bytes", 
-								 (uint64) FullDumpGetSize());
-					}
-					LWLockRelease(MCPServerLock);
-			}			
-		}
-		else
+		if (rm->recno == InvalidRecno)
 			elog(ERROR,
 				 "attempted to commit a transaction with invalid record number");
+
+		/* Commit the transaction */
+		/* Clear the empty state of the queue */
+		LockReplicationQueue(state->ms_queue, LW_EXCLUSIVE);
+		MCPQueueTxCommit(state->ms_queue, rm->recno);
+		TXLOGSetCommitted(rm->recno);
+		UnlockReplicationQueue(state->ms_queue);
+
+		/* accumulate total size of dump transactions */
+		if (dump_in_progress)
+		{
+			TxDataHeader *hdr = (TxDataHeader *) rm->data;
+			off_t txsize = hdr->dh_len;
+
+			LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
+			FullDumpSetSize(FullDumpGetSize() + txsize);
+
+			/* 
+			 * Recheck that we are still receiving a full dump.
+			 * In case we are not clear dump_in_progress flag.
+			 */
+			if ((FullDumpGetStartRecno() == InvalidRecno) || 
+				(FullDumpGetEndRecno() != InvalidRecno))
+			{
+				dump_in_progress = false;
+				elog(DEBUG5, "full dump received, size "UINT64_FORMAT" bytes", 
+					 (uint64) FullDumpGetSize());
+			}
+			LWLockRelease(MCPServerLock);
+		}			
 
 		/* Tell the slaves they have a new data to replicate */
 		MasterNotifySlaves(state);
