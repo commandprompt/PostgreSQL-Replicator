@@ -229,7 +229,7 @@ ReadForwarderStateFile(void)
 		uint32 	version;
 		size_t	toread;
 		bool 	warn = false;
-		
+
 		MCPFileOpen(mf_state);
 		if (!MCPFileRead(mf_state, &version, sizeof(uint32), true))
 		{
@@ -238,12 +238,11 @@ ReadForwarderStateFile(void)
 		}
 		/* Check version information */
 		else if (version != STATE_FILE_VERSION)
-			ereport(WARNING, (errmsg("Wrong version of MCP dump state file"),
-							  errdetail("current version %u, found %u",
-							 			 STATE_FILE_VERSION, version)));
-							
-		else 
-		if (!MCPFileRead(mf_state, localDumpCtl, sizeof(MCPDumpVars), true))
+			ereport(WARNING,
+					(errmsg("Wrong version of MCP dump state file"),
+					 errdetail("current version %u, found %u",
+							   STATE_FILE_VERSION, version)));
+		else if (!MCPFileRead(mf_state, localDumpCtl, sizeof(MCPDumpVars), true))
 		{
 			warn = true;
 			toread = sizeof(MCPDumpVars);
@@ -255,19 +254,26 @@ ReadForwarderStateFile(void)
 			memcpy(DumpCtl, localDumpCtl, sizeof(MCPDumpVars));
 			LWLockRelease(MCPServerLock);
 		}
-		/* Check whether we should report a warning */
+
+		/*
+		 * Report a warning if necessary; we also save the file under another name
+		 * for possible future examination.
+		 */
 		if (warn)
 		{
-			char    *debug_filename = palloc(strlen(filename) + 7);
-			
-			ereport(WARNING, (errmsg("EOF received when reading %lu bytes at offset "UINT64_FORMAT" from %s", 
-							 (unsigned long) toread, 
-							  (ullong) MCPFileSeek(mf_state, 0, SEEK_CUR), filename),
-							  errhint("%s is probably corrupted", filename)));
+			char    *debug_filename;
+
+			ereport(WARNING,
+					(errmsg("EOF received when reading %lu bytes at offset "UINT64_FORMAT" from %s", 
+							(unsigned long) toread,
+							(ullong) MCPFileSeek(mf_state, 0, SEEK_CUR),
+							filename),
+					 errhint("%s is probably corrupted", filename)));
+
 			/* Append _debug to a file name for futher examination by user */
-			snprintf(debug_filename, 
-					 strlen(filename) + 7, "%s_debug", filename);
-			
+			debug_filename =  palloc(strlen(filename) + 7);
+			snprintf(debug_filename, strlen(filename) + 7, "%s_debug", filename);
+
 			MCPFileRename(mf_state, debug_filename);
 			pfree(debug_filename);	
 		}
@@ -276,7 +282,7 @@ ReadForwarderStateFile(void)
 	}
 	/* release memory */
 	MCPFileDestroy(mf_state);
-	
+
 	pfree(localDumpCtl);
 }
 
