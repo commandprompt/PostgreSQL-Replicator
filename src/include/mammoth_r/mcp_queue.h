@@ -38,10 +38,19 @@ typedef struct
 } TxDataHeader;
 
 #define DATA_HEADER_ID 0x5458
- 
+
 /* struct definition appears in mcp_queue.c */
 typedef struct MCPQueue MCPQueue;
 
+/* queue callbacks for interesting events */
+typedef enum
+{
+	MCPQ_EVENT_PRUNE
+} MCPQevent;
+
+typedef void (*MCPQCallback) (ullong recno, void *data);
+
+/* Function prototypes */
 /* queue initialization, open and close functions */
 extern void		BootStrapMCPQueue(void);
 extern Size		MCPQueueShmemSize(void);
@@ -81,6 +90,8 @@ extern void 	MCPQueueSetDequeueTimestamp(MCPQueue *q);
 /* misc functions */
 extern void		MCPQueueLogHdrStatus(int elevel, MCPQueue *queue, char *prefix);
 extern char	   *MCPQueueGetLocalFilename(MCPQueue *q, char *base);
+extern void		MCPQRegisterCallback(MCPQueue *q, MCPQCallback callback,
+									 void *arg);
 
 /* functions dealing with invidual transactions */
 extern void		MCPQueueNextTx(MCPQueue *q);

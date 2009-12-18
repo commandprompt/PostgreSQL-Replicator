@@ -96,6 +96,13 @@ typedef struct
 	char        end;
 } TxQueueHeader;
 
+/* List of queue callbacks */
+typedef struct MCPQCallbackItem
+{
+	struct MCPQCallbackItem *next;
+	MCPQCallback callback;
+	void	   *arg;
+} MCPQCallbackItem;
 
 /* typedef appears in mcp_queue.h */
 struct MCPQueue
@@ -106,6 +113,7 @@ struct MCPQueue
 	const char *name;		/* this queue's name (for debugging purposes) */
 	const char *dir;		/* this queue's dir name */
 	LWLockId	lock;			/* this queue's lock */
+	MCPQCallbackItem *callbacks;
 };
 
 static MCPQueue BackendMCPQueueData =
@@ -115,7 +123,8 @@ static MCPQueue BackendMCPQueueData =
 	NULL,
 	"Backend replication queue",
 	MAMMOTH_BACKEND_DIR "/queue",
-	BackendQueueLock
+	BackendQueueLock,
+	NULL
 };
 
 static MCPQueue ForwarderMCPQueueData =
@@ -125,12 +134,13 @@ static MCPQueue ForwarderMCPQueueData =
 	NULL,
 	"Forwarder replication queue",
 	MAMMOTH_FORWARDER_DIR "/queue",
-	ForwarderQueueLock
+	ForwarderQueueLock,
+	NULL
 };
-
 
 static void MCPQueueSetEmpty(MCPQueue *q, bool empty);
 static void MCPQueueTruncate(MCPQueue *q, ullong new_brecno);
+static void CallMCPQCallbacks(MCPQueue *q, MCPQevent event);
 
 /*
  * return a palloc'd filename from the given format and va_args.
@@ -582,6 +592,28 @@ MCPQueueCalculateSize(MCPQueue *q, ullong recno)
 	return total;
 }
 
+void
+MCPQRegisterCallback(MCPQueue *q, MCPQCallback callback, void *arg)
+{
+	MCPQCallbackItem *item;
+
+	item = (MCPQCallbackItem *)
+		MemoryContextAlloc(TopMemoryContext, sizeof(MCPQCallbackItem));
+	item->callback = callback;
+	item->arg = arg;
+	item->next = q->callbacks;
+	q->callbacks = item;
+}
+
+static void
+CallMCPQCallbacks(MCPQueue *q, MCPQevent event)
+{
+	MCPQCallbackItem  *item;
+
+	for (item = q->callbacks; item; item = item->next)
+		(*item->callback) (event, item->arg);
+}
+
 /* MCPQueuePrune
  *
  * Free the queue space by deleting already confirmed records data.
@@ -641,6 +673,8 @@ MCPQueueTruncate(MCPQueue *q, ullong new_brecno)
 						" truncate point: "UNI_LLU,
 						q->txqueue_hdr->brecno, q->txqueue_hdr->lrecno, new_brecno)));
 	}
+
+	CallMCPQCallbacks(q, MCPQ_EVENT_PRUNE);
 
 	/* Remove obsolete TXLOG segments. Only remove existing segments. */
 	TXLOGTruncate(Min(MCPQueueGetLastRecno(q), new_brecno));
