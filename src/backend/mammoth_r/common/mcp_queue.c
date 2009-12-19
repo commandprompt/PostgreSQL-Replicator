@@ -140,7 +140,7 @@ static MCPQueue ForwarderMCPQueueData =
 
 static void MCPQueueSetEmpty(MCPQueue *q, bool empty);
 static void MCPQueueTruncate(MCPQueue *q, ullong new_brecno);
-static void CallMCPQCallbacks(MCPQueue *q, MCPQevent event);
+static void CallMCPQCallbacks(MCPQueue *q, MCPQevent event, ullong recno);
 
 /*
  * return a palloc'd filename from the given format and va_args.
@@ -606,12 +606,12 @@ MCPQRegisterCallback(MCPQueue *q, MCPQCallback callback, void *arg)
 }
 
 static void
-CallMCPQCallbacks(MCPQueue *q, MCPQevent event)
+CallMCPQCallbacks(MCPQueue *q, MCPQevent event, ullong recno)
 {
 	MCPQCallbackItem  *item;
 
 	for (item = q->callbacks; item; item = item->next)
-		(*item->callback) (event, item->arg);
+		(*item->callback) (event, item->arg, recno);
 }
 
 /* MCPQueuePrune
@@ -674,7 +674,7 @@ MCPQueueTruncate(MCPQueue *q, ullong new_brecno)
 						q->txqueue_hdr->brecno, q->txqueue_hdr->lrecno, new_brecno)));
 	}
 
-	CallMCPQCallbacks(q, MCPQ_EVENT_PRUNE);
+	CallMCPQCallbacks(q, MCPQ_EVENT_PRUNE, new_brecno);
 
 	/* Remove obsolete TXLOG segments. Only remove existing segments. */
 	TXLOGTruncate(Min(MCPQueueGetLastRecno(q), new_brecno));

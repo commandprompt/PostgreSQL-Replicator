@@ -48,7 +48,7 @@ typedef enum
 	MCPQ_EVENT_PRUNE
 } MCPQevent;
 
-typedef void (*MCPQCallback) (ullong recno, void *data);
+typedef void (*MCPQCallback) (MCPQevent event, ullong recno, void *arg);
 
 /* Function prototypes */
 /* queue initialization, open and close functions */
