@@ -90,7 +90,7 @@ static const TxlogCtlData ForwarderTxlogCtlData =
 #define ForwarderTxlogCtl (&ForwarderTxlogCtlData)
 
 /*
- * Only one TXLOG can be in use active any one process.  We initialize this to
+ * Only one TXLOG can be in active use in a process.  We initialize this to
  * NULL and have interested processes select at runtime the one to use.
  */
 static const TxlogCtlData		*activeTxlogCtl = NULL;
@@ -167,7 +167,7 @@ bool
 TXLOGIsForwarder(void)
 {
 	Assert(activeTxlogCtl != NULL);
-	return (activeTxlogCtl == ForwarderTxlogCtl);
+	return activeTxlogCtl == ForwarderTxlogCtl;
 }
 
 static void
@@ -238,7 +238,7 @@ CheckPointTXLOG(void)
 static bool
 TXLOGPagePrecedes(int page1, int page2)
 {
-	return (page1 < page2);
+	return page1 < page2;
 }
 
 
@@ -486,13 +486,12 @@ txlog_redo(XLogRecPtr lsn, XLogRecord *rec)
 							byteno,
 							bshift;
 		char 			   *byteptr;
-		
 		TxlogRedoCommitData	redo;
 		const TxlogCtlData	*ctl;
 		
 		memcpy(&redo, XLogRecGetData(rec), sizeof(TxlogRedoCommitData));
 		
-		ctl = (redo.isforwarder) ? ForwarderTxlogCtl : BackendTxlogCtl;
+		ctl = redo.isforwarder ? ForwarderTxlogCtl : BackendTxlogCtl;
 		
 		pageno = RecnoToPage(redo.recno);
 		byteno = RecnoToByte(redo.recno);
@@ -505,9 +504,10 @@ txlog_redo(XLogRecPtr lsn, XLogRecord *rec)
 		*byteptr |= (1 << bshift);
 		ctl->slruCtl->shared->page_dirty[slotno] = true;
 		
-		/* XXX: is it necessary to write a page here ? */
-		SimpleLruWritePage(ctl->slruCtl, slotno, NULL);
-		Assert(!ctl->slruCtl->shared->page_dirty[slotno]);
+		/*
+		 * Note that it's not necessary to write the page here, because it
+		 * will be written and flushed by the next restartpoint.
+		 */
 		
 		LWLockRelease(ctl->lock);
 		
