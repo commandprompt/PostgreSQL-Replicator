@@ -12,6 +12,6 @@ subdir = src/backend/mammoth_r/collector
 top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global
 
-OBJS = pgr.o master.o slave.o promotion.o repl_tuples.o common.o
+OBJS = pgr.o master.o slave.o promotion.o repl_tuples.o common.o signals.o
 
 include $(top_srcdir)/src/backend/common.mk

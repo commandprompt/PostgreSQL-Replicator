@@ -27,6 +27,7 @@
 #include "mammoth_r/mcp_compress.h"
 #include "mammoth_r/mcp_connection.h"
 #include "mammoth_r/mcp_queue.h"
+#include "mammoth_r/signals.h"
 #include "mammoth_r/txlog.h"
 #include "mammoth_r/promotion.h"
 #include "mb/pg_wchar.h"
@@ -343,15 +344,13 @@ ReplicationMasterMain(MCPQueue *q)
 		/* Check if user triggered promotion on master. We ignore anything 
 		 * but back promotion here, but emit a warning for wrong promotion type 
 		 */
-		if (promotion_request)
+		if (ReplLocalSignalData.promotion)
 		{
+			
+			ReplLocalSignalData.promotion = false;
+
 			LWLockAcquire(ReplicationLock, LW_EXCLUSIVE);
-
-			promotion_request = false;
-
-            /* Cancel setting promotion_request on receiving sigusr1 */
-            ReplSignalData->promotion = false;
-
+			
 			if (!ReplPromotionData->promotion_in_progress)
 			{
 

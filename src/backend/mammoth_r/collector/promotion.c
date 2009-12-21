@@ -22,6 +22,7 @@
 #include "mammoth_r/agents.h"
 #include "mammoth_r/mcp_connection.h"
 #include "mammoth_r/promotion.h"
+#include "mammoth_r/signals.h"
 #include "miscadmin.h"
 #include "postmaster/replication.h"
 #include "storage/ipc.h"
@@ -29,12 +30,11 @@
 #include "storage/pmsignal.h"
 #include "utils/guc.h"
 
-bool promotion_request = false;
 
 /*
- * Global variables that point to shared-memory structured.
+ * Promotion shared memory data
  */
-ReplicationSignalData	   *ReplSignalData;
+
 ReplicationPromotionData   *ReplPromotionData;
 
 static void write_promotion_file(ReplicationMode mode, uint32 slaveno,
@@ -61,7 +61,7 @@ BackendInitiatePromotion(PromoteStmt *stmt)
 	if (!ReplPromotionData->promotion_in_progress)
 	{
 		/* Set the promotion flags in shared memory */
-		ReplSignalData->promotion = true;
+		ReplSharedSignalData->promotion = true;
 		ReplPromotionData->force_promotion = stmt->force;
 		ReplPromotionData->back_promotion = stmt->back;
 		in_progress = false;

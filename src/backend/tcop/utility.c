@@ -958,6 +958,17 @@ ProcessUtility(Node *parsetree,
 		case T_AlterForwarderSetStmt:
 			AlterForwarderSet((AlterForwarderSetStmt *) parsetree);
 			break;
+			
+		case T_AlterSlaveStmt:
+			{
+				AlterSlaveStmt	*stmt = (AlterSlaveStmt *) parsetree;
+				/* Sanity checks, one and only one flag should be set */
+				Assert(stmt->request_dump || stmt->resume_restore);
+				Assert(!(stmt->request_dump && stmt->resume_restore));
+				
+				ProcessAlterSlaveCommand(stmt);
+			}
+			break;
 
 		case T_ExplainStmt:
 			ExplainQuery((ExplainStmt *) parsetree, queryString, params, dest);
@@ -2046,6 +2057,10 @@ CreateCommandTag(Node *parsetree)
 			
 		case T_AlterForwarderSetStmt:
 		tag = "ALTER FORWARDER SET";
+			break;
+		
+		case T_AlterSlaveStmt:
+		tag = "ALTER SLAVE";
 			break;
 
 		case T_ExecuteStmt:

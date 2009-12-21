@@ -32,6 +32,7 @@
 #include "mammoth_r/mcp_compress.h"
 #include "mammoth_r/mcp_connection.h"
 #include "mammoth_r/mcp_lists.h"
+#include "mammoth_r/signals.h"
 #include "mammoth_r/txlog.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -398,13 +399,11 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 		MCPQueueLogHdrStatus(DEBUG4, q, "slave");
 
 		/* If promotion was requested, initiate the promotion process. */
-		if (promotion_request)
+		if (ReplLocalSignalData.promotion)
 		{
+			ReplLocalSignalData.promotion = false;
+			
 			LWLockAcquire(ReplicationLock, LW_EXCLUSIVE);
-
-			promotion_request = false;
-			/* Cancel setting promotion_request on receiving sigusr1 */
-			ReplSignalData->promotion = false;
 
 			if (!ReplPromotionData->promotion_in_progress)
 			{

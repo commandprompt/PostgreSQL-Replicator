@@ -4628,8 +4628,8 @@ sigusr1_handler(SIGNAL_ARGS)
 			/*
 			 * Send SIGUSR1 to the replication process, which will act on it by
 			 * starting the appropiate promotion action.  The backend process
-			 * which signalled us must have previously set the promotion
-			 * parameters in shared memory!
+			 * which signalled us must have previously set signal flags
+			 * in shared memory!
 			 */
 			kill(ReplicationPID, SIGUSR1);
 		}
