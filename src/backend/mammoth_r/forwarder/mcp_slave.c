@@ -1002,36 +1002,17 @@ ReceiveSlaveMessage(SlaveStatus *status)
 
 	if (rm->flags & MCP_MSG_FLAG_ACK)
 	{
-		/*
-		 * Under normal conditions we shouldn't receive ACKs for yet unsent
-		 * transactions (those with recno > slave's frecno). However, when
-		 * repeating a dump from the MCP's queue we lower slave's frecno down
-		 * to the mcp_dump_recno, and ACK's for the previous transactions
-		 * (before dump) would be higher then slave's frecno.  So we
-		 * don't throw them away, but we also don't allow such ACK's to move
-		 * slave's vrecno, because it may be moved past the already sent data. 
-		 */
-		LockReplicationQueue(status->ss_queue, LW_SHARED);
-		if (rm->recno >= MCPQueueGetInitialRecno(status->ss_queue))
-		{
-			elog(DEBUG2, "recv ACK from slave => vrecno = "UNI_LLU,
-				 rm->recno);
-			/*
-			 * Set vrecno only if the ACK is for a transacion which is actually
-			 * in the queue and which was sent completely.
-			 */
-			if (rm->recno <= MCPQueueGetLastRecno(status->ss_queue))
-			{
-				MCPHostLock(status->ss_hosts, status->ss_hostno, LW_EXCLUSIVE);
-				MCPHostsSetAckedRecno(status->ss_hosts, status->ss_hostno, rm->recno);
-				MCPHostUnlock(status->ss_hosts, status->ss_hostno);
-			}
-		}
+		ullong		prevack;
+
+		elog(DEBUG2, "received ACK from slave => vrecno = "UNI_LLU,
+			 rm->recno);
+		MCPHostLock(status->ss_hosts, status->ss_hostno, LW_EXCLUSIVE);
+		prevack = MCPHostsGetAckedRecno(status->ss_hosts, status->ss_hostno);
+		if (prevack <= rm->recno)
+			MCPHostsSetAckedRecno(status->ss_hosts, status->ss_hostno, rm->recno);
 		else
-			elog(WARNING,
-				 "received useless ACK message, recno="UNI_LLU", bcreno="
-				 UNI_LLU, rm->recno, MCPQueueGetInitialRecno(status->ss_queue));
-		UnlockReplicationQueue(status->ss_queue);
+			elog(WARNING, "received ACK for already confirmed transaction");
+		MCPHostUnlock(status->ss_hosts, status->ss_hostno);
 	}
 	
 	/* Should be placed after ACK and TABLELIST processing code */
