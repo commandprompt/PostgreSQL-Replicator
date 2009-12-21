@@ -22,10 +22,14 @@
 /*
  * Wait for and receive the startup packet from the client connection.
  *
- * This routine is in charge of setting up SSL mode as required by
- * configuration.  After this routine returns, the socket is already using SSL
- * (or not).  Also, it is responsible for checking whether the slave number is
- * within implementation limits (an error is raised if it isn't).
+ * This routine is in charge of:
+ * o  Setting up SSL mode as required by configuration.
+ * o  Checking whether the slave number is within implementation limits (an
+ *    error is raised if it isn't).
+ * o  Checking canAcceptConnection state, and close the connection with a
+ *    suitable error message if not.
+ *
+ * After this routine returns, the socket is already using SSL (or not).
  *
  * "mode" is an output parameter for signalling whether this is slave or
  * master.  In the former case, "slave_no" is the slave number received;
@@ -119,6 +123,40 @@ ProcessMcpStartupPacket(Port *port, bool require_ssl, char *mode, int *slave_no)
 
 	pq_getmsgend(&msg);
 	pfree(msg.data);
+
+	/*
+	 * If we're going to reject the connection due to database state, say so
+	 * now instead of wasting cycles on an authentication exchange. (This also
+	 * allows a pg_ping utility to be written.)
+	 */
+	switch (port->canAcceptConnections)
+	{
+		case CAC_STARTUP:
+			ereport(FATAL,
+					(errcode(ERRCODE_CANNOT_CONNECT_NOW),
+					 errmsg("the database system is starting up")));
+			break;
+		case CAC_SHUTDOWN:
+			ereport(FATAL,
+					(errcode(ERRCODE_CANNOT_CONNECT_NOW),
+					 errmsg("the database system is shutting down")));
+			break;
+		case CAC_RECOVERY:
+			ereport(FATAL,
+					(errcode(ERRCODE_CANNOT_CONNECT_NOW),
+					 errmsg("the database system is in recovery mode")));
+			break;
+		case CAC_TOOMANY:
+			ereport(FATAL,
+					(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+					 errmsg("sorry, too many clients already")));
+			break;
+		case CAC_WAITBACKUP:
+			/* OK for now, will check in InitPostgres */
+			break;
+		case CAC_OK:
+			break;
+	}
 
 	return STATUS_OK;
 }

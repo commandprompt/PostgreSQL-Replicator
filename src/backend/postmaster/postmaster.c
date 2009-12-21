@@ -3477,6 +3477,9 @@ ForwarderChildStartup(Port *port)
 		return STATUS_ERROR;
 	}
 
+	/* Pass down canAcceptConnections state */
+	port->canAcceptConnections = canAcceptConnections();
+
 	fp->child_slot = MyPMChildSlot = AssignPostmasterChildSlot();
 
 	pid = fork_process();
