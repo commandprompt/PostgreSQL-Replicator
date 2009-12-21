@@ -20,6 +20,7 @@
 #include "commands/dbcommands.h"
 #include "commands/sequence.h"
 #include "commands/tablespace.h"
+#include "mammoth_r/txlog.h"
 #include "storage/freespace.h"
 
 
@@ -39,5 +40,6 @@ const RmgrData RmgrTable[RM_MAX_ID + 1] = {
 	{"Hash", hash_redo, hash_desc, NULL, NULL, NULL},
 	{"Gin", gin_redo, gin_desc, gin_xlog_startup, gin_xlog_cleanup, gin_safe_restartpoint},
 	{"Gist", gist_redo, gist_desc, gist_xlog_startup, gist_xlog_cleanup, gist_safe_restartpoint},
-	{"Sequence", seq_redo, seq_desc, NULL, NULL, NULL}
+	{"Sequence", seq_redo, seq_desc, NULL, NULL, NULL},
+	{"TXLOG", txlog_redo, txlog_desc, NULL, NULL, NULL}
 };

@@ -65,6 +65,11 @@ typedef struct TxlogCtlData
 static SlruCtlData	BackendTxlogSlruData;
 static SlruCtlData 	ForwarderTxlogSlruData;
 
+/* TXLOG related functions */
+static void WriteZeroPageTxlogRec(int page, bool flush);
+static void WriteTruncateTxlogRec(int cutoffpage);
+static void WriteCommitTxlogRec(ullong recno);
+
 static const TxlogCtlData BackendTxlogCtlData =
 {
 	&BackendTxlogSlruData,
@@ -81,15 +86,32 @@ static const TxlogCtlData ForwarderTxlogCtlData =
 	ForwarderTxlogControlLock
 };
 
+#define BackendTxlogCtl (&BackendTxlogCtlData)
+#define ForwarderTxlogCtl (&ForwarderTxlogCtlData)
+
 /*
- * Only one TXLOG can be in use in any one process.  We initialize this to
+ * Only one TXLOG can be in active use in a process.  We initialize this to
  * NULL and have interested processes select at runtime the one to use.
  */
-static const TxlogCtlData		*activeTxlog = NULL;
+static const TxlogCtlData		*activeTxlogCtl = NULL;
 
+typedef struct TxlogRedoData
+{
+	bool 	isforwarder;
+	int		pageno;
+} TxlogRedoData;
+
+typedef TxlogRedoData *TxlogRedo;
+
+typedef struct TxlogRedoCommitData
+{
+	bool	isforwarder;
+	ullong	recno;
+} TxlogRedoCommitData;
+
+typedef TxlogRedoCommitData *TxlogRedoCommit;
 
 static bool TXLOGPagePrecedes(int page1, int page2);
-static void TXLOGSetStatus(ullong recno, bool committed);
 static void TXLOGExtend(const TxlogCtlData *txlog, ullong freshRecno, bool force);
 
 
@@ -126,19 +148,26 @@ txlog_shmem_init(const TxlogCtlData *ctl)
 void
 TXLOGShmemInit(void)
 {
-	txlog_shmem_init(&ForwarderTxlogCtlData);
-	txlog_shmem_init(&BackendTxlogCtlData);
+	txlog_shmem_init(ForwarderTxlogCtl);
+	txlog_shmem_init(BackendTxlogCtl);
 }
 
 /*
- * SelectActiveTxlog
+ * SelectactiveTxlog
  * 		Choose a TXLOG for the lifetime of this process.
  */
 void
 SelectActiveTxlog(bool forwarder)
 {
-	Assert(activeTxlog == NULL);
-	activeTxlog = forwarder ? &ForwarderTxlogCtlData : &BackendTxlogCtlData;
+	Assert(activeTxlogCtl == NULL);
+	activeTxlogCtl = forwarder ? ForwarderTxlogCtl : BackendTxlogCtl;
+}
+
+bool
+TXLOGIsForwarder(void)
+{
+	Assert(activeTxlogCtl != NULL);
+	return activeTxlogCtl == ForwarderTxlogCtl;
 }
 
 static void
@@ -168,8 +197,8 @@ txlog_create(const TxlogCtlData *ctl)
 void
 BootstrapTXLOG(void)
 {
-	txlog_create(&ForwarderTxlogCtlData);
-	txlog_create(&BackendTxlogCtlData);
+	txlog_create(ForwarderTxlogCtl);
+	txlog_create(BackendTxlogCtl);
 }
 
 /* Startup function */
@@ -181,13 +210,13 @@ TXLOGStartup(ullong recno)
 	/* XXX: assume that frecno is not zero */
    	pageno = RecnoToPage(recno);
 
-	LWLockAcquire(activeTxlog->lock, LW_EXCLUSIVE);
+	LWLockAcquire(activeTxlogCtl->lock, LW_EXCLUSIVE);
 
 	/* Was the startup already performed ? */
-	if (activeTxlog->slruCtl->shared->latest_page_number == INVALID_PAGE_NUMBER)
-		activeTxlog->slruCtl->shared->latest_page_number = pageno;	
+	if (activeTxlogCtl->slruCtl->shared->latest_page_number == INVALID_PAGE_NUMBER)
+		activeTxlogCtl->slruCtl->shared->latest_page_number = pageno;	
 
-	LWLockRelease(activeTxlog->lock);
+	LWLockRelease(activeTxlogCtl->lock);
 }
 
 /*
@@ -209,63 +238,49 @@ CheckPointTXLOG(void)
 static bool
 TXLOGPagePrecedes(int page1, int page2)
 {
-	return (page1 < page2);
+	return page1 < page2;
 }
 
-static void
-TXLOGSetStatus(ullong recno, bool committed)
+
+/* Set committed status for a transaction identified by the recno */
+void
+TXLOGSetCommitted(ullong recno)
 {
 	int		pageno,
 			slotno,
 			byteno,
 			bshift;
 	char   *byteptr;
-	SlruCtlData *slru = activeTxlog->slruCtl;
+	SlruCtlData *slru = activeTxlogCtl->slruCtl;
+
+	elog(DEBUG5, "Committing transaction "UNI_LLU, recno);
 
 	pageno = RecnoToPage(recno);
 	byteno = RecnoToByte(recno);
 	bshift = RecnoToBIndex(recno) * TXLOG_BITS_PER_XACT;
 
 	/* Make a new txlog segment if needed */
-	TXLOGExtend(activeTxlog, recno, false);
+	TXLOGExtend(activeTxlogCtl, recno, false);
 
-	LWLockAcquire(activeTxlog->lock, LW_EXCLUSIVE);
+	/* WAL-log the commit */
+	WriteCommitTxlogRec(recno);
+	
+	LWLockAcquire(activeTxlogCtl->lock, LW_EXCLUSIVE);
 
 	slotno = SimpleLruReadPage(slru, pageno, false, InvalidTransactionId);
 	byteptr = slru->shared->page_buffer[slotno] + byteno;
-
-	/* XXX: The following assumes we use only 1 bit per transaction. */
-	if (committed)	
-	{
-		/* Transaction should not be marked as committed yet */
-		Assert(((*byteptr >> bshift) & TXLOG_XACT_BITMASK) == REPL_TX_STATE_EMPTY);
-
-		/* XXX: This assumes we use only 1 bit per transaction. */
-		*byteptr |= (1 << bshift);
-	}
-	else
-		*byteptr &= ~(1 << bshift);
+		
+	/* Transaction should not be already marked as committed */
+	Assert(((*byteptr >> bshift) & TXLOG_XACT_BITMASK) == REPL_TX_STATE_EMPTY);		
+		
+	/* XXX: This assumes we use only 1 bit per transaction. */
+	*byteptr |= (1 << bshift);
 	
 	slru->shared->page_dirty[slotno] = true;
 	
-	LWLockRelease(activeTxlog->lock);
+	LWLockRelease(activeTxlogCtl->lock);
 }
 
-/* Set committed status for a transaction identified by the recno */
-void
-TXLOGSetCommitted(ullong recno)
-{
-	elog(DEBUG5, "Committing transaction "UNI_LLU, recno);
-	TXLOGSetStatus(recno, true);
-}
-
-/* Set committed status for a transaction identified by the recno */
-void
-TXLOGClearCommitted(ullong recno)
-{
-	elog(DEBUG5, "Uncommitting transaction "UNI_LLU, recno);
-	TXLOGSetStatus(recno, false);
-}
 
 /* Check status of a transaction identified by the recno */
 bool
@@ -277,20 +292,20 @@ TXLOGIsCommitted(ullong recno)
 			bshift;
 	char   *byteptr;
 	char	status;
-	SlruCtlData *slru = activeTxlog->slruCtl;
+	SlruCtlData *slru = activeTxlogCtl->slruCtl;
 	
 	pageno = RecnoToPage(recno);
 	byteno = RecnoToByte(recno);
 	bshift = RecnoToBIndex(recno) * TXLOG_BITS_PER_XACT;
 
-	LWLockAcquire(activeTxlog->lock, LW_EXCLUSIVE);
+	LWLockAcquire(activeTxlogCtl->lock, LW_EXCLUSIVE);
 
 	slotno = SimpleLruReadPage(slru, pageno, false, InvalidTransactionId);
 	byteptr = slru->shared->page_buffer[slotno] + byteno;
 
 	status = (*byteptr >> bshift) & TXLOG_XACT_BITMASK;
 
-	LWLockRelease(activeTxlog->lock);
+	LWLockRelease(activeTxlogCtl->lock);
 	
 	elog(DEBUG5, "Checking transaction "UNI_LLU" committed %d", recno, status);
 	return status;
@@ -313,7 +328,10 @@ TXLOGExtend(const TxlogCtlData *txlog, ullong freshRecno, bool force)
 
 	/* If we hit a new page, zero it */
 	pageno = RecnoToPage(freshRecno);
-
+	
+	/* wal-log new page creation */
+	WriteZeroPageTxlogRec(pageno, force);
+	
 	LWLockAcquire(txlog->lock, LW_EXCLUSIVE);
 	SimpleLruZeroPage(txlog->slruCtl, pageno);
 	LWLockRelease(txlog->lock);
@@ -326,13 +344,16 @@ TXLOGTruncate(ullong oldestRecno)
 	int		cutoffpage;
 
 	cutoffpage = RecnoToPage(oldestRecno);
-	if (!SlruScanDirectory(activeTxlog->slruCtl, cutoffpage, false))
+	if (!SlruScanDirectory(activeTxlogCtl->slruCtl, cutoffpage, false))
 		return;
 
 	/* Write all dirty pages on disk */
 	CheckPointTXLOG();
+	
+	/* Wal-log the truncation */
+	WriteTruncateTxlogRec(cutoffpage);
 
-	SimpleLruTruncate(activeTxlog->slruCtl, cutoffpage);
+	SimpleLruTruncate(activeTxlogCtl->slruCtl, cutoffpage);
 }
 
 /*
@@ -342,5 +363,191 @@ TXLOGTruncate(ullong oldestRecno)
 void
 TXLOGZeroPageByRecno(ullong recno)
 {
-	TXLOGExtend(activeTxlog, recno, true);
+	TXLOGExtend(activeTxlogCtl, recno, true);
+}
+
+/* Insert a truncate wal record */
+static void
+WriteTruncateTxlogRec(int cutoffpage)
+{
+	XLogRecPtr 		ptr;
+	XLogRecData 	rdata;
+	TxlogRedoData 	redo;
+	
+	redo.isforwarder = TXLOGIsForwarder();
+	redo.pageno = cutoffpage;
+	
+	rdata.data = (char *) &redo;
+	rdata.len = sizeof(TxlogRedoData);
+	/* we don't write shared memory buffers */
+	rdata.buffer = InvalidBuffer;
+	rdata.next = NULL;
+	
+	/* insert a wal record */
+	ptr = XLogInsert(RM_TXLOG_ID, TXLOG_TRUNCATE, &rdata);
+	/* make sure it's flushed to disk */
+	XLogFlush(ptr);
+}
+
+/* Ditto for zeropage */
+static void
+WriteZeroPageTxlogRec(int page, bool flush)
+{
+	XLogRecPtr 		ptr;
+	XLogRecData 	rdata;
+	TxlogRedoData 	redo;
+	
+	redo.isforwarder = TXLOGIsForwarder();
+	redo.pageno = page;
+	
+	rdata.data = (char *) &redo;
+	rdata.len = sizeof(TxlogRedoData);
+	/* we don't write shared memory buffers */
+	rdata.buffer = InvalidBuffer;
+	rdata.next = NULL;
+	
+	/* insert a wal record */
+	ptr = XLogInsert(RM_TXLOG_ID, TXLOG_ZEROPAGE, &rdata);
+	
+	/* flush wal if requested */
+	if (flush)
+		XLogFlush(ptr);
+}
+
+/* Insert 'txlog commit' record */
+static void
+WriteCommitTxlogRec(ullong recno)
+{
+	XLogRecPtr			ptr;
+	XLogRecData			rdata;
+	TxlogRedoCommitData	redo;
+	
+	redo.isforwarder = TXLOGIsForwarder();
+	redo.recno = recno;
+	
+	rdata.data = (char *)&redo;
+	rdata.len = sizeof(TxlogRedoCommitData);
+	/* we don't write shared memory buffers */
+	rdata.buffer = InvalidBuffer;
+	rdata.next = NULL;
+	
+	ptr = XLogInsert(RM_TXLOG_ID, TXLOG_COMMIT, &rdata);
+	/* make sure it's flushed to disk */
+	XLogFlush(ptr);
+}
+
+/* TXLOG resource-manager's routines */
+void
+txlog_redo(XLogRecPtr lsn, XLogRecord *rec)
+{
+	uint8	info = rec->xl_info & ~XLR_INFO_MASK;
+	
+	/* we don't ever write full buffer contents */
+	Assert(!(info & XLR_BKP_BLOCK_MASK));
+	
+	if (info == TXLOG_ZEROPAGE)
+	{
+		int 				slotno;
+		TxlogRedoData		redo;
+		const TxlogCtlData	*ctl;
+		
+		memcpy(&redo, XLogRecGetData(rec), sizeof(TxlogRedoData));
+		
+		ctl = (redo.isforwarder) ? ForwarderTxlogCtl : BackendTxlogCtl;
+		
+		LWLockAcquire(ctl->lock, LW_EXCLUSIVE);
+		slotno = SimpleLruZeroPage(ctl->slruCtl, redo.pageno);
+		SimpleLruWritePage(ctl->slruCtl, slotno, NULL);
+		
+		Assert(!ctl->slruCtl->shared->page_dirty[slotno]);
+		
+		LWLockRelease(ctl->lock);		
+	} 
+	else if (info == TXLOG_TRUNCATE)
+	{
+		TxlogRedoData		redo;
+		const TxlogCtlData	*ctl;
+		
+		memcpy(&redo, XLogRecGetData(rec), sizeof(TxlogRedoData));
+		
+		ctl = (redo.isforwarder) ? ForwarderTxlogCtl : BackendTxlogCtl;
+		
+		/* 
+		 * During XLOG reply, latest_page_number isn't set up yet; insert a
+		 * suitable value to bypass the sanity check in SimpleLruTruncate
+		 */
+		ctl->slruCtl->shared->latest_page_number = redo.pageno;
+		SimpleLruTruncate(ctl->slruCtl, redo.pageno);
+	}
+	else if (info == TXLOG_COMMIT)
+	{
+		int 				pageno,
+							slotno,
+							byteno,
+							bshift;
+		char 			   *byteptr;
+		TxlogRedoCommitData	redo;
+		const TxlogCtlData	*ctl;
+		
+		memcpy(&redo, XLogRecGetData(rec), sizeof(TxlogRedoCommitData));
+		
+		ctl = redo.isforwarder ? ForwarderTxlogCtl : BackendTxlogCtl;
+		
+		pageno = RecnoToPage(redo.recno);
+		byteno = RecnoToByte(redo.recno);
+		bshift = RecnoToBIndex(redo.recno) * TXLOG_BITS_PER_XACT;
+		
+		LWLockAcquire(ctl->lock, LW_EXCLUSIVE);
+		
+		slotno = SimpleLruReadPage(ctl->slruCtl, pageno, false, InvalidTransactionId);
+		byteptr = ctl->slruCtl->shared->page_buffer[slotno] + byteno;
+		*byteptr |= (1 << bshift);
+		ctl->slruCtl->shared->page_dirty[slotno] = true;
+		
+		/*
+		 * Note that it's not necessary to write the page here, because it
+		 * will be written and flushed by the next restartpoint.
+		 */
+		
+		LWLockRelease(ctl->lock);
+		
+	}
+	else
+		elog(PANIC, "txlog_redo: unknown op code %u", info);
+}
+
+void
+txlog_desc(StringInfo buf, uint8 xl_info, char *rec)
+{
+	uint8 info 	= xl_info & ~XLR_INFO_MASK;
+	
+	if (info == TXLOG_ZEROPAGE)
+	{
+		TxlogRedoData 	redo;
+		
+		memcpy(&redo, rec, sizeof(TxlogRedoData));
+		appendStringInfo(buf, "%s zeropage: %d", 
+						(redo.isforwarder ? "forwarder" : "backend"), 
+						redo.pageno);
+		
+	} 
+	else if (info == TXLOG_TRUNCATE)
+	{
+		TxlogRedoData 	redo;
+		
+		memcpy(&redo, rec, sizeof(TxlogRedoData));
+		appendStringInfo(buf, "%s truncate: %d",
+						 (redo.isforwarder ? "forwarder" : "backend"),
+						redo.pageno);
+	} 
+	else if (info == TXLOG_COMMIT)
+	{
+		TxlogRedoCommitData	redo;
+		memcpy(&redo, rec, sizeof(TxlogRedoCommitData));
+		appendStringInfo(buf, "%s commit: "UINT64_FORMAT,
+						  (redo.isforwarder ? "forwarder" : "backend"),
+						redo.recno);	
+	}
+	else
+		appendStringInfo(buf, "UNKNOWN");
 }
