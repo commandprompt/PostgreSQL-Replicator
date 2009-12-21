@@ -1072,18 +1072,15 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 	bool	result = true,
 			request = false;
 	ullong	stored_dump_recno,
-			host_vrecno,
-			queue_brecno;
+			host_vrecno;
 	MCPHosts *h = status->ss_hosts;
 	int		hostno = status->ss_hostno;
 
 	LWLockAcquire(MCPServerLock, LW_SHARED);
-	LockReplicationQueue(status->ss_queue, LW_SHARED);
 	MCPHostLock(h, hostno, LW_EXCLUSIVE);
 
 	stored_dump_recno = FullDumpGetStartRecno();
 	host_vrecno = MCPHostsGetAckedRecno(h, hostno);
-	queue_brecno = MCPQueueGetInitialRecno(status->ss_queue);
 
 	/* dump at recno 0 (invalid) means no dump */
 	ereport(DEBUG2,
@@ -1091,20 +1088,17 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 			 errcontext("dump in queue: recno "UNI_LLU,
 						stored_dump_recno)));
 
-	if (stored_dump_recno != InvalidRecno &&
-		stored_dump_recno >= queue_brecno &&
-		host_vrecno < stored_dump_recno)
+	if (stored_dump_recno != InvalidRecno && host_vrecno < stored_dump_recno)
 	{
 		/*
-		 * If MCP has an old dump in the queue and this slave hasn't tried to
-		 * restore this dump yet, reuse the dump.
+		 * Skip all messages up to the dump start point.  The queue is set to
+		 * sync state, to avoid further dump requests.
 		 */
 		elog(DEBUG2, "using dump stored on MCP server");
 
 		MCPHostsSetAckedRecno(h, hostno, stored_dump_recno - 1);
 		MCPHostsSetFirstRecno(h, hostno, stored_dump_recno);
-		/* Set host's state to sync to avoid further dump requests */
-        MCPHostsSetSync(h, hostno, MCPQSynced);
+		MCPHostsSetSync(h, hostno, MCPQSynced);
 
 		result = false;
 	}
@@ -1131,7 +1125,6 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 		}
 	}
 	MCPHostUnlock(h, hostno);
-	UnlockReplicationQueue(status->ss_queue);
 	LWLockRelease(MCPServerLock);
 
 	if (request)
