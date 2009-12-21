@@ -3006,9 +3006,9 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 	{
 		ereport(DEBUG2,
 				(errmsg_internal("sending %s to process %d",
-								 "SIGTERM",
+								 "SIGQUIT",
 								 (int) ForwarderHelperPID)));
-		signal_child(ForwarderHelperPID, SIGTERM);
+		signal_child(ForwarderHelperPID, SIGQUIT);
 	}
 
 	/* We do NOT restart the syslogger */
