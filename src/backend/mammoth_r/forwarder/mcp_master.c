@@ -119,6 +119,9 @@ HandleMasterConnection(MCPQueue *q, MCPHosts *h)
 	/* register callback to cleanup at finish */
 	on_proc_exit(procexit_master_cleanup, PointerGetDatum(state));
 
+	/* register callback for dump vars */
+	RegisterFullDumpQueueCallback(q);
+
 	/* now we can get signalled */
 	PG_SETMASK(&UnBlockSig);
 
@@ -621,7 +624,6 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 				 "attempted to commit a transaction with invalid record number");
 
 		/* Commit the transaction */
-		/* Clear the empty state of the queue */
 		LockReplicationQueue(state->ms_queue, LW_EXCLUSIVE);
 		MCPQueueTxCommit(state->ms_queue, rm->recno);
 		TXLOGSetCommitted(rm->recno);

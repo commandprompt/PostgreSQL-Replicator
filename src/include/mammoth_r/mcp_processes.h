@@ -113,6 +113,7 @@ extern void FullDumpSetProgress(FullDumpProgress val);
 extern bool TableDumpIsRequested(void);
 extern void TableDumpSetRequest(bool request);
 
+extern void RegisterFullDumpQueueCallback(MCPQueue *q);
 extern ullong FullDumpGetStartRecno(void);
 extern ullong FullDumpGetEndRecno(void);
 extern void FullDumpSetStartRecno(ullong recno);

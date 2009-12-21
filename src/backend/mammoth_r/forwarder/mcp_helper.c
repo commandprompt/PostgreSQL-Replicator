@@ -173,14 +173,6 @@ OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno)
 		 */
 		MCPQueueSetAckRecno(q, new_vrecno);
 		MCPQueueSetFirstRecno(q, new_vrecno + 1);
-
-		/* Check whether we should invalidate dump record numbers */
-		if (dump_end_recno != InvalidRecno && new_vrecno >= dump_end_recno)
-		{
-			FullDumpSetStartRecno(InvalidRecno);
-			FullDumpSetEndRecno(InvalidRecno);
-			elog(DEBUG4, "full dump is removed from the queue");
-		}
 	}
 	
 	MCPQueueLogHdrStatus(DEBUG4, q, "POST OPTIMIZE");

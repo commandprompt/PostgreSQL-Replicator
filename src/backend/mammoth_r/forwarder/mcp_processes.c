@@ -118,12 +118,9 @@ void
 FullDumpSetStartRecno(ullong recno)
 {
 	Assert(LWLockHeldByMe(MCPServerLock));
-	if (DumpCtl->mcp_dump_start_recno != recno)
-	{
-		elog(DEBUG2, "FULL DUMP recno: "UINT64_FORMAT" -> "UINT64_FORMAT,
-			 DumpCtl->mcp_dump_start_recno, recno);
-		DumpCtl->mcp_dump_start_recno = recno;
-	}
+	elog(DEBUG2, "FULL DUMP recno: "UINT64_FORMAT" -> "UINT64_FORMAT,
+		 DumpCtl->mcp_dump_start_recno, recno);
+	DumpCtl->mcp_dump_start_recno = recno;
 }
 
 void
@@ -145,6 +142,30 @@ FullDumpGetEndRecno(void)
 {
 	Assert(LWLockHeldByMe(MCPServerLock));
 	return DumpCtl->mcp_dump_end_recno;
+}
+
+/*
+ * callback for MCPQueue events
+ */
+static void
+FullDumpQueueCallbk(MCPQevent event, ullong recno, void *arg)
+{
+	/* Reset the dump recnos if they are removed by queue pruning */
+	if (event == MCPQ_EVENT_PRUNE)
+	{
+		LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
+		if (DumpCtl->mcp_dump_start_recno < recno)
+			DumpCtl->mcp_dump_start_recno = InvalidRecno;
+		if (DumpCtl->mcp_dump_end_recno < recno)
+			DumpCtl->mcp_dump_end_recno = InvalidRecno;
+		LWLockRelease(MCPServerLock);
+	}
+}
+
+void
+RegisterFullDumpQueueCallback(MCPQueue *q)
+{
+	MCPQRegisterCallback(q, FullDumpQueueCallbk, NULL);
 }
 
 /* Write dump variables into the forwarder state file */

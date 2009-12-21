@@ -611,7 +611,7 @@ CallMCPQCallbacks(MCPQueue *q, MCPQevent event, ullong recno)
 	MCPQCallbackItem  *item;
 
 	for (item = q->callbacks; item; item = item->next)
-		(*item->callback) (event, item->arg, recno);
+		(*item->callback) (event, recno, item->arg);
 }
 
 /* MCPQueuePrune
