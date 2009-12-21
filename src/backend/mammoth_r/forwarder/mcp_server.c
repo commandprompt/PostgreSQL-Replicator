@@ -435,23 +435,12 @@ sigusr2_handler(SIGNAL_ARGS)
 void
 forwarder_reset_shared(void)
 {
-	MemoryContext old_cxt;
-
 	/* initialize shared memory for mcp hosts */
 	MCPHostsShmemInit();
 
-	/* 
-	 * XXX: Hack, the following call is expected to initialize
-	 * shared memory variables, thus it should be context insensitive.
-	 * However, PromotionACL is a immutable list that is set from the
-	 * GUC variable, it should be initialized in a TopMemoryContext.
-	 */
-	old_cxt = MemoryContextSwitchTo(TopMemoryContext);
 	/* Initialize global MCP variables */
 	MCPInitVars(true);
 	
 	/* Initialize shmem structures supporing forwarder signals */
 	FWSignalsInit();
-	
-	MemoryContextSwitchTo(old_cxt);
 }

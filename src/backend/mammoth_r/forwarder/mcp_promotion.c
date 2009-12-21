@@ -9,6 +9,7 @@
 #include "mammoth_r/mcp_promotion.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 
 
 static List *MCPParsePromoteAllow(char *promote_allow_slaves);
@@ -111,9 +112,12 @@ MCPParsePromoteAllow(char *forwarder_promotion_acl)
 	List *elemlist,
 		 *result = NIL;
 	ListCell *current;
+	MemoryContext	oldcxt;
 
 	if (forwarder_promotion_acl == NULL)
 		return NIL;
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 
 	rawstring = pstrdup(forwarder_promotion_acl);
 	if (!SplitIdentifierString(rawstring, ',', &elemlist))
@@ -135,6 +139,8 @@ MCPParsePromoteAllow(char *forwarder_promotion_acl)
 
 	list_free(elemlist);
 	pfree(rawstring);
+
+	MemoryContextSwitchTo(oldcxt);
 
 	return result;
 }
