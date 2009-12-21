@@ -6,8 +6,8 @@
  * from the backend to replication processes, while local signal data is where
  * the replication process saves the value of shared 'signals.
  *
- * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group,
- * Copyright (c) 2006, Command Prompt, Inc.
+ * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group,
+ * Copyright (c) 2009, Command Prompt, Inc.
  * 
  * $Id$
  */
