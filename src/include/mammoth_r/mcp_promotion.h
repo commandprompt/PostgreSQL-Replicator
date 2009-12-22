@@ -59,4 +59,4 @@ extern const char *assign_forwarder_promotion_acl(const char *value,
 extern void PromotionResetAtStartup(int peerid);
 extern void MCPInitPromotionVars(bool attach);
 extern void promotion_cleanup(int code, Datum arg);
-extern int PromotionStackPeek();
+extern int PromotionStackPeek(void);

@@ -15,7 +15,6 @@
 
 static void	PromotionStackPush(int slaveno);
 static int 	PromotionStackPop(void);
-int 	PromotionStackPeek(void);
 static void	PromotionStackClear(void);
 
 
@@ -255,6 +254,7 @@ int
 PromotionStackPeek(void)
 {
 	MCPPromotionStack	*stack = &(PromotionCtl->PromotionStack);
+
 	/* Return -1 if no promotions performed yet */
 	if (stack->empty)
 		return -1;
