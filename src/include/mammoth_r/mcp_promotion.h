@@ -3,7 +3,10 @@
  *
  * $Id: mcp_promotion.h 2117 2009-04-30 22:32:24Z alvherre $
  */
+
+#include "mammoth_r/mcp_processes.h"
 #include "nodes/pg_list.h"
+#include "utils/guc.h"
 
 typedef enum
 {
@@ -42,17 +45,17 @@ typedef struct MCPPromotionVars
 
 	/* Variable length lists, possibly should be somewhere else */
 
-	/* promotion access control for slaves */
-	List				*PromotionACL;
-	
 	/* a storage for a history of already performed promotions */
 	MCPPromotionStack	PromotionStack;
 
 } MCPPromotionVars;
 
 extern MCPPromotionVars	*PromotionCtl;
+extern List *ParsedForwarderPromoteAcl;
 
 extern void PromotionInitialize(void);
+extern const char *assign_forwarder_promotion_acl(const char *value,
+							   bool doit, GucSource source);
 extern void PromotionResetAtStartup(int peerid);
 extern void MCPInitPromotionVars(bool attach);
 extern void promotion_cleanup(int code, Datum arg);

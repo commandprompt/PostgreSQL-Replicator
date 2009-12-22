@@ -7,12 +7,12 @@
 
 #include "mammoth_r/mcp_processes.h"
 #include "mammoth_r/mcp_promotion.h"
+#include "nodes/bitmapset.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 
 
-static List *MCPParsePromoteAllow(char *promote_allow_slaves);
 static void	PromotionStackPush(int slaveno);
 static int 	PromotionStackPop(void);
 int 	PromotionStackPeek(void);
@@ -21,6 +21,7 @@ static void	PromotionStackClear(void);
 
 /* GUC vars */
 char *ForwarderPromoteACL;
+List *ParsedForwarderPromoteAcl = NIL;
 
 /* struct in shared memory */
 MCPPromotionVars	*PromotionCtl = NULL;
@@ -93,7 +94,6 @@ MCPInitPromotionVars(bool attach)
 	vars->promotion_type = normal_promotion;
 	vars->master_check_state = master_check_none;
 	vars->promotion_slave_no = -1;
-	vars->PromotionACL = MCPParsePromoteAllow(ForwarderPromoteACL);
 	vars->PromotionStack.head = vars->PromotionStack.tail = 0;
 	vars->master_sysid = vars->slave_sysid = 0;
 	vars->PromotionStack.empty = true;
@@ -101,48 +101,63 @@ MCPInitPromotionVars(bool attach)
 	PromotionCtl = vars;
 }
 
-/* 		MCPParsePromoteAllow
- *
- *	Makes list of slaves allowed to promote from the string representation
- */
-static List *
-MCPParsePromoteAllow(char *forwarder_promotion_acl)
+const char *
+assign_forwarder_promotion_acl(const char *value, bool doit, GucSource source)
 {
-	char *rawstring;
-	List *elemlist,
-		 *result = NIL;
-	ListCell *current;
-	MemoryContext	oldcxt;
+	char	   *rawstring;
+	List	   *elemlist;
+	ListCell   *l;
+	List	   *result = NIL;
 
-	if (forwarder_promotion_acl == NULL)
-		return NIL;
+	/* Need a modifiable copy of string */
+	rawstring = pstrdup(value);
 
-	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-
-	rawstring = pstrdup(forwarder_promotion_acl);
+	/* Parse string into list of identifiers */
 	if (!SplitIdentifierString(rawstring, ',', &elemlist))
-		ereport(ERROR, 
-				(errmsg("Invalid list syntax for \"forwarder_promote_acl\"")));
-	
-	foreach(current, elemlist)
 	{
-		int slaveno = atoi(lfirst(current));
-		if (slaveno < 0 || slaveno > mcp_max_slaves)
+		/* syntax error in list */
+		pfree(rawstring);
+		list_free(elemlist);
+		ereport(GUC_complaint_elevel(source),
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid list syntax for parameter \"forwarder_promote_acl\"")));
+		return NULL;
+	}
+
+	foreach(l, elemlist)
+	{
+		int		slaveno = atoi(lfirst(l));
+
+		if (slaveno < 0 || slaveno >= mcp_max_slaves)
 		{
-			elog(WARNING, 
-				 "invalid slave number %d in \"forwarder_promote_acl\"", 
-				 slaveno);
-			continue;
+			pfree(rawstring);
+			list_free(elemlist);
+			ereport(GUC_complaint_elevel(source),
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid slave number %d in \"forwarder_promote_acl\"", 
+							slaveno),
+					 errhint("Valid values are in the range 0 .. %d", mcp_max_slaves)));
+			return NULL;
 		}
 		result = lappend_int(result, slaveno);
+	}
+
+	if (doit)
+	{
+		MemoryContext	old_cxt;
+
+		if (ParsedForwarderPromoteAcl != NIL)
+			list_free(ParsedForwarderPromoteAcl);
+
+		old_cxt = MemoryContextSwitchTo(TopMemoryContext);
+		ParsedForwarderPromoteAcl = list_copy(result);
+		MemoryContextSwitchTo(old_cxt);
 	}
 
 	list_free(elemlist);
 	pfree(rawstring);
 
-	MemoryContextSwitchTo(oldcxt);
-
-	return result;
+	return value;
 }
 
 /*

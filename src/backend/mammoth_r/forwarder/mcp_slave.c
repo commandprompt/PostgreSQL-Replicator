@@ -438,7 +438,7 @@ RecvSlaveTable(SlaveStatus *state, MCPMsg *msg)
 static bool
 IsPromotionAllowed(int hostno)
 {
-	return list_member_int(PromotionCtl->PromotionACL, hostno);
+	return list_member_int(ParsedForwarderPromoteAcl, hostno);
 }
 
 static void

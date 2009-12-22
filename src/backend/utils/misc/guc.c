@@ -40,6 +40,7 @@
 #include "libpq/auth.h"
 #include "libpq/pqformat.h"
 #include "mammoth_r/forwarder.h"
+#include "mammoth_r/mcp_promotion.h"
 #include "miscadmin.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
@@ -2587,7 +2588,7 @@ static struct config_string ConfigureNamesString[] =
 			GUC_LIST_INPUT
 		},
 		&ForwarderPromoteACL,
-		"0", NULL, NULL
+		"0", assign_forwarder_promotion_acl, NULL
 	},
 
 	{

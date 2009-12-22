@@ -265,11 +265,12 @@ MCPMasterConnectionAllowed(SockAddr *remote_addr, bool check_promoted)
 	/* Check remote_ip against ForwarderMasterAddress config parameter */
 	if (strcmp(remote_ip, ForwarderMasterAddress) == 0)
 		return STATUS_OK;
+
 	if (check_promoted)
 	{
 		ListCell *c;
 
-		foreach(c, PromotionCtl->PromotionACL)
+		foreach(c, ParsedForwarderPromoteAcl)
 		{
 			int slaveno = lfirst_int(c);
 
