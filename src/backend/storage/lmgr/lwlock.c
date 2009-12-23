@@ -182,9 +182,6 @@ NumLWLocks(void)
 	 */
 	numLocks += NUM_TXLOG_BUFFERS * 2;
 
-	/* mcp_hosts.c needs one per slave */
-	numLocks += MCP_MAX_SLAVES;
-
 	/*
 	 * Add any requested by loadable modules; for backwards-compatibility
 	 * reasons, allocate at least NUM_USER_DEFINED_LWLOCKS of them even if
