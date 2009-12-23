@@ -103,10 +103,6 @@ static SlaveForcePromotionState slave_force_promotion = slave_no_force_promotion
 typedef struct SlaveState
 {
 	ullong 	bss_mcp_ack_recno;
-
-	/* consider dump fully restored when we restore past this recno */
-	ullong 	bss_dump_end_recno;
-
 	int 	bss_slaveno;
 	MCPQueue *slave_mcpq;
 } SlaveState;
@@ -170,7 +166,6 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 
 	/* Initialize slave's state structure members */
 	state->bss_mcp_ack_recno = InvalidRecno;
-	state->bss_dump_end_recno = InvalidRecno;
 	state->bss_slaveno = hostno;
 	state->slave_mcpq = q;
 
@@ -832,7 +827,6 @@ slave_pre_commit_actions(MCPMsg *msg, SlaveState *state)
 			ereport(LOG,
 					(errmsg("received end of dump"),
 					 errdetail("Record number "UNI_LLU, msg->recno)));
-			state->bss_dump_end_recno = msg->recno;
 		}
 
 		/* Actions on DATA or DUMP transaction */
