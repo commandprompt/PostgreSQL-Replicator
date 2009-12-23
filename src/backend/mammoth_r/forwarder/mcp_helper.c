@@ -98,7 +98,7 @@ ForwarderHelperMain(int argc, char *argv)
 			/* prevent another process from truncating the queue */
 			LWLockAcquire(ReplicationQueueTruncateLock, LW_SHARED);
 			LockReplicationQueue(q, LW_EXCLUSIVE);
-			MCPHostsLockAll(h, LW_EXCLUSIVE);
+			LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 
 			/* Get the minimum among confirmed recnos of connected slaves */
 			confirmed_recno = 
@@ -112,7 +112,7 @@ ForwarderHelperMain(int argc, char *argv)
 			if (confirmed_recno > MCPQueueGetInitialRecno(q))
 				OptimizeQueue(q, h, confirmed_recno);
 				
-			MCPHostsUnlockAll(h);
+			LWLockRelease(MCPHostsLock);
 
 			/* Remove records up to the point calculated above */
 			MCPQueuePrune(q);

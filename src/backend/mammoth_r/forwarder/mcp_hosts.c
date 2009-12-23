@@ -287,13 +287,13 @@ MCPHostsCleanup(MCPHosts *h, MCPQueue *q, ullong recno)
 	LockReplicationQueue(q, LW_EXCLUSIVE);
 
 	/* need to fix up MCPHosts before removing anything from the queue */
-	MCPHostsLockAll(h, LW_EXCLUSIVE);
+	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 	for (; hostno < h->h_maxhosts; hostno++)
 	{
 		if (MCPHostsGetFirstRecno(h, hostno) < recno)
 			MCPHostsSetFirstRecno(h, hostno, recno);
 	}
-	MCPHostsUnlockAll(h);
+	LWLockRelease(MCPHostsLock);
 
 	MCPQueueCleanup(q, recno);
 

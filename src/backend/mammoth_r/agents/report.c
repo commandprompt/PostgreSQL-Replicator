@@ -146,9 +146,9 @@ mammoth_hosts_status(PG_FUNCTION_ARGS)
 		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
 		
 		/* Set max_calls to the number of slaves */
-		MCPHostsLockAll(ForwarderHosts, LW_SHARED);
+		LWLockAcquire(MCPHostsLock, LW_SHARED);
 		funcctx->max_calls = MCPHostsGetMaxHosts(ForwarderHosts);
-		MCPHostsUnlockAll(ForwarderHosts);
+		LWLockRelease(MCPHostsLock);
 
 		MemoryContextSwitchTo(oldctx);
 	}
@@ -172,7 +172,7 @@ mammoth_hosts_status(PG_FUNCTION_ARGS)
 		values[1] = BoolGetDatum(present);
 
 		/* Acquire data from the hosts */
-		MCPHostsLockAll(ForwarderHosts, LW_SHARED);
+		LWLockAcquire(MCPHostsLock, LW_SHARED);
 
 		values[2] = Int32GetDatum(MCPHostsGetSync(ForwarderHosts, slaveno));
 		ts = time_t_to_timestamptz(MCPHostsGetTimestamp(ForwarderHosts, 
@@ -185,7 +185,7 @@ mammoth_hosts_status(PG_FUNCTION_ARGS)
 		
 		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 
-		MCPHostsUnlockAll(ForwarderHosts);
+		LWLockRelease(MCPHostsLock);
 
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
 	}

@@ -169,11 +169,11 @@ HandleSlaveConnection(MCPQueue *q, MCPHosts *h, int slave_no, pg_enc encoding)
 
 	/* find out if it needs a dump */
 	request_dump = false;
-	MCPHostLock(h, status->ss_hostno, LW_SHARED);
+	LWLockAcquire(MCPHostsLock, LW_SHARED);
 	if (MCPHostsGetFirstRecno(h, status->ss_hostno) == InvalidRecno ||
 		MCPHostsGetSync(h, status->ss_hostno) == MCPQUnsynced)
 		request_dump = true;
-	MCPHostUnlock(h, status->ss_hostno);
+	LWLockRelease(MCPHostsLock);
 
 	if (request_dump)
 		ProcessSlaveDumpRequest(status);
@@ -347,7 +347,7 @@ SlaveCorrectQueue(SlaveStatus *status)
 	initial_recno = MCPRecvInitialRecno();
 
 	LockReplicationQueue(status->ss_queue, LW_SHARED);
-	MCPHostLock(status->ss_hosts, status->ss_hostno, LW_EXCLUSIVE);
+	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 
 	if (initial_recno == InvalidRecno)
 	{
@@ -371,7 +371,7 @@ SlaveCorrectQueue(SlaveStatus *status)
 	}
 
 	/* otherwise, it is case (1) -- do nothing */
-	MCPHostUnlock(status->ss_hosts, status->ss_hostno);
+	LWLockRelease(MCPHostsLock);
 	UnlockReplicationQueue(status->ss_queue);
 }
 
@@ -380,10 +380,10 @@ check_sync_status(SlaveStatus *status)
 {
 	bool	unsynced = false;
 
-	MCPHostLock(status->ss_hosts, status->ss_hostno, LW_EXCLUSIVE);
+	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 	if (MCPHostsGetSync(status->ss_hosts, status->ss_hostno) == MCPQUnsynced)
 		unsynced = true;
-	MCPHostUnlock(status->ss_hosts, status->ss_hostno);
+	LWLockRelease(MCPHostsLock);
 
 	if (unsynced)
 	{
@@ -469,7 +469,7 @@ SlaveSendDirectMessages(SlaveStatus *status)
 	{
 		/* Check if we have already sent all the queue  messages to a slave */
 		LockReplicationQueue(status->ss_queue, LW_SHARED);
-		MCPHostLock(status->ss_hosts, status->ss_hostno, LW_SHARED);
+		LWLockAcquire(MCPHostsLock, LW_SHARED);
 
 		if (MCPHostsGetFirstRecno(status->ss_hosts, status->ss_hostno) > 
 			MCPQueueGetLastRecno(status->ss_queue))
@@ -477,7 +477,7 @@ SlaveSendDirectMessages(SlaveStatus *status)
 			sm.flags |= MCP_MSG_FLAG_PROMOTE_READY;
 			status->ss_promotion = slave_promotion_wait_slave_ready;
 		}
-		MCPHostUnlock(status->ss_hosts, status->ss_hostno);
+		LWLockRelease(MCPHostsLock);
 		UnlockReplicationQueue(status->ss_queue);
 		LOG_PROMOTION_STATES(DEBUG2, status);
 	}
@@ -515,7 +515,7 @@ SlaveSendDirectMessages(SlaveStatus *status)
 	{
 		/* Check if we have already sent all the queue data */
 		LockReplicationQueue(status->ss_queue, LW_SHARED);
-		MCPHostLock(status->ss_hosts, status->ss_hostno, LW_SHARED);
+		LWLockAcquire(MCPHostsLock, LW_SHARED);
 
 		if (MCPHostsGetFirstRecno(status->ss_hosts,status->ss_hostno) >
 			MCPQueueGetLastRecno(status->ss_queue))
@@ -524,7 +524,7 @@ SlaveSendDirectMessages(SlaveStatus *status)
 			sm.flags |= MCP_MSG_FLAG_PROMOTE_FORCE;
 			status->ss_force_promotion = slave_force_promotion_completed;
 		}
-		MCPHostUnlock(status->ss_hosts, status->ss_hostno);
+		LWLockRelease(MCPHostsLock);
 		UnlockReplicationQueue(status->ss_queue);
 		LOG_PROMOTION_STATES(DEBUG2, status);
 	}
@@ -725,11 +725,11 @@ SlaveMessageHook(TxDataHeader *hdr, void *status_arg, ullong recno)
 
         Assert(!LWLockHeldByMe(MCPHostsLock));
 
-        MCPHostLock(status->ss_hosts, status->ss_hostno, LW_EXCLUSIVE);
+        LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
         sync = MCPHostsGetSync(status->ss_hosts, status->ss_hostno);
         if (sync != MCPQSynced)
             MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQSynced);
-        MCPHostUnlock(status->ss_hosts, status->ss_hostno);
+        LWLockRelease(MCPHostsLock);
 
         if (sync != MCPQSynced)
             elog(DEBUG4, "Host %d sync: %s -> MCPQSynced", 
@@ -761,10 +761,10 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 	set_ps_display("sending messages to slave", false);
 
 	/* Get recno of the first transaction to send */
-	MCPHostLock(h, hostno, LW_SHARED);
+	LWLockAcquire(MCPHostsLock, LW_SHARED);
 	recno = MCPHostsGetFirstRecno(h, hostno);
     host_sync = MCPHostsGetSync(h, hostno);
-	MCPHostUnlock(h, hostno);
+	LWLockRelease(MCPHostsLock);
 
     /* 
      * If the queue is desynced refuse to send anything unless MCP is
@@ -816,7 +816,7 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		 * process then use its new value to send the next transaction.
 		 */
 		LWLockAcquire(MCPServerLock, LW_SHARED);
-		MCPHostLock(h, hostno, LW_EXCLUSIVE);
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 
 		first_recno = MCPHostsGetFirstRecno(h, hostno);
 		if (recno == first_recno)
@@ -843,7 +843,7 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		 */
 		recno = MCPHostsGetFirstRecno(h, hostno);
 
-		MCPHostUnlock(h, hostno);
+		LWLockRelease(MCPHostsLock);
 
 		/* Check if the slave is talking to us */
 		if (mcpWaitTimed(MyProcPort, true, false, 0))
@@ -994,13 +994,16 @@ ReceiveSlaveMessage(SlaveStatus *status)
 
 		elog(DEBUG2, "received ACK from slave => vrecno = "UNI_LLU,
 			 rm->recno);
-		MCPHostLock(status->ss_hosts, status->ss_hostno, LW_EXCLUSIVE);
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 		prevack = MCPHostsGetAckedRecno(status->ss_hosts, status->ss_hostno);
 		if (prevack <= rm->recno)
+		{
 			MCPHostsSetAckedRecno(status->ss_hosts, status->ss_hostno, rm->recno);
+			elog(LOG, "received ACK for message "UNI_LLU, rm->recno);
+		}
 		else
 			elog(WARNING, "received ACK for already confirmed transaction");
-		MCPHostUnlock(status->ss_hosts, status->ss_hostno);
+		LWLockRelease(MCPHostsLock);
 	}
 	
 	/* Should be placed after ACK and TABLELIST processing code */
@@ -1046,7 +1049,7 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 	int		hostno = status->ss_hostno;
 
 	LWLockAcquire(MCPServerLock, LW_SHARED);
-	MCPHostLock(h, hostno, LW_EXCLUSIVE);
+	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 
 	stored_dump_recno = FullDumpGetStartRecno();
 	host_vrecno = MCPHostsGetAckedRecno(h, hostno);
@@ -1092,7 +1095,7 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 				MCPHostsSetSync(h, hostno, MCPQUnsynced);
 		}
 	}
-	MCPHostUnlock(h, hostno);
+	LWLockRelease(MCPHostsLock);
 	LWLockRelease(MCPServerLock);
 
 	if (request)
@@ -1526,10 +1529,10 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
 		{
 			ullong	frecno;
 
-			MCPHostLock(state->ss_hosts, state->ss_hostno, LW_SHARED);
+			LWLockAcquire(MCPHostsLock, LW_SHARED);
 			frecno = MCPHostsGetFirstRecno(state->ss_hosts, state->ss_hostno);
 			reqdump = tab->dump_recno < frecno;
-			MCPHostUnlock(state->ss_hosts, state->ss_hostno);
+			LWLockRelease(MCPHostsLock);
 		}
 	}
 
