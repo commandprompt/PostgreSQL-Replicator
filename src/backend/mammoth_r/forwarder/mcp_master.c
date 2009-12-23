@@ -74,7 +74,7 @@ static void MCPMasterActOnPromotionSignal(MasterState *state);
 static void SlaveNextPromotionState(MasterState *state);
 static void MasterRestoreTableList(MasterState *state);
 static void MasterStoreTableList(MasterState *state);
-static void ReceiveMasterTableList(List *tl_received, TxDataHeader *hdr, 
+static void ReceiveMasterTableList(List *tl_received, TxDataHeader *hdr,
 								   ullong recno, void *arg_state);
 static void SendTableDumps(MasterState *state);
 
@@ -100,10 +100,10 @@ HandleMasterConnection(MCPQueue *q, MCPHosts *h)
 	/* We are not in promotion right after (re)connection. */
 	state->ms_promotion = master_promotion_none;
 
-	/* 
-	 * Let's check if MCP considers that promotion is still in progress either 
-	 * for a master of a slave. If that happens - then we probably  terminated 
-	 * abnormally without cleaning correspondent sysids and promotion flags in 
+	/*
+	 * Let's check if MCP considers that promotion is still in progress either
+	 * for a master of a slave. If that happens - then we probably  terminated
+	 * abnormally without cleaning correspondent sysids and promotion flags in
 	 * shared memory. The main difference from MCPMasterCancelPromotion call
 	 * is that we clear the promotion stack here.
 	 */
@@ -168,7 +168,6 @@ McpMasterLoop(MasterState *state)
 		int			ret;
 		time_t		finish_time;
 
-	
 		SendMessagesToMaster(state);
 
 		CHECK_FOR_INTERRUPTS();
@@ -330,7 +329,7 @@ SendMessagesToMaster(MasterState *state)
 	mcp_dump_progress = FullDumpGetProgress();
 	LWLockRelease(MCPServerLock);
 
-	/* 
+	/*
 	 * Act on various master promotion states.
 	 */
 	if (state->ms_promotion == master_promotion_cancelled)
@@ -369,8 +368,8 @@ SendMessagesToMaster(MasterState *state)
     /* Check if we should respond to a table dump request from the slave */
     if (table_dump_request == true)
     {
-		/* 
-		 * Make sure you don't change shared mcp_dump_progress here since 
+		/*
+		 * Make sure you don't change shared mcp_dump_progress here since
 		 * we use its cached value from the local variable in the code below.
 		 */
 
@@ -465,7 +464,7 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 	
 			MCPHostsCleanup(state->ms_hosts, state->ms_queue, recno);
 			
-			/* 
+			/*
 			 * If truncate is a standalone message - don't put it to the queue.
 			 */
 			if (rm->flags == MCP_QUEUE_FLAG_TRUNC)
@@ -477,7 +476,7 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 			elog(WARNING, "Received promotion cancel request from master");
 			if (state->ms_promotion != master_promotion_none)
 			{
-				/* 
+				/*
 				 * Do not set it to the cancelled state, because there is no
 				 * need to send PROMOTE_CANCEL to a master.
 				 */
@@ -496,8 +495,8 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 
 		if (rm->flags & MCP_MSG_FLAG_PROMOTE_READY)
 		{
-			/* 
-			 * Either transition to the 'wait for promote_make' state or cancel 
+			/*
+			 * Either transition to the 'wait for promote_make' state or cancel
 			 * a promotion depending on a current state.
 			 */
 			 if (state->ms_promotion == master_promotion_wait_ready)
@@ -524,7 +523,7 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 		{
 			int 	prev_slaveno;
 
-			/* 
+			/*
 			 * Check if we are asking for a new promotion in the middle of the
 			 * existing one.
 			 */
@@ -569,7 +568,7 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 					(errmsg("received start of dump"),
 					 errdetail("Record number "UNI_LLU, rm->recno)));
 
-			/* 
+			/*
 			 * Set the position of a 'cached' dump in queue and reset the
 			 * dump-in-progress flag.
              */
@@ -580,10 +579,10 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 			LWLockRelease(MCPServerLock);
 			
 			dump_in_progress = true;
-	
+
 			/* set ACK recno */
 			state->ms_ack_recno = rm->recno;
-	
+
 			/* The queue data is consistent now */
 			LockReplicationQueue(state->ms_queue, LW_EXCLUSIVE);
 			MCPQueueSetSync(state->ms_queue, MCPQSynced);
@@ -629,7 +628,7 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 		TXLOGSetCommitted(rm->recno);
 		UnlockReplicationQueue(state->ms_queue);
 
-		/* 
+		/*
 		 * Recheck that we are still receiving a full dump.  If we aren't,
 		 * clear the dump_in_progress flag.
 		 */
@@ -637,7 +636,7 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 		{
 			LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
 
-			if (FullDumpGetStartRecno() == InvalidRecno || 
+			if (FullDumpGetStartRecno() == InvalidRecno ||
 				FullDumpGetEndRecno() != InvalidRecno)
 			{
 				dump_in_progress = false;
@@ -654,7 +653,7 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 
 /* Check a tablelist received from the master */
 static void
-ReceiveMasterTableList(List *tl_received, TxDataHeader *hdr, 
+ReceiveMasterTableList(List *tl_received, TxDataHeader *hdr,
 					   ullong recno, void *arg_state)
 {
 	MasterState *state = (MasterState *) arg_state;
@@ -683,7 +682,7 @@ ReceiveMasterTableList(List *tl_received, TxDataHeader *hdr,
 			t_found = TableListEntry(state->ms_tablelist, t_current);
 
 			ereport(DEBUG3,
-					(errmsg("Received dump for the table %s", 
+					(errmsg("Received dump for the table %s",
 							t_current->relpath),
 					 errdetail("recno "UNI_LLU, recno)));
 
@@ -692,7 +691,7 @@ ReceiveMasterTableList(List *tl_received, TxDataHeader *hdr,
 			{
 				t_found = MakeMCPTable(t_current->relpath);
 				state->ms_tablelist = lappend(state->ms_tablelist, t_found);
-				elog(DEBUG3, "Table %s added to the table list", 
+				elog(DEBUG3, "Table %s added to the table list",
 					 t_found->relpath);
 			}
 
@@ -746,7 +745,7 @@ MasterNotifySlaves(MasterState *state)
 		kill(pids[i], SIGUSR1);
 }
 
-/* 
+/*
  * Command slave to change its promotion state.
  */
 static void
@@ -786,7 +785,7 @@ SlaveNextPromotionState(MasterState *state)
 	LOG_PROMOTION_STATE(DEBUG2, state);
 }
 
-/* 
+/*
  * A handler for changing master promotion state in response to a request
  * from a promoted slave. Note that we change only those master states that
  * depends on a slave state here. Promotion cancel request is transmitted
@@ -801,7 +800,7 @@ MCPMasterActOnPromotionSignal(MasterState *state)
 	if (state->ms_promotion == master_promotion_cancelled)
 		return;
 
-	/* 
+	/*
 	 * Advance to the next promotion state or cancel current promotion,
 	 * depending on the shared memory flag.  We clear the promotion cancel flag
 	 * after storing its state locally.
@@ -821,7 +820,7 @@ MCPMasterActOnPromotionSignal(MasterState *state)
 	}
 	else if (state->ms_promotion != master_promotion_cancelled)
 	{
-		/* 
+		/*
 		 * Advance to the next master state. Note that we do this
 		 * only for the states that should be changed by a notification
 		 * from a slave, for other states we emit WARNING.
@@ -851,7 +850,7 @@ MCPMasterStartPromotion(MasterState *state, int prev_slaveno)
 	int 	promotion_slaveno;
 	bool 	allow = true;
 
-	/* 
+	/*
 	 * don't check if promotion is allowed here since this function is used
 	 * only in context of back promotion, which should be always allowed for
 	 * the slave since we already performed 'forward' promotion with it.
@@ -859,7 +858,7 @@ MCPMasterStartPromotion(MasterState *state, int prev_slaveno)
 	Assert(LWLockHeldByMe(MCPServerLock));
 	promotion_slaveno = PromotionCtl->promotion_slave_no;
 
-	/* 
+	/*
 	 * Check if MCP is already performing a promotion. Look at the
 	 * SlaveStartPromotion code for details. Note that we check this for the
 	 * slave to avoid missing a force promotion check. A caller of this
@@ -915,11 +914,11 @@ MCPMasterStartPromotion(MasterState *state, int prev_slaveno)
 static void
 MCPMasterFinishPromotion(void)
 {
-	MCPMsg *sm = palloc0(sizeof(MCPMsg) + 
+	MCPMsg *sm = palloc0(sizeof(MCPMsg) +
 						 sizeof(PromotionCtl->promotion_slave_no) - 1);
 	
 	sm->flags |= MCP_MSG_FLAG_PROMOTE_MAKE;
-	memcpy(sm->data, &(PromotionCtl->promotion_slave_no), 
+	memcpy(sm->data, &(PromotionCtl->promotion_slave_no),
 		   sizeof(PromotionCtl->promotion_slave_no));
 	sm->datalen = sizeof(PromotionCtl->promotion_slave_no);
 	
@@ -929,7 +928,7 @@ MCPMasterFinishPromotion(void)
 	MCPReleaseMsg(sm);
 }
 
-/* 
+/*
  * Cancel promotion for the master process. The PROMOTE_CANCEL message is
  * sent elsewhere.
  *
@@ -954,7 +953,7 @@ MCPMasterCancelPromotion(MasterState *state)
 
 	state->ms_promotion = master_promotion_none;
 
-	/* 
+	/*
 	 * Reset master's promotion sysid. Check if slave has also reset its
 	 * sysid, clear other promotion related shared variables.
 	 */
