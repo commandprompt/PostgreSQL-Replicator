@@ -580,16 +580,6 @@ SlaveRestoreData(SlaveState *state)
 		recno = MCPQueueGetFirstRecno(q);
 		elog(DEBUG4, "RESTORING transaction recno "UNI_LLU, recno);
 
-		/*
-		 * If we don't have to restore the transaction at recno, proceed to
-		 * the next one
-		 */
-		if (!TXLOGIsCommitted(recno))
-		{
-			MCPQueueNextTx(q);
-			continue;
-		}
-
 		MCPQueueTxOpen(q, recno);
 
 		MCPQueueReadDataHeader(q, &hdr);
@@ -613,7 +603,6 @@ SlaveRestoreData(SlaveState *state)
 			
 		elog(DEBUG4, "PGRRestoreData done: frecno="UNI_LLU, 
 					  MCPQueueGetFirstRecno(q));
-			
 
 		MCPQueueTxClose(q);
 		MCPQueueNextTx(q);
