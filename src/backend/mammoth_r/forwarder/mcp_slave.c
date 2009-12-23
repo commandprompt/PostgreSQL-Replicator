@@ -361,14 +361,12 @@ SlaveCorrectQueue(SlaveStatus *status)
 		{
 			/* This is case (2) */
 			MCPHostsSetFirstRecno(status->ss_hosts, status->ss_hostno, initial_recno + 1);
-			MCPHostsSetAckedRecno(status->ss_hosts, status->ss_hostno, initial_recno);
 			MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQSynced);
 		}
 		else
 		{
 			/* This is case (3) */
 			MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQUnsynced);
-			MCPHostsSetAckedRecno(status->ss_hosts, status->ss_hostno, InvalidRecno);
 		}
 	}
 
@@ -837,9 +835,6 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 			if (first_recno == FullDumpGetStartRecno())
 				MCPHostsSetSync(h, hostno, MCPQSynced);
 
-			/* Set ACK recno for the transaction sent */
-			MCPHostsSetAckedRecno(h, hostno, first_recno);
-
 			MCPHostsNextTx(h, status->ss_queue, hostno, last_recno);
 		}
 		LWLockRelease(MCPServerLock);
@@ -1077,7 +1072,6 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 		 */
 		elog(DEBUG2, "using dump stored on MCP server");
 
-		MCPHostsSetAckedRecno(h, hostno, stored_dump_recno - 1);
 		MCPHostsSetFirstRecno(h, hostno, stored_dump_recno);
 		MCPHostsSetSync(h, hostno, MCPQSynced);
 
