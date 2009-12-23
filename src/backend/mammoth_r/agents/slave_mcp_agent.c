@@ -571,8 +571,7 @@ SlaveRestoreData(SlaveState *state)
 						MCPQueueGetAckRecno(q))));
 
 	/* Process only confirmed received data */
-	while (MCPQueueGetFirstRecno(q) <= MCPQueueGetLastRecno(q) &&
-		   MCPQueueGetFirstRecno(q) <= MCPQueueGetAckRecno(q))
+	while (MCPQueueGetFirstRecno(q) <= MCPQueueGetLastRecno(q))
 	{
 		TxDataHeader	hdr;
 		ullong			recno;
