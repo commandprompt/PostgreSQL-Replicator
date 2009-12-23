@@ -47,19 +47,12 @@ struct MCPHosts
 									   retrieve data from MCP queue */
 	pg_enc			h_encoding;		/* encoding of the MCP queue data */
 	TxHostsRecord	h_hosts[MCP_MAX_SLAVES];
-	LWLockId		h_locks[MCP_MAX_SLAVES];
 };
 
-/* when stored on disk, it doesn't have h_locks */
-#define MCPHOSTS_DISKSZ	(offsetof(MCPHosts, h_locks))
+#define MCPHOSTS_DISKSZ	(sizeof(MCPHosts))
 
-/*
- * Having a host locked means holding its individual lock or alternatively
- * holding the global lock.
- */
 #define ASSERT_HOST_LOCK_HELD(_h_, _hostno_) \
-	Assert(LWLockHeldByMe((_h_)->h_locks[_hostno_]) || \
-		   LWLockHeldByMe(MCPHostsLock))
+	Assert(LWLockHeldByMe(MCPHostsLock))
 
 /* the path where this stuff lives on disk */
 #define HOSTS_FILENAME (MAMMOTH_FORWARDER_DIR "/hosts")
@@ -110,13 +103,8 @@ MCPHostsShmemInit(void)
 	hosts = ShmemInitStruct("Hosts HDR", sizeof(MCPHosts), &found);
 	if (!found)
 	{
-		int		i;
-
 		MemSet(hosts, 0, sizeof(MCPHosts));
 		hosts->h_fid = TXHinit;
-
-		for (i = 0; i < MCP_MAX_SLAVES; i++)
-			hosts->h_locks[i] = LWLockAssign();
 	}
 }
 
@@ -185,7 +173,7 @@ MCPHostsNextTx(MCPHosts *h, MCPQueue *q, int hostno, ullong last_recno)
 
 /* 
  * Get the minimum of acknowledged records among the connected
- * hosts. Any record number not higher than this minimum corresponds
+ * hosts. Any record number lower than this minimum corresponds
  * to a no longer needed queue transaction.
  */ 
 ullong
@@ -421,34 +409,23 @@ void
 MCPHostLock(MCPHosts *h, int hostno, LWLockMode mode)
 {
 	LWLockAcquire(MCPHostsLock, mode);
-	LWLockAcquire(h->h_locks[hostno], mode);
-	LWLockRelease(MCPHostsLock);
 }
 
 void
 MCPHostUnlock(MCPHosts *h, int hostno)
 {
-	LWLockRelease(h->h_locks[hostno]);
+	LWLockRelease(MCPHostsLock);
 }
 
 void
 MCPHostsLockAll(MCPHosts *h, LWLockMode mode)
 {
-	int 	i;
-
 	LWLockAcquire(MCPHostsLock, mode);
-	for (i = 0; i < h->h_maxhosts; i++)
-		LWLockAcquire(h->h_locks[i], mode);
 }
 
 void
 MCPHostsUnlockAll(MCPHosts *h)
 {
-	int 	i;
-
-	for (i = 0; i < h->h_maxhosts; i++)
-		LWLockRelease(h->h_locks[i]);
-
 	LWLockRelease(MCPHostsLock);
 }
 
