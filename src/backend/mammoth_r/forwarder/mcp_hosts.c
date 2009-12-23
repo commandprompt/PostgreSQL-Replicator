@@ -405,30 +405,6 @@ MCPHostsGetMaxHosts(MCPHosts *h)
 	return h->h_maxhosts;
 }
 
-void
-MCPHostLock(MCPHosts *h, int hostno, LWLockMode mode)
-{
-	LWLockAcquire(MCPHostsLock, mode);
-}
-
-void
-MCPHostUnlock(MCPHosts *h, int hostno)
-{
-	LWLockRelease(MCPHostsLock);
-}
-
-void
-MCPHostsLockAll(MCPHosts *h, LWLockMode mode)
-{
-	LWLockAcquire(MCPHostsLock, mode);
-}
-
-void
-MCPHostsUnlockAll(MCPHosts *h)
-{
-	LWLockRelease(MCPHostsLock);
-}
-
 /* Set/get encoding attribute in the hosts header */
 void
 MCPHostsSetEncoding(MCPHosts *h, pg_enc new_encoding)

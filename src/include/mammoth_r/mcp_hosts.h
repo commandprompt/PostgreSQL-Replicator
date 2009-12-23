@@ -48,10 +48,6 @@ extern void		MCPHostsLogTabStatus(int elevel, MCPHosts *h, int hostno,
 									 char *prefix, pid_t *node_pid);
 extern int		MCPHostsGetMaxHosts(MCPHosts *h);
 extern time_t	MCPHostsGetTimestamp(MCPHosts *h, int hostno);
-extern void		MCPHostLock(MCPHosts *h, int hostno, LWLockMode mode);
-extern void		MCPHostUnlock(MCPHosts *h, int hostno);
-extern void 	MCPHostsLockAll(MCPHosts *h, LWLockMode mode);
-extern void 	MCPHostsUnlockAll(MCPHosts *h);
 /* encoding-specific functions */
 extern void		MCPHostsSetEncoding(MCPHosts *h, pg_enc new_encoding);
 extern pg_enc 	MCPHostsGetEncoding(MCPHosts *h);
