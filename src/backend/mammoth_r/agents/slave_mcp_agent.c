@@ -102,8 +102,6 @@ static SlaveForcePromotionState slave_force_promotion = slave_no_force_promotion
 
 typedef struct SlaveState
 {
-	bool 	bss_dump_inprogress;
-
 	ullong 	bss_mcp_ack_recno;
 
 	/* consider dump fully restored when we restore past this recno */
@@ -171,7 +169,6 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 	slave_should_send_tablelist = true;
 
 	/* Initialize slave's state structure members */
-	state->bss_dump_inprogress = false;
 	state->bss_mcp_ack_recno = InvalidRecno;
 	state->bss_dump_end_recno = InvalidRecno;
 	state->bss_slaveno = hostno;
@@ -483,8 +480,7 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 		}
 
 		/* Send an ACK for the messages we received */
-		if ((state->bss_mcp_ack_recno != InvalidRecno) &&
-			!state->bss_dump_inprogress)
+		if (state->bss_mcp_ack_recno != InvalidRecno)
 			SlaveSendAck(state);
 
 		/* Now we can restore the messages we accumulated */
@@ -830,8 +826,6 @@ slave_pre_commit_actions(MCPMsg *msg, SlaveState *state)
 			ereport(LOG,
 					(errmsg("received start of dump"),
 					 errdetail("Record number "UNI_LLU, msg->recno)));
-					
-			state->bss_dump_inprogress = false;
 		}
 		else if (msg->flags & MCP_QUEUE_FLAG_DUMP_END)
 		{
