@@ -754,7 +754,6 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 {
 	ullong		recno;
 	ullong		last_recno;
-	uint32		tx_counter = 0;
 	uint32		hostno = status->ss_hostno;
 	MCPHosts   *h = status->ss_hosts;
     MCPQSync    host_sync;
@@ -786,7 +785,7 @@ SlaveSendQueuedMessages(SlaveStatus *status)
         if (dump_recno == InvalidRecno || dump_recno != recno)
         {
             elog(DEBUG2, "queue is not in sync, cancel sending data");
-            goto final;
+            return;
         }
     }
 
@@ -811,8 +810,6 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		SendQueueTransaction(status->ss_queue, recno,
 							 SlaveTableListHook, (void *) status,
 							 SlaveMessageHook, (void *) status);
-
-		tx_counter++;
 
 		/*
 		 * If hosts's first recno was changed independently by the master
@@ -856,10 +853,6 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		last_recno = MCPQueueGetLastRecno(status->ss_queue);
 		UnlockReplicationQueue(status->ss_queue);
 	}
-
-final:
-	if (tx_counter > 0)
-		elog(DEBUG2, "%u transactions processed", tx_counter);
 }
 
 /* Receive a single message from the slave */
