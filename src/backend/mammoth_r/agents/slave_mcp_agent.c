@@ -470,11 +470,6 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 			 */
 			SlaveReceiveMessage(state);
 
-			/* We do send ACKs as soon as we can, however */
-			if ((state->bss_mcp_ack_recno != InvalidRecno) &&
-				!state->bss_dump_inprogress)
-				SlaveSendAck(state);
-
 			if (batch_mode)
 				timein = time(NULL);
 		}
@@ -484,16 +479,13 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 		{
 			SlaveReceiveMessage(state);
 
-			/*
-			 * As above, we send ACKs as soon as we can, but don't restore
-			 * right away
-			 */
-			if ((state->bss_mcp_ack_recno != InvalidRecno) &&
-				!state->bss_dump_inprogress)
-				SlaveSendAck(state);
-
 			/* we don't update "timein" here */
 		}
+
+		/* Send an ACK for the messages we received */
+		if ((state->bss_mcp_ack_recno != InvalidRecno) &&
+			!state->bss_dump_inprogress)
+			SlaveSendAck(state);
 
 		/* Now we can restore the messages we accumulated */
 		for (;;)
