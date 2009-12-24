@@ -1,0 +1,57 @@
+<!--
+$PostgreSQL$
+PostgreSQL documentation
+-->
+
+<refentry id="SQL-ALTERSLAVE">
+ <refmeta>
+  <refentry id="sql-alterslave-title">ALTER SLAVE</refentrytitle>
+  <manvolnum>7</manvolnum>
+  <refmiscinfo>SQL - Language Statements</refmiscinfo>
+ </refmeta>
+
+ <refnamediv>
+  <refname>ALTER SLAVE</refname>
+  <refpurpose>changes slave's replication behavior</refpurpose>
+ </refnamediv>
+
+ <indexterm zone="sql-alterslave">
+  <primary>ALTER SLAVE</primary>
+ </indexterm>
+
+ <indexterm zone="sql-alterslave">
+  <primary>SLAVE</primary>
+  <primary>ALTER</primary>
+ </indexterm>
+
+ <refsynopsisdiv>
+<synopsis>
+ALTER SLAVE REQUEST DUMP
+ALTER SLAVE RESUME RESTORE
+</synopsis>
+ </refsynopsisdiv>
+
+ <refsect1>
+ <title>Description</title>
+
+  <para>
+   <command>ALTER SLAVE</command> changes the replication behavior of a slave.
+  </para>
+
+  <para>
+   Both <command>REQUEST DUMP</command> and <RESUME RESTORE</command> are
+   slave-only commands.
+  </para>
+
+  <para>
+   The <command>REQUEST DUMP</command> form makes slave request full dump
+   (snapshot of all replication data) from the forwarder.
+  </para>
+
+  <para>
+   The <command>RESUME RESTORE</command> form resumes data restore process
+   on the slave if it was previously disabled. The slave's restore process
+   becomes inactive after error during restore. This command re-enables it.
+  </para>
+  </refsect1>
+</refentry>
