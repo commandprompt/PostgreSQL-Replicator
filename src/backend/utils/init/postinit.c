@@ -681,6 +681,23 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	if (!bootstrap)
 		pgstat_bestart();
 
+	/* Set session_replication role from the replication_role */
+	if (replication_enable)
+	{	
+		char 	*role;
+		
+		if (replication_master)
+			role = pstrdup("origin");
+		else if (replication_slave)
+			role = pstrdup("replica");
+		else
+			role = pstrdup("local");
+			
+		SetConfigOption("session_replication_role", 
+						 role, PGC_S_SESSION, PGC_S_CLIENT);
+		pfree(role);
+	}
+	
 	/* close the transaction we started above */
 	if (!bootstrap)
 		CommitTransactionCommand();

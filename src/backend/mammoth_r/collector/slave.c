@@ -563,36 +563,24 @@ PGRRestoreInitExecutor(Relation relation)
 	resultRelInfo->ri_RelationDesc = relation;
 	ExecOpenIndices(resultRelInfo);
 
-	/*
-	 * Need to copy the trigger descriptor only if we are going to fire
-	 * triggers; otherwise, set it to NULL.  The executor will notice this
-	 * and act accordingly.
-	 *
-	 * We currently only fire triggers if the relation is in the
-	 * "pg_catalog" namespace.
-	 */
-	if (RelationGetNamespace(relation) == PG_CATALOG_NAMESPACE)
+	/* Copy the trigger descriptor. AFTER triggers will be fired on replication relations */
+	resultRelInfo->ri_TrigDesc = CopyTriggerDesc(relation->trigdesc);
+	if (resultRelInfo->ri_TrigDesc != NULL)
 	{
-		resultRelInfo->ri_TrigDesc = CopyTriggerDesc(relation->trigdesc);
-		if (resultRelInfo->ri_TrigDesc != NULL)
-		{
-			TupleDesc	tdesc = RelationGetDescr(relation);
+		TupleDesc	tdesc = RelationGetDescr(relation);
 
-			/* Allocate memory for trigger cache information */
-			resultRelInfo->ri_TrigFunctions =
-				(FmgrInfo *) palloc0(relation->trigdesc->numtriggers * sizeof(FmgrInfo));
+		/* Allocate memory for trigger cache information */
+		resultRelInfo->ri_TrigFunctions =
+			(FmgrInfo *) palloc0(relation->trigdesc->numtriggers * sizeof(FmgrInfo));
 
-			/* Make a slot for user for trigger output tuple */
-			state->es_trig_tuple_slot = MakeSingleTupleTableSlot(tdesc);
-			AfterTriggerBeginQuery();
-		}
-		else
-			elog(WARNING, "Replicated relation: %s from pg_catalog namespace"
-				 " has no triggers defined", RelationGetRelationName(relation));
+		/* Make a slot for user for trigger output tuple */
+		state->es_trig_tuple_slot = MakeSingleTupleTableSlot(tdesc);
+		AfterTriggerBeginQuery();
 	}
-	else
-		resultRelInfo->ri_TrigDesc = NULL;
-
+	else if (RelationGetNamespace(relation) == PG_CATALOG_NAMESPACE)
+		elog(WARNING, "Replicated relation: %s from pg_catalog namespace"
+			 " has no triggers defined", RelationGetRelationName(relation));
+			
 	/* Complete our ExecutorState */
 	state->es_result_relations = resultRelInfo;
 	state->es_num_result_relations = 1;
