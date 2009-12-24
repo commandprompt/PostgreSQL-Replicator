@@ -186,8 +186,8 @@ static TypeName *TableFuncTypeName(List *columns);
 		AlterForeignServerStmt AlterGroupStmt
 		AlterObjectSchemaStmt AlterOwnerStmt AlterSeqStmt AlterTableStmt
 		AlterUserStmt AlterUserMappingStmt AlterUserSetStmt AlterRoleStmt AlterRoleSetStmt
-		AlterRoleSlaveReplicationStmt AnalyzeStmt ClosePortalStmt ClusterStmt CommentStmt
-		ConstraintsSetStmt CopyStmt CreateAsStmt CreateCastStmt
+		AlterRoleSlaveReplicationStmt AlterSlaveStmt AnalyzeStmt
+		ClosePortalStmt ClusterStmt CommentStmt ConstraintsSetStmt CopyStmt CreateAsStmt CreateCastStmt
 		CreateDomainStmt CreateGroupStmt CreateOpClassStmt
 		CreateOpFamilyStmt AlterOpFamilyStmt CreatePLangStmt
 		CreateSchemaStmt CreateSeqStmt CreateStmt CreateTableSpaceStmt
@@ -444,7 +444,7 @@ static TypeName *TableFuncTypeName(List *columns);
 
 	DATA_P DATABASE DAY_P DEALLOCATE DEC DECIMAL_P DECLARE DEFAULT DEFAULTS
 	DEFERRABLE DEFERRED DEFINER DELETE_P DELIMITER DELIMITERS DESC
-	DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P DOUBLE_P DROP
+	DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P DOUBLE_P DROP DUMP
 
 	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EXCEPT
 	EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN EXTERNAL EXTRACT
@@ -485,8 +485,8 @@ static TypeName *TableFuncTypeName(List *columns);
 	QUOTE
 
 	RANGE READ REAL REASSIGN RECHECK RECURSIVE REFERENCES REFRESH REINDEX
-	RELATIVE_P RELEASE RENAME REPEATABLE REPLACE REPLICA REPLICATION RESET RESTART
-	RESTRICT RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROW ROWS RULE
+	RELATIVE_P RELEASE RENAME REPEATABLE REPLACE REPLICA REPLICATION REQUEST RESET RESTART
+	RESTORE RESTRICT RESUME RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROW ROWS RULE
 
 	SAVEPOINT SCHEMA SCROLL SEARCH SECOND_P SECURITY SELECT SEQUENCE
 	SERIALIZABLE SERVER SESSION SESSION_USER SET SETOF SHARE
@@ -613,6 +613,7 @@ stmt :
 			| AlterRoleSetStmt
 			| AlterRoleSlaveReplicationStmt
 			| AlterRoleStmt
+			| AlterSlaveStmt
 			| AlterTSConfigurationStmt
 			| AlterTSDictionaryStmt
 			| AlterUserMappingStmt
@@ -914,6 +915,29 @@ AlterRoleSlaveReplicationStmt:
 				}
 		;
 
+/*****************************************************************************
+ *
+ * 'Alter Slave' slave-specific replication commands 
+ *
+*****************************************************************************/
+
+AlterSlaveStmt:
+			ALTER SLAVE REQUEST DUMP
+				{
+					AlterSlaveStmt *n = makeNode(AlterSlaveStmt);
+					n->request_dump = TRUE;
+					n->resume_restore = FALSE;
+					$$ = (Node *)n;
+				}
+		|
+			ALTER SLAVE RESUME RESTORE
+				{
+					AlterSlaveStmt *n = makeNode(AlterSlaveStmt);
+					n->request_dump = FALSE;
+					n->resume_restore = TRUE;
+					$$ = (Node *)n;
+				}
+		;
 
 /*****************************************************************************
  *
@@ -10336,6 +10360,7 @@ unreserved_keyword:
 			| DOMAIN_P
 			| DOUBLE_P
 			| DROP
+			| DUMP
 			| EACH
 			| ENABLE_P
 			| ENCODING
@@ -10452,9 +10477,12 @@ unreserved_keyword:
 			| REPLACE
 			| REPLICA
 			| REPLICATION
+			| REQUEST
 			| RESET
 			| RESTART
+			| RESTORE
 			| RESTRICT
+			| RESUME
 			| RETURNS
 			| REVOKE
 			| ROLE

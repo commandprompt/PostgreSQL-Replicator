@@ -64,6 +64,8 @@ extern void ReplicationMain(int argc, char *argv[]);
 /* Functions to act on user commands */
 void ProcessMcpStmt(McpStmt *stmt);
 void ProcessPromoteStmt(PromoteStmt *stmt);
+void ProcessAlterSlaveRequestDump(void);
+void ProcessAlterSlaveCommand(AlterSlaveStmt *stmt);
 
 /*
  * Known exit codes

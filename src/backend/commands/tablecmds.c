@@ -2709,6 +2709,11 @@ ATCheckReplication(Relation rel, AlterTableType subtype)
 		case AT_DisableTrig:	/* DISABLE TRIGGER variants */
 		case AT_DisableTrigAll:
 		case AT_DisableTrigUser:
+		case AT_EnableReplicaTrig:
+		case AT_EnableRule:		/* ENABLE/DISABLE RULE variants */
+		case AT_EnableAlwaysRule:
+		case AT_EnableReplicaRule:
+		case AT_DisableRule:
 			/* no problem */
 			break;
 		default:				/* oops */
