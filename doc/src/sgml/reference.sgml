@@ -51,6 +51,7 @@
    &alterSchema;
    &alterSequence;
    &alterServer;
+   &alterSlave;
    &alterTable;
    &alterTableSpace;
    &alterTSConfig;

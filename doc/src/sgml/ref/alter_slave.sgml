@@ -5,7 +5,7 @@ PostgreSQL documentation
 
 <refentry id="SQL-ALTERSLAVE">
  <refmeta>
-  <refentry id="sql-alterslave-title">ALTER SLAVE</refentrytitle>
+  <refentrytitle id="sql-alterslave-title">ALTER SLAVE</refentrytitle>
   <manvolnum>7</manvolnum>
   <refmiscinfo>SQL - Language Statements</refmiscinfo>
  </refmeta>
@@ -21,7 +21,7 @@ PostgreSQL documentation
 
  <indexterm zone="sql-alterslave">
   <primary>SLAVE</primary>
-  <primary>ALTER</primary>
+  <secondary>ALTER</secondary>
  </indexterm>
 
  <refsynopsisdiv>
@@ -39,7 +39,7 @@ ALTER SLAVE RESUME RESTORE
   </para>
 
   <para>
-   Both <command>REQUEST DUMP</command> and <RESUME RESTORE</command> are
+   Both <command>REQUEST DUMP</command> and <command>RESUME RESTORE</command> are
    slave-only commands.
   </para>
 
