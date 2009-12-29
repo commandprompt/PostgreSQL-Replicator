@@ -2450,4 +2450,12 @@ typedef struct AlterTSConfigurationStmt
 	bool		missing_ok;		/* for DROP - skip error if missing? */
 } AlterTSConfigurationStmt;
 
+/* Alter Slave stmt */
+typedef struct AlterSlaveStmt
+{
+	NodeTag 	type;
+	bool		request_dump;	/* for ALTER SLAVE REQUEST DUMP */
+	bool		resume_restore; /* for ALTER SLAVE RESUME RESTORE */
+} AlterSlaveStmt;
+
 #endif   /* PARSENODES_H */

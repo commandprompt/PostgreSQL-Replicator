@@ -26,8 +26,6 @@ extern void SlaveCompletePromotion(bool force);
 extern void MasterCompletePromotion(void);
 extern void process_promotion_file(void);
 
-extern bool promotion_request;
-
 /*
  * Shared memory structs and pointers.
  *
@@ -45,11 +43,6 @@ extern bool promotion_request;
  * The backend must not signal the replicator process directly, because it
  * doesn't know the PID.
  */
-typedef struct ReplicationSignalData
-{
-	bool		promotion;
-	bool		batchupdate;
-} ReplicationSignalData;
 
 typedef struct ReplicationPromotionData
 {
@@ -59,5 +52,4 @@ typedef struct ReplicationPromotionData
    bool		promotion_block_relations;
 } ReplicationPromotionData;
 
-extern ReplicationSignalData	*ReplSignalData;
 extern ReplicationPromotionData	*ReplPromotionData;

@@ -23,6 +23,7 @@ Complete list of usable sgml source files in this directory.
 <!entity alterSchema        system "alter_schema.sgml">
 <!entity alterServer        system "alter_server.sgml">
 <!entity alterSequence      system "alter_sequence.sgml">
+<!entity alterSlave			system "alter_slave.sgml">
 <!entity alterTable         system "alter_table.sgml">
 <!entity alterTableSpace    system "alter_tablespace.sgml">
 <!entity alterTSConfig      system "alter_tsconfig.sgml">

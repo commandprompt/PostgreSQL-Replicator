@@ -32,6 +32,7 @@
 #include "mammoth_r/mcp_compress.h"
 #include "mammoth_r/mcp_connection.h"
 #include "mammoth_r/mcp_lists.h"
+#include "mammoth_r/signals.h"
 #include "mammoth_r/txlog.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -117,6 +118,11 @@ static SlaveState	global_state;
 static bool		doing_socket_setup = false;
 /* slave should send tablelist to MCP if this flag is set */
 static bool		slave_should_send_tablelist;
+/* 
+ * slave doesn't restore anything (although continues to received data)
+ * if this flag it set.
+ */
+static bool		slave_stop_restore = false;
 
 MemoryContext SlaveContext;
 
@@ -126,6 +132,7 @@ static void SlaveReceiveMessage(SlaveState *state);
 static void SlaveSendTablelist(SlaveState *state);
 static void SlaveSendPromotionMsg(int flag);
 static void SlaveSendAck(SlaveState *state);
+static void SlaveSendFullDumpRequest(void);
 static void SlaveRestoreData(SlaveState *state);
 static void SlaveStartPromotion(void);
 static void connect_callback(void *arg);
@@ -133,6 +140,7 @@ static void authenticate_callback(void *arg);
 static bool SlaveMessageHook(bool after, MCPMsg *msg, void *arg);
 static bool slave_pre_commit_actions(MCPMsg *msg, SlaveState *state);
 static void slave_post_commit_actions(MCPMsg *msg, SlaveState *state);
+static void SlaveProcessSignals(SlaveState *state);
 
 int
 ReplicationSlaveMain(MCPQueue *q, int hostno)
@@ -283,13 +291,11 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 			return 0;
 		}
 
-		elog(WARNING, "error detected during restore process; requesting dump");
+		elog(WARNING, "error detected during restore process; halting the restore process");
 		/* don't fill the logs as fast as we can */
 		pg_usleep(1000000L);
-
-		LockReplicationQueue(q, LW_EXCLUSIVE);
-		MCPQueueSetSync(q, MCPQUnsynced);
-		UnlockReplicationQueue(q);
+		
+		slave_stop_restore = true;
 	}
 	PG_exception_stack = &local_sigjmp_buf;
 
@@ -389,52 +395,7 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 
 		MCPQueueLogHdrStatus(DEBUG4, q, "slave");
 
-		/* If promotion was requested, initiate the promotion process. */
-		if (promotion_request)
-		{
-			LWLockAcquire(ReplicationLock, LW_EXCLUSIVE);
-
-			promotion_request = false;
-			/* Cancel setting promotion_request on receiving sigusr1 */
-			ReplSignalData->promotion = false;
-
-			if (!ReplPromotionData->promotion_in_progress)
-			{
-				SlaveStartPromotion();
-
-				/*
-			 	 * We shouldn't be starting a new promotion if we have
-			 	 * an existing one in progress.
-			 	 */
-				Assert(slave_force_promotion == slave_no_force_promotion &&
-					   slave_promotion == slave_no_promotion);
-
-				if (ReplPromotionData->force_promotion)
-					slave_force_promotion = slave_force_promotion_wait_ready;
-				else
-					slave_promotion = slave_promotion_wait_ready;
-			}
-			else
-			{
-				/*
-				 * A race condition happened and one or several of our backends
-				 * managed to send us multiple promotion signals before we have
-				 * set promotion_in_progress in SQP.
-				 */
-				elog(WARNING, "Multiple promotion requests received");
-			}
-
-			/*
-			 * Since we have already set a promotion type in the state variables
-			 * we can just clear shmem promotion data.
-			 */
-			ReplPromotionData->force_promotion = false;
-			ReplPromotionData->back_promotion = false;
-
-			LWLockRelease(ReplicationLock);
-
-			DISPLAY_SLAVE_PROMOTION_STATES(DEBUG2);
-		}
+		SlaveProcessSignals(state);
 
 		/* Prepare to sleep; set a timeout if the configuration requires it */
 		if (batch_mode)
@@ -479,7 +440,7 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 			SlaveSendAck(state);
 
 		/* Now we can restore the messages we accumulated */
-		for (;;)
+		for (;!slave_stop_restore;)
 		{
 			SlaveRestoreData(state);
 
@@ -692,6 +653,19 @@ SlaveSendAck(SlaveState *state)
 
 	/* and update our internal state */
 	state->bss_mcp_ack_recno = InvalidRecno;
+}
+
+/* Ask the forwarder to send a full dump */
+static void
+SlaveSendFullDumpRequest(void)
+{
+	MCPMsg		sm;
+	
+	MemSet(&sm, 0, sizeof(MCPMsg));
+	sm.flags |= MCP_MSG_FLAG_REQFULL;
+	
+	MCPMsgPrint(DEBUG3, "slave requested full dump", &sm);
+	MCPSendMsg(&sm, true);
 }
 
 static bool 
@@ -1052,4 +1026,84 @@ authenticate_callback(void *arg)
 	int		slaveno = *(int *) arg;
 
 	errcontext("slave %d authenticating to MCP server", slaveno);
+}
+
+/* 
+ * Deal with signals received from the postmaster
+ * Note: batchupdate is processed in replication.c 
+*/
+static void
+SlaveProcessSignals(SlaveState *state)
+{
+	/* If promotion was requested, initiate the promotion process. */
+	if (ReplLocalSignalData.promotion)
+	{
+		ReplLocalSignalData.promotion = false;
+		
+		LWLockAcquire(ReplicationLock, LW_EXCLUSIVE);
+
+		if (!ReplPromotionData->promotion_in_progress)
+		{
+			SlaveStartPromotion();
+
+			/*
+		 	 * We shouldn't be starting a new promotion if we have
+		 	 * an existing one in progress.
+		 	 */
+			Assert(slave_force_promotion == slave_no_force_promotion &&
+				   slave_promotion == slave_no_promotion);
+
+			if (ReplPromotionData->force_promotion)
+				slave_force_promotion = slave_force_promotion_wait_ready;
+			else
+				slave_promotion = slave_promotion_wait_ready;
+		}
+		else
+		{
+			/*
+			 * A race condition happened and one or several of our backends
+			 * managed to send us multiple promotion signals before we have
+			 * set promotion_in_progress in SQP.
+			 */
+			elog(WARNING, "Multiple promotion requests received");
+		}
+
+		/*
+		 * Since we have already set a promotion type in the state variables
+		 * we can just clear shmem promotion data.
+		 */
+		ReplPromotionData->force_promotion = false;
+		ReplPromotionData->back_promotion = false;
+
+		LWLockRelease(ReplicationLock);
+
+		DISPLAY_SLAVE_PROMOTION_STATES(DEBUG2);
+	}
+	
+	if (ReplLocalSignalData.reqdump)
+	{
+		/* 
+		 * Desync the queue so the slave would request a dump from 
+		 * the forwarder or master 
+		 */
+		elog(LOG, "Requesting a dump from the forwarder");
+		ReplLocalSignalData.reqdump = false;
+		
+		/* 
+		 * Not really necessary, although we don't want to waste
+		 * time on restoring the data currently in queue while
+		 * we are waiting for the full dump.
+		 */
+		LockReplicationQueue(state->slave_mcpq, LW_EXCLUSIVE);
+		MCPQueueSetSync(state->slave_mcpq, MCPQUnsynced);
+		UnlockReplicationQueue(state->slave_mcpq);
+		
+		SlaveSendFullDumpRequest();
+	}
+	if (ReplLocalSignalData.resume)
+	{
+		elog(LOG, "Data restore resumed");
+		ReplLocalSignalData.resume = false;
+		slave_stop_restore = false;
+	}
 }

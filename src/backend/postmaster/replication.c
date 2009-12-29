@@ -29,6 +29,7 @@
 #include "mammoth_r/mcp_queue.h"
 #include "mammoth_r/pgr.h"
 #include "mammoth_r/promotion.h"
+#include "mammoth_r/signals.h"
 #include "mammoth_r/txlog.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -81,12 +82,6 @@ int	ReplicationChildSlot = 0;
 static bool		am_replicator = false;
 static time_t	time_replic_stop = 0;
 static time_t	time_helper_stop = 0;
-
-/*
- * For non-persistent slave connections: true when a connection is
- * requested
- */
-static bool connection_requested = false;
 
 /*
  * The MCPQueue variables
@@ -472,7 +467,7 @@ ReplicationShmemInit(void)
 	else
 		Assert(found);
 
-	ReplSignalData = &(shared->signal);
+	ReplSharedSignalData = &(shared->signal);
 	ReplPromotionData = &(shared->promotion);
 }
 
@@ -561,12 +556,12 @@ handle_slave(void)
 	{
 		CHECK_FOR_INTERRUPTS();
 		if (!replication_slave_batch_mode ||
-			(replication_slave_batch_mode && connection_requested))
+			(replication_slave_batch_mode && ReplLocalSignalData.batchupdate))
 		{
 			int		ret;
 
 			/* Reset the connect-on-demand flag for the next iteration */
-			connection_requested = false;
+			ReplLocalSignalData.batchupdate = false;
 
 			elog(LOG, "slave %d connecting to MCP server",
 				 replication_slave_no);
@@ -664,7 +659,7 @@ PGREndConnection(int code, Datum arg)
  * sigusr1_handler
  *
  * Receives a SIGUSR1 signal, supposedly coming from the Postmaster.  This
- * signal means some user issued a PROMOTE command on a backend; the backend
+ * signal means some user issued a command on a backend; the backend
  * signalled the postmaster, and the postmaster signalled us.  We cannot act
  * on the signal immediately because we may be processing other messages
  * incoming from the master.  So just set a flag which will be seen the next
@@ -672,18 +667,38 @@ PGREndConnection(int code, Datum arg)
  *
  * The complete information about the promotion request was already saved by
  * the original backend in shared memory.
+ *
+ * XXX: Normally ReplicationLock should be acquired before accessing shared
+ * signal data. However, we can't do this, since we are the signal handler.
+ * Without a lock worst thing that may happen is that we reset a subsequent
+ * request of the same type. We don't care for now, but we have to be aware
+ * of this when adding members to ReplSharedSignalData.
  */
 static void
 sigusr1_handler(SIGNAL_ARGS)
 {
 	elog(DEBUG2, "sigusr1_handler");
 
-	if (ReplSignalData->batchupdate)
-		connection_requested = true;
-
-	/* promotion? */
-	if (ReplSignalData->promotion)
-		promotion_request = true;
+	if (ReplSharedSignalData->batchupdate)
+	{
+		ReplLocalSignalData.batchupdate = true;
+		ReplSharedSignalData->batchupdate = false;
+	}
+	if (ReplSharedSignalData->promotion)
+	{
+		ReplLocalSignalData.promotion = true;
+		ReplSharedSignalData->promotion = false;
+	}
+	if (ReplSharedSignalData->reqdump)
+	{
+		ReplLocalSignalData.reqdump = true;
+		ReplSharedSignalData->reqdump = false;
+	}
+	if (ReplSharedSignalData->resume)
+	{
+		ReplLocalSignalData.resume = true;
+		ReplSharedSignalData->resume = false;
+	}
 }
 
 /*
@@ -708,7 +723,7 @@ ProcessMcpStmt(McpStmt *stmt)
 						 "configuration parameter to use this command");
 
 				LWLockAcquire(ReplicationLock, LW_EXCLUSIVE);
-				ReplSignalData->batchupdate = true;
+				ReplSharedSignalData->batchupdate = true;
 				LWLockRelease(ReplicationLock);
 
 				SendPostmasterSignal(PMSIGNAL_REPLICATOR);
@@ -818,4 +833,36 @@ void
 forwarder_helper_stopped(void)
 {
 	time_helper_stop = time(NULL);
+}
+
+/* 
+ * Act on ALTER SLAVE (REQUEST DUMP | RESUME RESTORE) commands.
+ * Send a signal to postmaster so that it will be forwarded to
+ * the replication process. 
+ */
+void
+ProcessAlterSlaveCommand(AlterSlaveStmt *stmt)
+{
+	char 	*cmd_string;
+	
+	Assert(stmt->request_dump || stmt->resume_restore);
+		
+	cmd_string = (stmt->request_dump) ? "REQUEST DUMP" : "RESUME RESTORE";
+	 
+	elog(DEBUG2, "User issued %s command", cmd_string);
+	
+	/* ALTER SLAVE is a slave only command */
+	if (!replication_enable)
+		elog(ERROR, "%s only works in replication mode", cmd_string);
+	if (!replication_slave)
+		elog(ERROR, "%s can only be used on a slave", cmd_string);
+	
+	LWLockAcquire(ReplicationLock, LW_EXCLUSIVE);
+	if (stmt->request_dump)
+		ReplSharedSignalData->reqdump = true;
+	else
+		ReplSharedSignalData->resume = true;
+	LWLockRelease(ReplicationLock);
+	
+	SendPostmasterSignal(PMSIGNAL_REPLICATOR);
 }

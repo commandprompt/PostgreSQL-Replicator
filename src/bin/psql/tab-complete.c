@@ -695,7 +695,7 @@ psql_completion(char *text, int start, int end)
 	{
 		static const char *const list_ALTER[] =
 		{"AGGREGATE", "CONVERSION", "DATABASE", "DOMAIN", "FOREIGN DATA WRAPPER", "FORWARDER", "FUNCTION",
-		 "GROUP", "INDEX", "LANGUAGE", "OPERATOR", "ROLE", "SCHEMA", "SERVER", "SEQUENCE", "TABLE",
+		 "GROUP", "INDEX", "LANGUAGE", "OPERATOR", "ROLE", "SCHEMA", "SERVER", "SEQUENCE", "SLAVE", "TABLE",
 		"TABLESPACE", "TEXT SEARCH", "TRIGGER", "TYPE", "USER", "USER MAPPING FOR", "VIEW", NULL};
 
 		COMPLETE_WITH_LIST(list_ALTER);
@@ -1093,6 +1093,15 @@ psql_completion(char *text, int start, int end)
 	else if (pg_strcasecmp(prev3_wd, "ALTER") == 0 &&
 			 pg_strcasecmp(prev2_wd, "FORWARDER") == 0)
 		COMPLETE_WITH_CONST("SET ACTIVE");
+	else if (pg_strcasecmp(prev2_wd, "ALTER") == 0 &&
+			 pg_strcasecmp(prev_wd, "SLAVE") == 0)
+	{
+		static const char *const list_ALTERSLAVE[] =
+		{"REQUEST DUMP", "RESUME RESTORE", NULL};
+		
+		COMPLETE_WITH_LIST(list_ALTERSLAVE);
+	}
+		
 /* MCP */
 	/* complete with (REFRESH|BATCHUPDATE) */
 	else if (pg_strcasecmp(prev_wd, "MCP") == 0)
