@@ -79,7 +79,7 @@ MCPHostsInit(void)
 		MCPFileRead(f, h, MCPHOSTS_DISKSZ, false);
 
 		if (h->h_fid != TXHmagic)
-			elog(ERROR, "incorrect .txh file identificator %d, expected %d",
+			elog(ERROR, "incorrect .txh file identificator %x, expected %x",
 				 h->h_fid, TXHmagic);
 
 		/* XXX anything else? */
