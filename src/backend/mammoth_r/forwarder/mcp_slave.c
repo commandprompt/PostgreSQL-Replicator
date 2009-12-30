@@ -708,17 +708,17 @@ SlaveMessageHook(TxDataHeader *hdr, void *status_arg, ullong recno)
 	SlaveStatus *status = (SlaveStatus *) status_arg;
 
 	/*
-	 * If this is a catalog dump, avoid sending anything until the slave
+	 * If this is a catalog dump, stop sending anything until the slave
 	 * returns the table list
 	 */
 	if (hdr->dh_flags & MCP_QUEUE_FLAG_CATALOG_DUMP)
 	{
 		elog(DEBUG2,
-			 "waiting for ACK on tx "UNI_LLU
-			 " and table list suspended sending data to the slave",
-			 recno); 
+			 "waiting for table list, suspended sending data to the slave");
 		status->ss_wait_list = true;
 	}
+
+	/* If this is the start of a dump, mark the slave as synced */
     if (hdr->dh_flags & MCP_QUEUE_FLAG_DUMP_START)
     {
         MCPQSync    sync;
