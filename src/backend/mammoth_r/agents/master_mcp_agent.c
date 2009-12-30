@@ -609,8 +609,7 @@ PGRAbortSubTransaction(off_t offset)
 /*
  * ProcessMCPMessage
  *
- * Process a single message from the MCP server.  Returns false if it gets a
- * disconnect message from the MCP server.
+ * Process a single message from the MCP server.
  */
 static void
 ProcessMCPMessage(MasterState *state)
