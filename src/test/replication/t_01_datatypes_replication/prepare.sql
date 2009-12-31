@@ -13,13 +13,13 @@ CREATE OR REPLACE FUNCTION test4_insert_plpgsql() RETURNS void AS 'BEGIN INSERT 
 CREATE OR REPLACE FUNCTION test4_update_plpgsql() RETURNS void AS 'BEGIN UPDATE test4 SET col1=4,col2=''two-updated'' WHERE col1=2; RETURN; END' LANGUAGE 'plpgsql';
 CREATE OR REPLACE FUNCTION test4_delete_plpgsql() RETURNS void AS 'BEGIN DELETE FROM test4 WHERE col1=2; RETURN; END' LANGUAGE 'plpgsql';
 
-CREATE TABLE test5( a int4 PRIMARY KEY, b name, c text, d float8, e float4, f int2, g polygon, h abstime, i char, j abstime[], k int4, l tid, m xid, n oidvector, p smgr, q point, r lseg, s path, t box, u tinterval, v timestamp, w interval, x float8[], y float4[], z int2[]);
+CREATE TABLE test5( a int4 PRIMARY KEY, b name, c text, d float8, e float4, f int2, g polygon, h abstime, i char, j abstime[], k int4, l tid, m xid, n oidvector, q point, r lseg, s path, t box, u tinterval, v timestamp, w interval, x float8[], y float4[], z int2[]);
 
-CREATE TABLE test6( a int4 PRIMARY KEY, b name, c text, d float8, e float4, f int2, g polygon, h abstime, i char, j abstime[], k int4, l tid, m xid, n oidvector, p smgr, q point, r lseg, s path, t box, u tinterval, v timestamp, w interval, x float8[], y float4[], z int2[]);
+CREATE TABLE test6( a int4 PRIMARY KEY, b name, c text, d float8, e float4, f int2, g polygon, h abstime, i char, j abstime[], k int4, l tid, m xid, n oidvector, q point, r lseg, s path, t box, u tinterval, v timestamp, w interval, x float8[], y float4[], z int2[]);
 
-CREATE TABLE test7( a int4 PRIMARY KEY, b name, c text, d float8, e float4, f int2, g polygon, h abstime, i char, j abstime[], k int4, l tid, m xid, n oidvector, p smgr, q point, r lseg, s path, t box, u tinterval, v timestamp, w interval, x float8[], y float4[], z int2[]); 
+CREATE TABLE test7( a int4 PRIMARY KEY, b name, c text, d float8, e float4, f int2, g polygon, h abstime, i char, j abstime[], k int4, l tid, m xid, n oidvector, q point, r lseg, s path, t box, u tinterval, v timestamp, w interval, x float8[], y float4[], z int2[]); 
 
-CREATE TABLE test8( a int4 PRIMARY KEY, b name, c text, d float8, e float4, f int2, g polygon, h abstime, i char, j abstime[], k int4, l tid, m xid, n oidvector, p smgr, q point, r lseg, s path, t box, u tinterval, v timestamp, w interval, x float8[], y float4[], z int2[]);
+CREATE TABLE test8( a int4 PRIMARY KEY, b name, c text, d float8, e float4, f int2, g polygon, h abstime, i char, j abstime[], k int4, l tid, m xid, n oidvector, q point, r lseg, s path, t box, u tinterval, v timestamp, w interval, x float8[], y float4[], z int2[]);
 CREATE OR REPLACE FUNCTION test8_delete_sql() RETURNS void AS 'DELETE FROM test8 WHERE d=6.1' LANGUAGE sql;
 CREATE OR REPLACE FUNCTION test8_update_plpgsql() RETURNS void AS 'BEGIN UPDATE test8 SET a=5 WHERE a=4; RETURN; END' LANGUAGE 'plpgsql';
 
