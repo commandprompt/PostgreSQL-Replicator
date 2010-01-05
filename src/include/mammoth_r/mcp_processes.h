@@ -91,6 +91,7 @@ extern void HandleMasterConnection(MCPQueue *q, MCPHosts *h);
 extern void HandleSlaveConnection(MCPQueue *q, MCPHosts *h, 
 								  int peerid, pg_enc encoding);
 extern bool SlaveProcessPromoteNotify(int hostno, bool force);
+extern void WakeupMaster(void);
 
 /* in mcp_stat_process.c */
 extern void HandleStatConnection(MCPQueue *q, MCPHosts *h);

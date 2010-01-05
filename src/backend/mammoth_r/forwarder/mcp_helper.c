@@ -19,6 +19,7 @@
 #include "utils/ps_status.h"
 
 static void OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno);
+static void advance_safe_recno(MCPHosts *h);
 static void sigquit_handler(SIGNAL_ARGS);
 static void sigterm_handler(SIGNAL_ARGS);
 
@@ -125,6 +126,8 @@ ForwarderHelperMain(int argc, char *argv)
 			rounds_to_optimize = ForwarderOptimizerRounds;
 		}
 
+		advance_safe_recno(h);
+
 		if (terminate)
 		{
 			elog(LOG, "ought to quit now");
@@ -179,6 +182,64 @@ OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno)
 	MCPHostsLogTabStatus(DEBUG4, h, -1, "POST OPTIMIZE", ServerCtl->node_pid);
 
 	set_ps_display("", true);
+}
+
+/*
+ * Try to advance the global safe-to-ack recno counter.  This lets the
+ * master process send an updated ACK message to the master node.
+ */
+static void
+advance_safe_recno(MCPHosts *h)
+{
+	int		i;
+	ullong	safe;
+	bool	signal_master = false;
+
+	LWLockAcquire(MCPServerLock, LW_SHARED);
+	LWLockAcquire(MCPHostsLock, LW_SHARED);
+	safe = InvalidRecno;
+	for (i = 0; i < MCPHostsGetMaxHosts(h); i++)
+	{
+		ullong	acked;
+
+		/* ignore unconnected slaves */
+		if (ServerCtl->node_pid[i + 1] == 0)
+			continue;
+
+		acked = MCPHostsGetAckedRecno(h, i);
+		/*
+		 * If a slave hasn't set an acked recno, don't advance the global
+		 * counter
+		 */
+		if (acked == InvalidRecno)
+		{
+			safe = InvalidRecno;
+			break;
+		}
+		if (safe == InvalidRecno)
+			safe = acked;
+		else if (acked < safe)
+			safe = acked;
+	}
+	LWLockRelease(MCPServerLock);
+
+	if (safe != InvalidRecno &&
+		safe > MCPHostsGetRecno(h, McphRecnoKindSafeToAck))
+	{
+		LWLockRelease(MCPHostsLock);
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+		MCPHostsSetRecno(h, McphRecnoKindSafeToAck, safe);
+		signal_master = true;
+	}
+	LWLockRelease(MCPHostsLock);
+
+	/* need to wake up the master process so that it sees our state changes */
+	if (signal_master)
+	{
+		LWLockAcquire(MCPServerLock, LW_SHARED);
+		WakeupMaster();
+		LWLockRelease(MCPServerLock);
+	}
 }
 
 static void

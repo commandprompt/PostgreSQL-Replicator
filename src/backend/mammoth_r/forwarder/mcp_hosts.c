@@ -40,12 +40,13 @@ typedef struct TxHostsRecord
 /* typedef appears in mcp_hosts.h */
 struct MCPHosts
 {
-	int				h_fid;			/* id of txdata file */
-#define TXHmagic 0x54584800
+	int				h_fid;			/* id of hosts file */
+#define TXHmagic 0x54584900
 #define TXHinit  0x494E4954
 	int         	h_maxhosts;		/* maximum hosts number which want to
 									   retrieve data from MCP queue */
 	pg_enc			h_encoding;		/* encoding of the MCP queue data */
+	ullong			h_recnos[McphRecnoKindMax];
 	TxHostsRecord	h_hosts[MCP_MAX_SLAVES];
 };
 
@@ -197,6 +198,25 @@ MCPHostsGetMinAckedRecno(MCPHosts *h, pid_t *node_pid)
 			recno = h->h_hosts[i].vrecno;
 	}
 	return recno;
+}
+
+/*
+ * Get and set routines for record numbers stored in the MCPHosts header.
+ */
+void
+MCPHostsSetRecno(MCPHosts *h, McphRecnoKind kind, ullong recno)
+{
+	Assert(LWLockHeldByMe(MCPHostsLock));
+
+	h->h_recnos[kind] = recno;
+}
+
+ullong
+MCPHostsGetRecno(MCPHosts *h, McphRecnoKind kind)
+{
+	Assert(LWLockHeldByMe(MCPHostsLock));
+
+	return h->h_recnos[kind];
 }
 
 /*

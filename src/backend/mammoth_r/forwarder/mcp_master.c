@@ -239,7 +239,6 @@ McpMasterLoop(MasterState *state)
 
 		if (ActOnMasterCheckState(state))
 			return;
-
 	}
 }
 
@@ -319,6 +318,8 @@ SendMessagesToMaster(MasterState *state)
 	MCPMsg	sm;
 	bool 	table_dump_request;
 	FullDumpProgress mcp_dump_progress;
+	ullong	safeToAck;
+	ullong	lastAcked;
 
 	memset(&sm, 0, sizeof(MCPMsg));
 
@@ -393,18 +394,29 @@ SendMessagesToMaster(MasterState *state)
 		LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
 		FullDumpSetProgress(FDinprogress);
 		LWLockRelease(MCPServerLock);
-
-		/* ACKs are discarded upon requesting a dump from master */
-		state->ms_ack_recno = InvalidRecno;
 	}
-	else if (state->ms_ack_recno != InvalidRecno)
+
+	/* See if we can send a new ACK to the master. */
+	LWLockAcquire(MCPHostsLock, LW_SHARED);
+	safeToAck = MCPHostsGetRecno(state->ms_hosts, McphRecnoKindSafeToAck);
+	lastAcked = MCPHostsGetRecno(state->ms_hosts, McphRecnoKindLastAcked);
+	LWLockRelease(MCPHostsLock);
+
+	if (safeToAck > lastAcked)
 	{
-		sm.flags |= MCP_MSG_FLAG_ACK;
 		elog(DEBUG3,
 			 "MCP send ACK to Master => ACK recno: " UNI_LLU,
 			 state->ms_ack_recno);
-		sm.recno = state->ms_ack_recno;
-		state->ms_ack_recno = InvalidRecno;
+		sm.flags |= MCP_MSG_FLAG_ACK;
+		sm.recno = safeToAck;
+	}
+	else
+	{
+		/*
+		 * Not going to send an ACK after all, so unset safeToAck so that we
+		 * don't update MCPHosts, below.
+		 * */
+		safeToAck = InvalidRecno;
 	}
 
 	if (state->ms_echo_request)
@@ -424,6 +436,19 @@ SendMessagesToMaster(MasterState *state)
 	{
 		MCPSendMsg(&sm, true);
 		MCPMsgPrint(DEBUG3, "MCP-M-Send", &sm);
+	}
+
+	/*
+	 * If we sent an ACK in the message, we can update MCPHosts with it.
+	 * Note that we grab an exclusive lock here, though since we're the only
+	 * process that reads/writes LastAcked, we could do without the lock.
+	 * However, let's be safe.
+	 */
+	if (safeToAck != InvalidRecno)
+	{
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+		MCPHostsSetRecno(state->ms_hosts, McphRecnoKindLastAcked, safeToAck);
+		LWLockRelease(MCPHostsLock);
 	}
 }
 

@@ -18,6 +18,14 @@ extern int mcp_max_slaves;
 /* struct definition appears in mcp_hosts.c */
 typedef struct MCPHosts MCPHosts;
 
+/* Definitions for record numbers stored in the MCPHosts header */
+typedef enum McphRecnoKind
+{
+	McphRecnoKindLastAcked,
+	McphRecnoKindSafeToAck,
+	McphRecnoKindMax	/* must be last */
+} McphRecnoKind;
+
 extern MCPHosts *MCPHostsInit(void);
 extern void		BootStrapMCPHosts(void);
 extern void 	MCPHostsShmemInit(void);
@@ -32,6 +40,9 @@ extern ullong	MCPHostsGetFirstRecno(MCPHosts *h, int hostno);
 extern void		MCPHostsSetAckedRecno(MCPHosts *h, int hostno,
 									  ullong new_vrecno);
 extern ullong	MCPHostsGetAckedRecno(MCPHosts *h, int hostno);
+extern ullong	MCPHostsGetRecno(MCPHosts *h, McphRecnoKind kind);
+extern void	MCPHostsSetRecno(MCPHosts *h, McphRecnoKind kind,
+				 ullong recno);
 extern ullong	MCPHostsGetMinAckedRecno(MCPHosts *h, pid_t *node_pid);
 
 extern ullong	MCPHostsGetPruningRecno(MCPHosts *h, 

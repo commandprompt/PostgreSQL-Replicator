@@ -96,7 +96,6 @@ static bool ProcessSlaveDumpRequest(SlaveStatus *status);
 static void ProcessForcePromotion(SlaveStatus *status);
 static bool IsPromotionAllowed(int hostno);
 static void RecvSlaveTable(SlaveStatus *state, MCPMsg *msg);
-static void WakeupMaster(void);
 static void procexit_slave_cleanup(int code, Datum arg);
 
 static void MasterNextPromotionState(SlaveStatus *status);
@@ -1191,7 +1190,7 @@ ProcessForcePromotion(SlaveStatus *status)
 /*
  * Wake master to react on various conditions.
  */
-static void
+void
 WakeupMaster(void)
 {
 	Assert(LWLockHeldByMe(MCPServerLock));

@@ -558,6 +558,16 @@ SendQueuedMessages(MasterState *state)
 		SendQueueTransaction(q, first, NULL, NULL, NULL, NULL);
 
 		LockReplicationQueue(q, LW_EXCLUSIVE);
+
+		if (state->FDprogress == FDinprogress &&
+			first == state->FDrecno)
+		{
+			elog(LOG, "Full dump with recno "UNI_LLU" was received by MCP",
+				 state->FDrecno);
+			state->FDprogress = FDnone;
+			state->FDrecno = InvalidRecno;
+		}
+
 		MCPQueueNextTx(q);
 		MCPQueueSetDequeueTimestamp(q); 
 		first = MCPQueueGetFirstRecno(q);
@@ -693,33 +703,19 @@ ProcessMCPMessage(MasterState *state)
 
 	/* Accept ACKs only for records numbers greater than current vrecno */		
 	LockReplicationQueue(q, LW_EXCLUSIVE);
-	if (rm->flags & MCP_MSG_FLAG_ACK && rm->recno > 0)
+	if (rm->flags & MCP_MSG_FLAG_ACK && rm->recno != InvalidRecno)
 	{
 		if (rm->recno > MCPQueueGetAckRecno(q))
 		{
 			elog(LOG,
-			 	"ACK accepted vrecno: "UNI_LLU" -> "UNI_LLU,
-			 	MCPQueueGetAckRecno(q), rm->recno);
+				 "ACK accepted vrecno: "UNI_LLU" -> "UNI_LLU,
+				 MCPQueueGetAckRecno(q), rm->recno);
 			MCPQueueSetAckRecno(q, rm->recno);
-            if (state->FDprogress == FDinprogress && 
-                rm->recno >= state->FDrecno)
-            {
-                elog(LOG, "Full dump with recno "UNI_LLU" was received by MCP",
-                     state->FDrecno);
-                state->FDprogress = FDnone;
-                state->FDrecno = InvalidRecno;
-            }
-
 		}
 		else
-		{
 			elog(WARNING,
-			 	"ACK desynchronized: rm->recno: "UNI_LLU"  vrecno: "UNI_LLU,
-			 	rm->recno, MCPQueueGetAckRecno(q));
-	
-			if (MCPQueueGetSync(q) != MCPQUnsynced)
-				MCPQueueSetSync(q, MCPQUnsynced);
-		}
+				 "ACK desynchronized: rm->recno: "UNI_LLU"  vrecno: "UNI_LLU,
+				 rm->recno, MCPQueueGetAckRecno(q));
 	}
 	UnlockReplicationQueue(q);
 
