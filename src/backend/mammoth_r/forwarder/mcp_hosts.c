@@ -31,8 +31,7 @@ int mcp_max_slaves = MCP_MAX_SLAVES;
 
 typedef struct TxHostsRecord
 {
-	ullong      frecno;			/* first recno */
-	ullong      vrecno;			/* acknowledged recno */
+	ullong		recnos[McphHostRecnoKindMax];
 	time_t      timestamp;		/* timestamp of last get operation */
 	MCPQSync    sync;			/* synchronized status */
 } TxHostsRecord;
@@ -165,10 +164,10 @@ MCPHostsNextTx(MCPHosts *h, MCPQueue *q, int hostno, ullong last_recno)
 	 */
 	Assert(MCPQueueGetDatafile(q) == NULL);
 
-	if (h->h_hosts[hostno].frecno > last_recno)
+	if (h->h_hosts[hostno].recnos[McphHostRecnoKindFirst] > last_recno)
 		return;
 
-	h->h_hosts[hostno].frecno++;
+	h->h_hosts[hostno].recnos[McphHostRecnoKindFirst]++;
 	h->h_hosts[hostno].timestamp = time(NULL);
 }
 
@@ -185,17 +184,17 @@ MCPHostsGetMinAckedRecno(MCPHosts *h, pid_t *node_pid)
 
 	Assert(LWLockHeldByMe(MCPHostsLock));
 
-	/* Looking for min h_hosts[i].vrecno  */
+	/* Looking for the minimum acked recno across all connected slaves */
 	for (i = 0; i < h->h_maxhosts; i++)
 	{
 		/* Ignore disconnected slaves */
-		if (h->h_hosts[i].vrecno == InvalidRecno ||
+		if (h->h_hosts[i].recnos[McphHostRecnoKindAcked] == InvalidRecno ||
 			node_pid[i + 1] == 0)
 			continue;
 		if (recno == InvalidRecno)
-			recno = h->h_hosts[i].vrecno;
-		else if (recno > h->h_hosts[i].vrecno)
-			recno = h->h_hosts[i].vrecno;
+			recno = h->h_hosts[i].recnos[McphHostRecnoKindAcked];
+		else if (recno > h->h_hosts[i].recnos[McphHostRecnoKindAcked])
+			recno = h->h_hosts[i].recnos[McphHostRecnoKindAcked];
 	}
 	return recno;
 }
@@ -217,6 +216,22 @@ MCPHostsGetRecno(MCPHosts *h, McphRecnoKind kind)
 	Assert(LWLockHeldByMe(MCPHostsLock));
 
 	return h->h_recnos[kind];
+}
+void
+MCPHostsSetHostRecno(MCPHosts *h, McphHostRecnoKind kind, int host, ullong recno)
+{
+	Assert(LWLockHeldByMe(MCPHostsLock));
+
+	h->h_hosts[host].recnos[kind] = recno;
+}
+
+
+ullong
+MCPHostsGetHostRecno(MCPHosts *h, McphHostRecnoKind kind, int host)
+{
+	Assert(LWLockHeldByMe(MCPHostsLock));
+
+	return h->h_hosts[host].recnos[kind];
 }
 
 /*
@@ -247,8 +262,8 @@ MCPHostsGetPruningRecno(MCPHosts *h, MCPQueue *q,
 			for (i = 0; i < h->h_maxhosts; i++) 
 			{
 				if ((node_pid[i] != 0) && 
-					(h->h_hosts[i].vrecno != InvalidRecno) &&
-					(h->h_hosts[i].vrecno < dump_start_recno - 1))
+					(h->h_hosts[i].recnos[McphHostRecnoKindAcked] != InvalidRecno) &&
+					(h->h_hosts[i].recnos[McphHostRecnoKindAcked] < dump_start_recno - 1))
 						h->h_hosts[i].sync = MCPQUnsynced;
 			}
 			vrecno = dump_start_recno - 1;
@@ -310,8 +325,8 @@ MCPHostsCleanup(MCPHosts *h, MCPQueue *q, ullong recno)
 	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 	for (; hostno < h->h_maxhosts; hostno++)
 	{
-		if (MCPHostsGetFirstRecno(h, hostno) < recno)
-			MCPHostsSetFirstRecno(h, hostno, recno);
+		if (MCPHostsGetHostRecno(h, McphHostRecnoKindFirst, hostno) < recno)
+			MCPHostsSetHostRecno(h, McphHostRecnoKindFirst, hostno, recno);
 	}
 	LWLockRelease(MCPHostsLock);
 
@@ -320,42 +335,6 @@ MCPHostsCleanup(MCPHosts *h, MCPQueue *q, ullong recno)
 	UnlockReplicationQueue(q);
 
 	LWLockRelease(ReplicationQueueTruncateLock);
-}
-
-/* Return first-to-process recno for the slave */
-ullong
-MCPHostsGetFirstRecno(MCPHosts *h, int hostno)
-{
-	ASSERT_HOST_LOCK_HELD(h, hostno);
-
-	return h->h_hosts[hostno].frecno;
-}
-
-/* Set first-to-process recno for the slave */
-void
-MCPHostsSetFirstRecno(MCPHosts *h, int hostno, ullong new_frecno)
-{
-	ASSERT_HOST_LOCK_HELD(h, hostno);
-
-	h->h_hosts[hostno].frecno = new_frecno;
-}
-
-/* Return acknowledged recno for the slave */
-ullong
-MCPHostsGetAckedRecno(MCPHosts *h, int hostno)
-{
-	ASSERT_HOST_LOCK_HELD(h, hostno);
-
-	return h->h_hosts[hostno].vrecno;
-}
-
-/* Set acknowledged recno for the slave */
-void
-MCPHostsSetAckedRecno(MCPHosts *h, int hostno, ullong new_vrecno)
-{
-	ASSERT_HOST_LOCK_HELD(h, hostno);
-
-	h->h_hosts[hostno].vrecno = new_vrecno;
 }
 
 /* Return the sync status for the slave */
@@ -405,8 +384,8 @@ MCPHostsLogTabStatus(int elevel, MCPHosts *h, int hostno, char *prefix, pid_t *n
 			 "%s: slave(%d), f="UNI_LLU" v="UNI_LLU" sync: %s",
 			 prefix,
 			 hostno,
-			 h->h_hosts[hostno].frecno,
-			 h->h_hosts[hostno].vrecno,
+			 h->h_hosts[hostno].recnos[McphHostRecnoKindFirst],
+			 h->h_hosts[hostno].recnos[McphHostRecnoKindAcked],
 			 MCPQSyncAsString(h->h_hosts[hostno].sync));
 	}
 }

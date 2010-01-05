@@ -178,11 +178,13 @@ mammoth_hosts_status(PG_FUNCTION_ARGS)
 		ts = time_t_to_timestamptz(MCPHostsGetTimestamp(ForwarderHosts, 
 														slaveno));
 		values[3] = TimestampTzGetDatum(ts);
-		values[4] = Int64GetDatum(MCPHostsGetFirstRecno(ForwarderHosts, 
-														slaveno));
-		values[5] = Int64GetDatum(MCPHostsGetAckedRecno(ForwarderHosts, 
+		values[4] = Int64GetDatum(MCPHostsGetHostRecno(ForwarderHosts, 
+													   McphHostRecnoKindFirst,
 													   slaveno));
-		
+		values[5] = Int64GetDatum(MCPHostsGetHostRecno(ForwarderHosts, 
+													   McphHostRecnoKindAcked,
+													   slaveno));
+
 		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 
 		LWLockRelease(MCPHostsLock);

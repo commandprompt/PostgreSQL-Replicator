@@ -169,7 +169,8 @@ HandleSlaveConnection(MCPQueue *q, MCPHosts *h, int slave_no, pg_enc encoding)
 	/* find out if it needs a dump */
 	request_dump = false;
 	LWLockAcquire(MCPHostsLock, LW_SHARED);
-	if (MCPHostsGetFirstRecno(h, status->ss_hostno) == InvalidRecno ||
+	if (MCPHostsGetHostRecno(h, McphHostRecnoKindFirst,
+							 status->ss_hostno) == InvalidRecno ||
 		MCPHostsGetSync(h, status->ss_hostno) == MCPQUnsynced)
 		request_dump = true;
 	LWLockRelease(MCPHostsLock);
@@ -353,13 +354,16 @@ SlaveCorrectQueue(SlaveStatus *status)
 		/* Case (4) above */
 		MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQUnsynced);
 	}
-	else if (initial_recno != MCPHostsGetFirstRecno(status->ss_hosts, status->ss_hostno))
+	else if (initial_recno != MCPHostsGetHostRecno(status->ss_hosts,
+												   McphHostRecnoKindFirst,
+												   status->ss_hostno))
 	{
 		if (initial_recno >= MCPQueueGetInitialRecno(status->ss_queue) &&
 			initial_recno <= MCPQueueGetLastRecno(status->ss_queue))
 		{
 			/* This is case (2) */
-			MCPHostsSetFirstRecno(status->ss_hosts, status->ss_hostno, initial_recno + 1);
+			MCPHostsSetHostRecno(status->ss_hosts, McphHostRecnoKindFirst,
+								 status->ss_hostno, initial_recno + 1);
 			MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQSynced);
 		}
 		else
@@ -470,7 +474,8 @@ SlaveSendDirectMessages(SlaveStatus *status)
 		LockReplicationQueue(status->ss_queue, LW_SHARED);
 		LWLockAcquire(MCPHostsLock, LW_SHARED);
 
-		if (MCPHostsGetFirstRecno(status->ss_hosts, status->ss_hostno) > 
+		if (MCPHostsGetHostRecno(status->ss_hosts, McphHostRecnoKindFirst,
+								 status->ss_hostno) > 
 			MCPQueueGetLastRecno(status->ss_queue))
 		{
 			sm.flags |= MCP_MSG_FLAG_PROMOTE_READY;
@@ -516,7 +521,8 @@ SlaveSendDirectMessages(SlaveStatus *status)
 		LockReplicationQueue(status->ss_queue, LW_SHARED);
 		LWLockAcquire(MCPHostsLock, LW_SHARED);
 
-		if (MCPHostsGetFirstRecno(status->ss_hosts,status->ss_hostno) >
+		if (MCPHostsGetHostRecno(status->ss_hosts, McphHostRecnoKindFirst,
+								 status->ss_hostno) >
 			MCPQueueGetLastRecno(status->ss_queue))
 		{
 			/* Time to die -- send promote force to a slave */
@@ -761,7 +767,7 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 
 	/* Get recno of the first transaction to send */
 	LWLockAcquire(MCPHostsLock, LW_SHARED);
-	recno = MCPHostsGetFirstRecno(h, hostno);
+	recno = MCPHostsGetHostRecno(h, McphHostRecnoKindFirst, hostno);
     host_sync = MCPHostsGetSync(h, hostno);
 	LWLockRelease(MCPHostsLock);
 
@@ -817,7 +823,7 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		LWLockAcquire(MCPServerLock, LW_SHARED);
 		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 
-		first_recno = MCPHostsGetFirstRecno(h, hostno);
+		first_recno = MCPHostsGetHostRecno(h, McphHostRecnoKindFirst, hostno);
 		if (recno == first_recno)
 		{
 			/*
@@ -840,7 +846,7 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		 * transaction or by the master process in case of dump, assign it to
 		 * our local variable.
 		 */
-		recno = MCPHostsGetFirstRecno(h, hostno);
+		recno = MCPHostsGetHostRecno(h, McphHostRecnoKindFirst, hostno);
 
 		LWLockRelease(MCPHostsLock);
 
@@ -994,10 +1000,12 @@ ReceiveSlaveMessage(SlaveStatus *status)
 		elog(DEBUG2, "received ACK from slave => vrecno = "UNI_LLU,
 			 rm->recno);
 		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
-		prevack = MCPHostsGetAckedRecno(status->ss_hosts, status->ss_hostno);
+		prevack = MCPHostsGetHostRecno(status->ss_hosts, McphHostRecnoKindAcked,
+									   status->ss_hostno);
 		if (prevack <= rm->recno)
 		{
-			MCPHostsSetAckedRecno(status->ss_hosts, status->ss_hostno, rm->recno);
+			MCPHostsSetHostRecno(status->ss_hosts, McphHostRecnoKindAcked,
+								 status->ss_hostno, rm->recno);
 			elog(LOG, "received ACK for message "UNI_LLU, rm->recno);
 		}
 		else
@@ -1051,7 +1059,7 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 
 	stored_dump_recno = FullDumpGetStartRecno();
-	host_vrecno = MCPHostsGetAckedRecno(h, hostno);
+	host_vrecno = MCPHostsGetHostRecno(h, McphHostRecnoKindAcked, hostno);
 
 	/* dump at recno 0 (invalid) means no dump */
 	ereport(DEBUG2,
@@ -1067,7 +1075,7 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 		 */
 		elog(DEBUG2, "using dump stored on MCP server");
 
-		MCPHostsSetFirstRecno(h, hostno, stored_dump_recno);
+		MCPHostsSetHostRecno(h, McphHostRecnoKindFirst, hostno, stored_dump_recno);
 		MCPHostsSetSync(h, hostno, MCPQSynced);
 
 		result = false;
@@ -1529,7 +1537,7 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
 			ullong	frecno;
 
 			LWLockAcquire(MCPHostsLock, LW_SHARED);
-			frecno = MCPHostsGetFirstRecno(state->ss_hosts, state->ss_hostno);
+			frecno = MCPHostsGetHostRecno(state->ss_hosts, McphHostRecnoKindFirst, state->ss_hostno);
 			reqdump = tab->dump_recno < frecno;
 			LWLockRelease(MCPHostsLock);
 		}

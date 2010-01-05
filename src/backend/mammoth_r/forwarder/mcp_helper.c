@@ -206,7 +206,7 @@ advance_safe_recno(MCPHosts *h)
 		if (ServerCtl->node_pid[i + 1] == 0)
 			continue;
 
-		acked = MCPHostsGetAckedRecno(h, i);
+		acked = MCPHostsGetHostRecno(h, McphHostRecnoKindAcked, i);
 		/*
 		 * If a slave hasn't set an acked recno, don't advance the global
 		 * counter
