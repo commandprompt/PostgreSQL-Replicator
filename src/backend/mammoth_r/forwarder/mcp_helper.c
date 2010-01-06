@@ -18,6 +18,8 @@
 #include "storage/proc.h"
 #include "utils/ps_status.h"
 
+
+static void do_queue_optimization(MCPQueue *q, MCPHosts *h);
 static void OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno);
 static void advance_safe_recno(MCPHosts *h);
 static void sigquit_handler(SIGNAL_ARGS);
@@ -86,38 +88,7 @@ ForwarderHelperMain(int argc, char *argv)
 
 		if (rounds_to_optimize <= 0)
 		{
-			ullong 	confirmed_recno;
-			
-			elog(DEBUG3, "running optimization checks");
-
-			/* XXX: too many locks here, can we get rid of some of them ? */
-			LWLockAcquire(MCPServerLock, LW_SHARED);
-						
-			/* prevent another process from truncating the queue */
-			LWLockAcquire(ReplicationQueueTruncateLock, LW_SHARED);
-			LockReplicationQueue(q, LW_EXCLUSIVE);
-			LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
-
-			/* Get the minimum among confirmed recnos of connected slaves */
-			confirmed_recno = 
-				MCPHostsGetMinAckedRecno(h, ServerCtl->node_pid);
-
-			/* 
-			 * Run optimization. Note that no data will be remove until later
-			 * in MCPQueuePrune call.
-			 */
-
-			if (confirmed_recno > MCPQueueGetInitialRecno(q))
-				OptimizeQueue(q, h, confirmed_recno);
-				
-			LWLockRelease(MCPHostsLock);
-
-			/* Remove records up to the point calculated above */
-			MCPQueuePrune(q);
-
-			UnlockReplicationQueue(q);
-			LWLockRelease(ReplicationQueueTruncateLock);
-			LWLockRelease(MCPServerLock);
+			do_queue_optimization(q, h);
 
 			/* Restore optimization counter */
 			rounds_to_optimize = ForwarderOptimizerRounds;
@@ -134,6 +105,43 @@ ForwarderHelperMain(int argc, char *argv)
 	
 	WriteForwarderStateFile();	
 	proc_exit(0);
+}
+
+static void
+do_queue_optimization(MCPQueue *q, MCPHosts *h)
+{
+	ullong 	confirmed_recno;
+
+	elog(DEBUG3, "running optimization checks");
+
+	/* XXX: too many locks here, can we get rid of some of them ? */
+	LWLockAcquire(MCPServerLock, LW_SHARED);
+
+	/* prevent another process from truncating the queue */
+	LWLockAcquire(ReplicationQueueTruncateLock, LW_SHARED);
+	LockReplicationQueue(q, LW_EXCLUSIVE);
+	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+
+	/* Get the minimum among confirmed recnos of connected slaves */
+	confirmed_recno = 
+		MCPHostsGetMinAckedRecno(h, ServerCtl->node_pid);
+
+	/* 
+	 * Run optimization. Note that no data will be remove until later
+	 * in MCPQueuePrune call.
+	 */
+
+	if (confirmed_recno > MCPQueueGetInitialRecno(q))
+		OptimizeQueue(q, h, confirmed_recno);
+
+	LWLockRelease(MCPHostsLock);
+
+	/* Remove records up to the point calculated above */
+	MCPQueuePrune(q);
+
+	UnlockReplicationQueue(q);
+	LWLockRelease(ReplicationQueueTruncateLock);
+	LWLockRelease(MCPServerLock);
 }
 
 /*
