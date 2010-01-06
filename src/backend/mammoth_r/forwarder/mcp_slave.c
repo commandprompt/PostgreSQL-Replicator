@@ -837,7 +837,13 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 			if (first_recno == FullDumpGetStartRecno())
 				MCPHostsSetSync(h, hostno, MCPQSynced);
 
-			MCPHostsNextTx(h, status->ss_queue, hostno, last_recno);
+			/*
+			 * Make sure we don't have open transaction while switching the current
+			 * one.
+			 */
+			Assert(MCPQueueGetDatafile(status->ss_queue) == NULL);
+
+			MCPHostsNextTx(h, hostno, last_recno);
 		}
 		LWLockRelease(MCPServerLock);
 

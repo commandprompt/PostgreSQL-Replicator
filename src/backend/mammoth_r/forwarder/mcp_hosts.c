@@ -151,18 +151,12 @@ MCPHostsClose(MCPHosts *h)
 
 /* Advance slave current transaction recno to the next transaction */
 void
-MCPHostsNextTx(MCPHosts *h, MCPQueue *q, int hostno, ullong last_recno)
+MCPHostsNextTx(MCPHosts *h, int hostno, ullong last_recno)
 {
 	if (hostno >= h->h_maxhosts)
 		elog(ERROR, "hostno %d out of boundary", hostno);
 
 	ASSERT_HOST_LOCK_HELD(h, hostno);
-
-	/*
-	 * Make sure we don't have open transaction while switching the current
-	 * one.
-	 */
-	Assert(MCPQueueGetDatafile(q) == NULL);
 
 	if (h->h_hosts[hostno].recnos[McphHostRecnoKindFirst] > last_recno)
 		return;

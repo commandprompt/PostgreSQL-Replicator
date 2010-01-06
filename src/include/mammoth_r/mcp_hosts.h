@@ -39,7 +39,7 @@ extern MCPHosts *MCPHostsInit(void);
 extern void		BootStrapMCPHosts(void);
 extern void 	MCPHostsShmemInit(void);
 extern void		MCPHostsClose(MCPHosts *h);
-extern void		MCPHostsNextTx(MCPHosts *h, MCPQueue *q, int hostno,
+extern void		MCPHostsNextTx(MCPHosts *h, int hostno,
 							   ullong last_recno);
 extern MCPQSync	MCPHostsGetSync(MCPHosts *h, int hostno);
 extern void		MCPHostsSetSync(MCPHosts *h, int hostno, MCPQSync sync);
