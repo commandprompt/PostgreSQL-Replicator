@@ -82,10 +82,7 @@ ForwarderHelperMain(int argc, char *argv)
 		rounds_to_optimize--;
 
 		if (terminate)
-		{
-			elog(LOG, "ought to quit now");
 			break;
-		}
 
 		if (rounds_to_optimize <= 0)
 		{
@@ -129,10 +126,7 @@ ForwarderHelperMain(int argc, char *argv)
 		advance_safe_recno(h);
 
 		if (terminate)
-		{
-			elog(LOG, "ought to quit now");
 			break;
-		}
 
 		/* sleep for a bit */
 		pg_usleep(ForwarderOptimizerNaptime * 1000000L);
