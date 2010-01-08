@@ -383,7 +383,7 @@ check_sync_status(SlaveStatus *status)
 {
 	bool	unsynced = false;
 
-	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+	LWLockAcquire(MCPHostsLock, LW_SHARED);
 	if (MCPHostsGetSync(status->ss_hosts, status->ss_hostno) == MCPQUnsynced)
 		unsynced = true;
 	LWLockRelease(MCPHostsLock);
