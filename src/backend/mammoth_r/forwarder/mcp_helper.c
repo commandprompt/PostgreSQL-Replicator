@@ -1,6 +1,9 @@
 /* -----------------------
  * mcp_helper.c
  *
+ * This is the forwarder helper process.  It is in charge of running
+ * queue maintenance and other background tasks in a forwarder node.
+ *
  * $Id: mcp_helper.c 2186 2009-06-25 12:14:51Z alexk $
  * -----------------------
  */
@@ -253,6 +256,6 @@ sigquit_handler(SIGNAL_ARGS)
 static void
 sigterm_handler(SIGNAL_ARGS)
 {
-	elog(LOG, "got TERM signal");
+	elog(LOG, "forwarder helper shutting down");
 	terminate = true;
 }
