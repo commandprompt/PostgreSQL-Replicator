@@ -227,16 +227,18 @@ DumpRoles(MCPQueue *q)
 	heap_close(replRolesRel, AccessShareLock);
 	heap_close(authidRel, AccessShareLock);
 	
-	/* If we added some roles - commit a transaction. Otherwise force commit of
-	 * the empty transaction. HACK: PGRCollectTxCommit will discard an empty
-	 * transaction and we can't allow this because transaction file is already
-	 * enqueued, thus we have to use a special-purpose code.
+	/* If we added some roles - commit a transaction. Otherwise force commit
+	 * of the empty transaction. HACK: PGRCollectTxCommit will discard an
+	 * empty transaction and we can't allow this because transaction file is
+	 * already enqueued, thus we have to use a special-purpose code.
 	 */
 	if (roles_no > 0)
 		PGRCollectTxCommit(CommitTableDump);
 	else
 	{
-		/* send this transaction as a part of the full dump (avoid skipping it) 
+		/* 
+		 * send this transaction as a part of the full dump 
+		 * (avoid skipping it) 
 		 */
 		PGRCollectEmptyTx(MCP_QUEUE_FLAG_TABLE_DUMP);
 	}
@@ -293,6 +295,7 @@ PGRDumpTables(MCPQueue *queue)
 		Relation	rel;
 		MCPFile	   *data_file;
 		ullong		recno;
+		bool		apply = true;
 
 		LWLockAcquire(ReplicationCommitLock, LW_EXCLUSIVE);
 		snap = RegisterSnapshot(GetTransactionSnapshot());
@@ -306,31 +309,32 @@ PGRDumpTables(MCPQueue *queue)
 
 		/* the table does not exist anymore -- skip it */
 		if (!RelationIsValid(rel))
-		{
-			/* Avoid leaking a snapshot by unregistering it first */
-			UnregisterSnapshot(snap);
-			continue;
-		}
-		LockRelation(rel, ShareUpdateExclusiveLock);
-
-		if (rel->rd_rel->relkind == RELKIND_SEQUENCE)
-			dump_one_sequence(rel, snap);
-		else if (rel->rd_rel->relkind == RELKIND_RELATION)
-			dump_one_table(rel, snap, false);
+			apply = false;
 		else
 		{
-			/*
-			 * skip non-dumpable relations, but make noise about it so the user
-			 * has a chance to correct the problem
-			 */
-			elog(WARNING, "skipping \"%s\": not a table or sequence",
-				 RelationGetRelationName(rel));
+			LockRelation(rel, ShareUpdateExclusiveLock);
+
+			if (rel->rd_rel->relkind == RELKIND_SEQUENCE)
+				dump_one_sequence(rel, snap);
+			else if (rel->rd_rel->relkind == RELKIND_RELATION)
+				dump_one_table(rel, snap, false);
+			else
+			{
+				/*
+			 	 * skip non-dumpable relations, but make noise about it so the
+			 	 * user has a chance to correct the problem
+			 	 */
+				elog(WARNING, "skipping \"%s\": not a table or sequence",
+				 	 RelationGetRelationName(rel));
+				apply = false;
+			}
+			/* close relation and release the lock */
+			relation_close(rel, ShareUpdateExclusiveLock);
 		}
-
-		/* close relation and release the lock */
-		relation_close(rel, ShareUpdateExclusiveLock);
-
-		PGRCollectTxCommit(CommitTableDump);
+		if (apply)
+			PGRCollectTxCommit(CommitTableDump);
+		else
+			PGRCollectEmptyTx(MCP_QUEUE_FLAG_TABLE_DUMP);
 
 		/* Create a new file with the original path for the local queue. */
 		MCPLocalQueueSwitchFile(MasterLocalQueue);
@@ -500,9 +504,8 @@ PGRDumpCatalogs(MCPQueue *master_mcpq, CommitDumpMode mode)
 /*
  * PGRDumpSingleTable
  *
- * Produce a dump of a single table or sequence. Note that in case of
- * non-existent relation we still reserve a recno for the dump but don't set
- * the committed flag in TXLOG.
+ * Produce a dump of a single table or sequence. 
+ * Send an empty transaction if target relation doesn't exist.
  */
 void
 PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
@@ -516,7 +519,7 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
     RangeVar    *rv;
     Relation    rel;
     ullong  recno;
-    bool    apply;
+	bool    apply = true;
 
     /* Should only be called on master */
     Assert(replication_enable & replication_master);
@@ -598,6 +601,12 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
         }
         PG_CATCH();
         {
+			/* 
+			 * XXX: a transaction file is already enqueued and last record
+			 * in the queue is advanced. We should put an empty transaction
+			 * here, otherwise the master would stall on sending a transaction
+			 * that is not recorded as committed in TXLOG.
+			 */
             PGRUseDumpMode = false;
 			UnregisterSnapshot(snap);
             PG_RE_THROW();
@@ -608,26 +617,27 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
 
         /* Close the target relation and add the data file to the queue */
         heap_close(rel, ShareUpdateExclusiveLock);
-
-        PGRCollectTxCommit(CommitTableDump);
-        apply = true;
-
-        /* Switch to the new file for further transactions */
-        MCPLocalQueueSwitchFile(MasterLocalQueue);
     }
     else
     {
         elog(WARNING, "\"%s\" doesn't exist", relpath);
         apply = false;
     }
+	
+	if (apply)
+		PGRCollectTxCommit(CommitTableDump);
+	else
+		PGRCollectEmptyTx(MCP_QUEUE_FLAG_TABLE_DUMP);
+		
+	/* Switch to the new file  */
+    MCPLocalQueueSwitchFile(MasterLocalQueue);
 
 	UnregisterSnapshot(snap);
 
     CommitTransactionCommand();
 
     /* Record transaction commit in TXLOG */
-    if (apply)
-       TXLOGSetCommitted(recno);
+    TXLOGSetCommitted(recno);
 
     MemoryContextSwitchTo(TopMemoryContext);
     MemoryContextDelete(dumpcxt);

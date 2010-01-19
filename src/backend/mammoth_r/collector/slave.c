@@ -296,65 +296,6 @@ make_new_replicated_list(List *tl_old, int slaveno)
     return tl_new;
 }
 
-void
-SlaveTruncateAll(int slaveno)
-{
-	List			*repl_master_oids;
-	List			*repl_slave_oids;
-	ListCell		*cur;
-	MemoryContext	SlaveTruncateCxt,
-					oldcxt;
-	Snapshot		snap;
-
-	elog(DEBUG5, "SlaveTruncateAll");
-
-	/* Make a separate context for all processing withing this function */
-	SlaveTruncateCxt = AllocSetContextCreate(TopTransactionContext,
-											 "Slave Truncate Context",
-											 ALLOCSET_DEFAULT_MINSIZE,
-											 ALLOCSET_DEFAULT_INITSIZE,
-											 ALLOCSET_DEFAULT_MAXSIZE);
-
-	oldcxt = MemoryContextSwitchTo(SlaveTruncateCxt);
-
-	/* Start transaction */
-	StartTransactionCommand();
-
-	snap = RegisterSnapshot(GetTransactionSnapshot());
-
-	/* Get lists of relations replicated on master and on this slave */
-	repl_master_oids = get_replicated_relids(snap);
-	repl_master_oids = get_catalog_relids(repl_master_oids);
-
-	repl_slave_oids = get_slave_replicated_relids(slaveno);
-
-	/* Process only those relations which exist in both lists */
-	foreach(cur, repl_master_oids)
-	{
-		Oid		relid = lfirst_oid(cur);
-		Assert(OidIsValid(relid));
-
-		/* Skip special relations from pg_catalog (like repl_relations)
-		 * and sequences.
-		 */
-		if (get_rel_namespace(relid) == PG_CATALOG_NAMESPACE ||
-			get_rel_relkind(relid) != RELKIND_RELATION)
-			continue;
-
-		elog(DEBUG5, "truncating relation %s", get_rel_name(relid));
-		if (list_member_oid(repl_slave_oids, relid))
-		{
-			heap_pgr_truncate(relid);
-		}
-	}
-	UnregisterSnapshot(snap);
-	/* Finish transaction */
-	CommitTransactionCommand();
-
-	MemoryContextSwitchTo(oldcxt);
-	MemoryContextDelete(SlaveTruncateCxt);
-}
-
 /*
  * Restore a command received from the master.
  *
@@ -475,7 +416,8 @@ PGRRestoreGetRelation(char *cmd_relpath)
 			}
 			else
 			{
-				elog(DEBUG5, "'wait for dump' flag is cleared for the table %s",
+				elog(DEBUG5, 
+					 "'wait for dump' flag is cleared for the table %s",
 					 cmd_relpath);
 				SetTableDump(entry, TableNoDump);
                 /* Replicated list was changed and should be stored on disk */
@@ -563,7 +505,10 @@ PGRRestoreInitExecutor(Relation relation)
 	resultRelInfo->ri_RelationDesc = relation;
 	ExecOpenIndices(resultRelInfo);
 
-	/* Copy the trigger descriptor. AFTER triggers will be fired on replication relations */
+	/* 
+	 * Copy the trigger descriptor. 
+	 * AFTER triggers will be fired on replication relations 
+	 */
 	resultRelInfo->ri_TrigDesc = CopyTriggerDesc(relation->trigdesc);
 	if (resultRelInfo->ri_TrigDesc != NULL)
 	{
@@ -571,7 +516,8 @@ PGRRestoreInitExecutor(Relation relation)
 
 		/* Allocate memory for trigger cache information */
 		resultRelInfo->ri_TrigFunctions =
-			(FmgrInfo *) palloc0(relation->trigdesc->numtriggers * sizeof(FmgrInfo));
+			(FmgrInfo *) palloc0(relation->trigdesc->numtriggers *
+			 					 sizeof(FmgrInfo));
 
 		/* Make a slot for user for trigger output tuple */
 		state->es_trig_tuple_slot = MakeSingleTupleTableSlot(tdesc);

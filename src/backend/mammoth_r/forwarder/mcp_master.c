@@ -369,6 +369,16 @@ SendMessagesToMaster(MasterState *state)
     /* Check if we should respond to a table dump request from the slave */
     if (table_dump_request == true)
     {
+		/* 
+		 * First, clear the flag. Second, process the actual request.
+		 * Different order would break things: the flag could be set
+		 * from a different process right after this one would process 
+		 * the request (and right before this one would clear the flag).
+		 */
+		LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
+		TableDumpSetRequest(false);
+		LWLockRelease(MCPServerLock);
+		
 		/*
 		 * Make sure you don't change shared mcp_dump_progress here since
 		 * we use its cached value from the local variable in the code below.
@@ -377,11 +387,7 @@ SendMessagesToMaster(MasterState *state)
 		if (mcp_dump_progress == FDnone)
 			SendTableDumps(state);
 		else
-			elog(LOG, "TABLE DUMP requests were not sent due to FULL DUMP request");
-
-		LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
-		TableDumpSetRequest(false);
-		LWLockRelease(MCPServerLock);
+			elog(LOG, "TABLE DUMP requests were not sent due to FULL DUMP request");		
     }
 
     /* Check if a dump was requested */

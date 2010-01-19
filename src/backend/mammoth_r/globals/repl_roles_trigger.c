@@ -35,6 +35,10 @@ drop_replicated_role(PG_FUNCTION_ARGS)
 		
 	tuple = trigdata->tg_trigtuple;
 	
+	/* Do nothing if replication is disabled or the role is not a slave */
+	if (!replication_enable || replication_master)
+		return PointerGetDatum(tuple);
+	
 	rolesForm = (Form_repl_slave_roles) GETSTRUCT(tuple);
 	rolename = NameStr(rolesForm->rolename);
 	

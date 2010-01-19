@@ -645,9 +645,14 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 			MCPTable		slavetable;
 
 			slavetable = TableListEntry(state->ss_tablelist, txtable);
-
-			if (slavetable != NULL &&
-				slavetable->on_slave[state->ss_hostno] && 
+			
+			/* 
+			 * The table should be present in the table list, since the master
+			 * forwarder process adds it upon receiving from the master.
+			 */
+			Assert(slavetable != NULL);
+			
+			if (slavetable->on_slave[state->ss_hostno] && 
 				slavetable->slave_req[state->ss_hostno])
 			{
 
@@ -1543,7 +1548,9 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
 			ullong	frecno;
 
 			LWLockAcquire(MCPHostsLock, LW_SHARED);
-			frecno = MCPHostsGetHostRecno(state->ss_hosts, McphHostRecnoKindFirst, state->ss_hostno);
+			frecno = MCPHostsGetHostRecno(state->ss_hosts,
+			 							  McphHostRecnoKindFirst, 
+										  state->ss_hostno);
 			reqdump = tab->dump_recno < frecno;
 			LWLockRelease(MCPHostsLock);
 		}
@@ -1559,9 +1566,13 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
 	}
 	else
 	{
-		elog(DEBUG2,
-			 "dump for table \"%s\" was already requested by the slaves",
-			 tab->relpath);
+		if (tab->req_satisfied != TDnone)
+			elog(DEBUG2,
+			 	 "dump for table \"%s\" was already requested by the slaves",
+			 	 tab->relpath);
+		else
+			elog(DEBUG2, "dump for table \"%s\" is already in the queue",
+				 tab->relpath);
 	}
     return reqdump;
 }

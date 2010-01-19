@@ -544,15 +544,11 @@ SlaveRestoreData(SlaveState *state)
 
 		MCPQueueReadDataHeader(q, &hdr);
 
-		if (hdr.dh_flags & MCP_QUEUE_FLAG_DUMP_START)
-			SlaveTruncateAll(state->bss_slaveno);
-		else
+		if ((MCPQueueGetSync(q) != MCPQSynced) && 
+			!(hdr.dh_flags & MCP_QUEUE_FLAG_DUMP_START))
 		{
-			if (MCPQueueGetSync(q) != MCPQSynced)
-			{
-				elog(DEBUG2, "queue is not in sync, restore cancelled");
-				goto final;
-			}
+			elog(DEBUG2, "queue is not in sync, restore cancelled");
+			goto final;
 		}
 
 		/* Restore this transaction, but only if we don't have to skip it */
