@@ -119,9 +119,6 @@ do_queue_optimization(MCPQueue *q, MCPHosts *h)
 
 	/* XXX: too many locks here, can we get rid of some of them ? */
 	LWLockAcquire(MCPServerLock, LW_SHARED);
-
-	/* prevent another process from truncating the queue */
-	LWLockAcquire(ReplicationQueueTruncateLock, LW_SHARED);
 	LockReplicationQueue(q, LW_EXCLUSIVE);
 	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 
@@ -143,7 +140,6 @@ do_queue_optimization(MCPQueue *q, MCPHosts *h)
 	MCPQueuePrune(q);
 
 	UnlockReplicationQueue(q);
-	LWLockRelease(ReplicationQueueTruncateLock);
 	LWLockRelease(MCPServerLock);
 }
 
@@ -158,19 +154,12 @@ OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno)
 	
 	Assert(LWLockHeldByMe(MCPHostsLock));
 
-	set_ps_display("performing queue optimization", true);
-	elog(LOG, "performing queue optimization");
-
 	MCPQueueLogHdrStatus(DEBUG4, q, "PRE OPTIMIZE");
 	MCPHostsLogTabStatus(DEBUG4, h, -1, "PRE OPTIMIZE", ServerCtl->node_pid);
 	elog(DEBUG4, "OPTIMIZE: host dump_recno "UNI_LLU, FullDumpGetStartRecno());
 
 	dump_end_recno = FullDumpGetEndRecno();
-	new_vrecno = MCPHostsGetPruningRecno(h, q, confirmed_recno, 
-										 FullDumpGetStartRecno(), 
-										 dump_end_recno,
-										 ForwarderDumpCacheMaxSize, 
-										 ServerCtl->node_pid);
+	new_vrecno = MCPHostsGetPruningRecno(h, ServerCtl->node_pid);
 	if (new_vrecno != InvalidRecno)
 	{
 		/* 
@@ -185,8 +174,6 @@ OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno)
 	
 	MCPQueueLogHdrStatus(DEBUG4, q, "POST OPTIMIZE");
 	MCPHostsLogTabStatus(DEBUG4, h, -1, "POST OPTIMIZE", ServerCtl->node_pid);
-
-	set_ps_display("", true);
 }
 
 /*

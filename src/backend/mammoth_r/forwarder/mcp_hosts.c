@@ -4,6 +4,19 @@
  *
  * MCP Hosts is a struct for keeping track of status of slave nodes in the
  * replication forwarder.
+ * 
+ * Note that there are some strange locking considerations regarding some
+ * recnos in each host's record (TxHostRecord).  A host process can read and
+ * write its own values with only a shared lock.  If any other process wants to
+ * access another host's values, *it needs to grab an exclusive lock*, even if
+ * it's to read the values.  This allows better concurrency in the common case
+ * where each host is advancing its recno pointers independently, and still be
+ * correct in the uncommon case where the master process needs to advance them
+ * all in case of receiving a full dump.
+ *
+ * This applies to McphHostRecnoKindReading and McphHostRecnoKindSendNext.
+ *
+ * All other members of the MCPHosts struct use locks normally.
  *
  * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group,
  * Copyright (c) 2006, Command Prompt, Inc.
@@ -149,8 +162,14 @@ MCPHostsClose(MCPHosts *h)
 	MCPFileDestroy(f);
 }
 
-/* Advance slave current transaction recno to the next transaction */
-void
+/*
+ * Advance slave current transaction recno to the next transaction.  last_recno
+ * is the caller-specified end-of-queue; if we're past that, don't change our
+ * value.  Return our next value to send.
+ *
+ * Note locking considerations, in the comment at the top of the file.
+ */
+ullong
 MCPHostsNextTx(MCPHosts *h, int hostno, ullong last_recno)
 {
 	if (hostno >= h->h_maxhosts)
@@ -158,11 +177,12 @@ MCPHostsNextTx(MCPHosts *h, int hostno, ullong last_recno)
 
 	ASSERT_HOST_LOCK_HELD(h, hostno);
 
-	if (h->h_hosts[hostno].recnos[McphHostRecnoKindFirst] > last_recno)
-		return;
+	/* don't increment SendNext if we're past the given last_recno */
+	if (h->h_hosts[hostno].recnos[McphHostRecnoKindSendNext] > last_recno)
+		return h->h_hosts[hostno].recnos[McphHostRecnoKindSendNext];
 
-	h->h_hosts[hostno].recnos[McphHostRecnoKindFirst]++;
 	h->h_hosts[hostno].timestamp = time(NULL);
+	return ++h->h_hosts[hostno].recnos[McphHostRecnoKindSendNext];
 }
 
 /* 
@@ -195,6 +215,7 @@ MCPHostsGetMinAckedRecno(MCPHosts *h, pid_t *node_pid)
 
 /*
  * Get and set routines for record numbers stored in the MCPHosts header.
+ * Note locking considerations, in the comment at the top of the file.
  */
 void
 MCPHostsSetRecno(MCPHosts *h, McphRecnoKind kind, ullong recno)
@@ -233,102 +254,83 @@ MCPHostsGetHostRecno(MCPHosts *h, McphHostRecnoKind kind, int host)
  * No actual queue modifications here.
  */
 ullong
-MCPHostsGetPruningRecno(MCPHosts *h, MCPQueue *q, 
-						ullong vrecno, 
-						ullong dump_start_recno,
-						ullong dump_end_recno,
-						off_t  dump_cache_max_size, 
-						pid_t *node_pid)
+MCPHostsGetPruningRecno(MCPHosts *h, pid_t *node_pid)
 {
+	ullong	globalmin = InvalidRecno;
+	int		i;
+
 	Assert(LWLockHeldByMe(MCPHostsLock));
-	Assert(QueueLockHeldByMe(q));
 
 	elog(DEBUG4, "MCPHostsOptimizeQueue");
-		
-	/* check whether the dump is in the queue */
-	if (dump_start_recno != InvalidRecno)
+
+	for (i = 0; i < h->h_maxhosts; i++)
 	{
-		/* check whether some of the slaves are behind full dump */
-		if (vrecno < dump_start_recno - 1)
-		{
-			int 	i;
-			/* desync those slaves that are behind the dump */
-			for (i = 0; i < h->h_maxhosts; i++) 
-			{
-				if ((node_pid[i] != 0) && 
-					(h->h_hosts[i].recnos[McphHostRecnoKindAcked] != InvalidRecno) &&
-					(h->h_hosts[i].recnos[McphHostRecnoKindAcked] < dump_start_recno - 1))
-						h->h_hosts[i].sync = MCPQUnsynced;
-			}
-			vrecno = dump_start_recno - 1;
-		}
-		else if ((dump_end_recno != InvalidRecno) && (vrecno >= dump_end_recno))
-		{
-			/* 
-			 * Check if we can get of the full dump in queue, which will happen
-			 * if total size of the data we can potentially remove will be larger
-			 * than dump_cache_max_size. Otherwise we'll keep the dump and data
-			 * after it as a cache for new slaves.
-			 */
-			off_t unused_data_size = MCPQueueCalculateSize(q, vrecno + 1);
-			
-			elog(DEBUG4, "max unused queue size: "UINT64_FORMAT, (ullong) dump_cache_max_size);			
-			if (unused_data_size < dump_cache_max_size)
-			{
-				/* limit is not reached, do not remove anything */
-				elog(DEBUG4, "current unused queue size: "UINT64_FORMAT, 
-					 (ullong) unused_data_size);
-				vrecno = InvalidRecno;
-			}
-			else
-				elog(DEBUG4, "size of the queue data to be removed: "UINT64_FORMAT, 
-					 (ullong) unused_data_size);	
-		}
-		else
-		{
-			/* 
-			 * either slaves are still restoring the dump or dump is not received
-			 * completely yet. Anyway, we can't remove it.
-			 */
-			vrecno = InvalidRecno;
-		}
+		ullong	thishost = InvalidRecno;
+		ullong	reading;
+		ullong	sendnext;
+		ullong	acked;
+
+		/*
+		 * Ignore unconnected slaves
+		 *
+		 * FIXME this is dangerous: if a slave disconnects for a brief period of
+		 * time, we could remove records it needs.
+		 */
+		if (node_pid[i] == 0)
+			continue;
+
+		reading = h->h_hosts[i].recnos[McphHostRecnoKindReading];
+		sendnext = h->h_hosts[i].recnos[McphHostRecnoKindSendNext];
+		acked = h->h_hosts[i].recnos[McphHostRecnoKindAcked];
+
+		/* initialize to "reading", keeping in mind that it might be Invalid */
+		thishost = reading;
+
+		/*
+		 * If this host hasn't initialized SendNext or Acked, we can't prune
+		 * anything.
+		 */
+		if (sendnext == InvalidRecno || acked == InvalidRecno)
+			return InvalidRecno;
+
+		/* by here, we know neither SendNext nor Acked are Invalid */
+
+		if (thishost == InvalidRecno ||
+			sendnext < thishost)
+			thishost = sendnext;
+		if (acked < thishost)
+			thishost = acked;
+		
+		/* by here, thishost is the smallest of the three, and not Invalid */
+
+		if (globalmin == InvalidRecno || thishost < globalmin)
+			globalmin = thishost;
 	}
-	if (vrecno == InvalidRecno)
-		elog(DEBUG4, "pruning recno is not available");
-	else
-		elog(DEBUG4, "pruning recno is "UINT64_FORMAT, vrecno);
-	return vrecno;
+
+	return globalmin;
 }
 
 /* 
  * MCPHostsCleanup
  *
- * Removes data that is no longer needed from the queue, and adjusts
- * slaves next records if necessary. 
+ * This is called when the master process gets a TRUNC message from the
+ * master, which means that the master is sending a new full dump.  What
+ * we need to do here is make sure that all slaves are now set to read
+ * from the start of that dump, instead of their natural progression of
+ * reading the messages they are currently pointing to.
  */
 void
 MCPHostsCleanup(MCPHosts *h, MCPQueue *q, ullong recno)
 {
-	int		hostno = 0;
+	int		hostno;
 
-	LWLockAcquire(ReplicationQueueTruncateLock, LW_EXCLUSIVE);
-
-	LockReplicationQueue(q, LW_EXCLUSIVE);
-
-	/* need to fix up MCPHosts before removing anything from the queue */
 	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
-	for (; hostno < h->h_maxhosts; hostno++)
+	for (hostno = 0; hostno < h->h_maxhosts; hostno++)
 	{
-		if (MCPHostsGetHostRecno(h, McphHostRecnoKindFirst, hostno) < recno)
-			MCPHostsSetHostRecno(h, McphHostRecnoKindFirst, hostno, recno);
+		if (MCPHostsGetHostRecno(h, McphHostRecnoKindSendNext, hostno) < recno)
+			MCPHostsSetHostRecno(h, McphHostRecnoKindSendNext, hostno, recno);
 	}
 	LWLockRelease(MCPHostsLock);
-
-	MCPQueueCleanup(q, recno);
-
-	UnlockReplicationQueue(q);
-
-	LWLockRelease(ReplicationQueueTruncateLock);
 }
 
 /* Return the sync status for the slave */
@@ -378,7 +380,7 @@ MCPHostsLogTabStatus(int elevel, MCPHosts *h, int hostno, char *prefix, pid_t *n
 			 "%s: slave(%d), f="UNI_LLU" v="UNI_LLU" sync: %s",
 			 prefix,
 			 hostno,
-			 h->h_hosts[hostno].recnos[McphHostRecnoKindFirst],
+			 h->h_hosts[hostno].recnos[McphHostRecnoKindReading],
 			 h->h_hosts[hostno].recnos[McphHostRecnoKindAcked],
 			 MCPQSyncAsString(h->h_hosts[hostno].sync));
 	}

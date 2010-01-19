@@ -30,7 +30,8 @@ typedef enum McphRecnoKind
 /* Per-host record numbers */
 typedef enum McphHostRecnoKind
 {
-	McphHostRecnoKindFirst,
+	McphHostRecnoKindReading,
+	McphHostRecnoKindSendNext,
 	McphHostRecnoKindAcked,
 	McphHostRecnoKindMax	/* must be last */
 } McphHostRecnoKind;
@@ -39,8 +40,7 @@ extern MCPHosts *MCPHostsInit(void);
 extern void		BootStrapMCPHosts(void);
 extern void 	MCPHostsShmemInit(void);
 extern void		MCPHostsClose(MCPHosts *h);
-extern void		MCPHostsNextTx(MCPHosts *h, int hostno,
-							   ullong last_recno);
+extern ullong MCPHostsNextTx(MCPHosts *h, int hostno, ullong last_recno);
 extern MCPQSync	MCPHostsGetSync(MCPHosts *h, int hostno);
 extern void		MCPHostsSetSync(MCPHosts *h, int hostno, MCPQSync sync);
 extern ullong	MCPHostsGetRecno(MCPHosts *h, McphRecnoKind kind);
@@ -52,13 +52,7 @@ extern void		MCPHostsSetHostRecno(MCPHosts *h, McphHostRecnoKind kind,
 					 int host, ullong recno);
 extern ullong	MCPHostsGetMinAckedRecno(MCPHosts *h, pid_t *node_pid);
 
-extern ullong	MCPHostsGetPruningRecno(MCPHosts *h, 
-										MCPQueue *q, 
-										ullong vacrecno,
-										ullong dump_start_recno,
-										ullong dump_end_recno, 
-										off_t max_queue_size,
-										pid_t *node_pid);
+extern ullong MCPHostsGetPruningRecno(MCPHosts *h, pid_t *node_pid);
 
 extern void		MCPHostsCleanup(MCPHosts *h, MCPQueue *q, ullong recno);
 

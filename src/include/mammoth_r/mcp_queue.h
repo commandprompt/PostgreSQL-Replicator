@@ -65,7 +65,6 @@ extern bool		MCPQueueReadData(MCPQueue *q, void  *buf, ssize_t len,
 extern void		MCPQueuePutData(MCPQueue *q, void *data, ssize_t len);
 
 /* queue optimization functions */
-extern ssize_t	MCPQueueCalculateSize(MCPQueue *q, ullong recno);
 extern void		MCPQueuePrune(MCPQueue *q);
 extern void		MCPQueueCleanup(MCPQueue *q, ullong recno);
 

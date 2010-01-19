@@ -558,40 +558,6 @@ MCPQueueGetDatafile(MCPQueue *q)
 	return q->txdata;
 }
 
-/* Calculate total size of transaction data laying before the recno. */
-ssize_t
-MCPQueueCalculateSize(MCPQueue *q, ullong recno)
-{
-	ssize_t		total = 0;
-
-	/* We need a lock here since we rely on brecno */
-	Assert(LWLockHeldByMe(q->lock));
-
-	if (recno > q->txqueue_hdr->brecno)
-	{
-		char	   *filename;
-		struct stat	st;
-		int			ret;
-		ullong 		i = q->txqueue_hdr->brecno;
-		ullong 		max_recno = Min(recno, q->txqueue_hdr->lrecno);
-
-		for (; i < max_recno; i++)
-		{
-			/* Skip not yet committed transactions */
-			if (!TXLOGIsCommitted(i))
-				continue;
-
-			filename = MCPQDatafileName(q, i);
-			ret = stat(filename, &st);
-			if (ret < 0)
-				elog(ERROR, "could not stat %s: %m", filename);
-			total += st.st_size;
-			pfree(filename);
-		}
-	}
-	return total;
-}
-
 void
 MCPQRegisterCallback(MCPQueue *q, MCPQCallback callback, void *arg)
 {

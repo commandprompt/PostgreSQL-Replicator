@@ -169,7 +169,7 @@ HandleSlaveConnection(MCPQueue *q, MCPHosts *h, int slave_no, pg_enc encoding)
 	/* find out if it needs a dump */
 	request_dump = false;
 	LWLockAcquire(MCPHostsLock, LW_SHARED);
-	if (MCPHostsGetHostRecno(h, McphHostRecnoKindFirst,
+	if (MCPHostsGetHostRecno(h, McphHostRecnoKindSendNext,
 							 status->ss_hostno) == InvalidRecno ||
 		MCPHostsGetSync(h, status->ss_hostno) == MCPQUnsynced)
 		request_dump = true;
@@ -355,14 +355,14 @@ SlaveCorrectQueue(SlaveStatus *status)
 		MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQUnsynced);
 	}
 	else if (initial_recno != MCPHostsGetHostRecno(status->ss_hosts,
-												   McphHostRecnoKindFirst,
+												   McphHostRecnoKindSendNext,
 												   status->ss_hostno))
 	{
 		if (initial_recno >= MCPQueueGetInitialRecno(status->ss_queue) &&
 			initial_recno <= MCPQueueGetLastRecno(status->ss_queue))
 		{
 			/* This is case (2) */
-			MCPHostsSetHostRecno(status->ss_hosts, McphHostRecnoKindFirst,
+			MCPHostsSetHostRecno(status->ss_hosts, McphHostRecnoKindSendNext,
 								 status->ss_hostno, initial_recno + 1);
 			MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQSynced);
 		}
@@ -470,11 +470,11 @@ SlaveSendDirectMessages(SlaveStatus *status)
 	 */
 	if (status->ss_promotion == slave_promotion_send_ready)
 	{
-		/* Check if we have already sent all the queue  messages to a slave */
+		/* Check if we have already sent all the queue messages to a slave */
 		LockReplicationQueue(status->ss_queue, LW_SHARED);
 		LWLockAcquire(MCPHostsLock, LW_SHARED);
 
-		if (MCPHostsGetHostRecno(status->ss_hosts, McphHostRecnoKindFirst,
+		if (MCPHostsGetHostRecno(status->ss_hosts, McphHostRecnoKindSendNext,
 								 status->ss_hostno) > 
 			MCPQueueGetLastRecno(status->ss_queue))
 		{
@@ -521,7 +521,7 @@ SlaveSendDirectMessages(SlaveStatus *status)
 		LockReplicationQueue(status->ss_queue, LW_SHARED);
 		LWLockAcquire(MCPHostsLock, LW_SHARED);
 
-		if (MCPHostsGetHostRecno(status->ss_hosts, McphHostRecnoKindFirst,
+		if (MCPHostsGetHostRecno(status->ss_hosts, McphHostRecnoKindSendNext,
 								 status->ss_hostno) >
 			MCPQueueGetLastRecno(status->ss_queue))
 		{
@@ -770,15 +770,17 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 
 	set_ps_display("sending messages to slave", false);
 
-	/* Get recno of the first transaction to send */
+	/* Get recno of the transaction to send */
 	LWLockAcquire(MCPHostsLock, LW_SHARED);
-	recno = MCPHostsGetHostRecno(h, McphHostRecnoKindFirst, hostno);
+	recno = MCPHostsGetHostRecno(h, McphHostRecnoKindSendNext, hostno);
+	MCPHostsSetHostRecno(h, McphHostRecnoKindReading, hostno, recno);
     host_sync = MCPHostsGetSync(h, hostno);
 	LWLockRelease(MCPHostsLock);
 
     /* 
-     * If the queue is desynced refuse to send anything unless MCP is
-     * going to send a full dump.
+	 * If this host is not in sync, the only thing that we can validly send
+	 * is a dump.  So if we're pointing to something that's not a dump, bail
+	 * out here and let the caller fix things.
      */
     if (host_sync != MCPQSynced)
     {
@@ -788,13 +790,15 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		dump_recno = FullDumpGetStartRecno();
         LWLockRelease(MCPServerLock);
 
-        /* 
-         * The host is not in sync and we are not going to send
-         * full dump, nothing to do here.
-         */
-        if (dump_recno == InvalidRecno || dump_recno != recno)
+		if (dump_recno == InvalidRecno)
+		{
+			elog(DEBUG2, "no dump in queue, host unsynced, abort send");
+			return;
+		}
+		
+		if (dump_recno != recno)
         {
-            elog(DEBUG2, "queue is not in sync, cancel sending data");
+            elog(DEBUG2, "not sending a dump, host unsynced, abort send");
             return;
         }
     }
@@ -806,7 +810,8 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 
 	while (recno <= last_recno && TXLOGIsCommitted(recno))
 	{
-		ullong	first_recno;
+		ullong	next_recno;
+		bool	doit;
 
 		/* 
 		 * If we are supposed to wait for a tablelist from slave then
@@ -815,59 +820,68 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		if (status->ss_wait_list) 
 			break;
 
-		/* Send current transaction */
+		/*
+		 * Send the current transaction, and ensure that no one removes it
+		 * from the queue by setting it as the "being read" transaction.
+		 * We remove that as soon as we've sent it, to allow timely queue
+		 * pruning.
+		 */
 		elog(LOG, "sending transaction "UNI_LLU" to slave", recno);
+		LWLockAcquire(MCPHostsLock, LW_SHARED);
+		MCPHostsSetHostRecno(h, McphHostRecnoKindReading, hostno, recno);
+		LWLockRelease(MCPHostsLock);
+
 		SendQueueTransaction(status->ss_queue, recno,
 							 SlaveTableListHook, (void *) status,
 							 SlaveMessageHook, (void *) status);
 
-		/*
-		 * If hosts's first recno was changed independently by the master
-		 * process then use its new value to send the next transaction.
-		 */
-		LWLockAcquire(MCPServerLock, LW_SHARED);
-		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
-
-		first_recno = MCPHostsGetHostRecno(h, McphHostRecnoKindFirst, hostno);
-		if (recno == first_recno)
-		{
-			/*
-			 * Set host's sync state to MCPQSynced after sending dump.
-			 * XXX: it would be better to check transaction flag to 
-			 * detect dump since dump_recno points to the last dump 
-			 * in queue. OTOH we won't have more than one dump because 
-			 * TRUNC removes all previous dumps from the queue before 
-			 * receiving the next dump.
-			 */
-			if (first_recno == FullDumpGetStartRecno())
-				MCPHostsSetSync(h, hostno, MCPQSynced);
-
-			/*
-			 * Make sure we don't have open transaction while switching the current
-			 * one.
-			 */
-			Assert(MCPQueueGetDatafile(status->ss_queue) == NULL);
-
-			MCPHostsNextTx(h, hostno, last_recno);
-		}
-		LWLockRelease(MCPServerLock);
-
-		/*
-		 * Host's first recno was changed either by advancing to the next
-		 * transaction or by the master process in case of dump, assign it to
-		 * our local variable.
-		 */
-		recno = MCPHostsGetHostRecno(h, McphHostRecnoKindFirst, hostno);
-
+		LWLockAcquire(MCPHostsLock, LW_SHARED);
+		MCPHostsSetHostRecno(h, McphHostRecnoKindReading, hostno, InvalidRecno);
 		LWLockRelease(MCPHostsLock);
 
-		/* Check if the slave is talking to us */
-		if (mcpWaitTimed(MyProcPort, true, false, 0))
-			break;
+		/*
+		 * Set host's sync state to MCPQSynced after sending dump.
+		 *
+		 * XXX It would be better to check the transaction flags to detect the
+		 * dump, since dump_recno points to the last dump in queue. However, we
+		 * never have more than one dump, because upon receiving a TRUNC
+		 * message (at the start of any dump) the master process removes the
+		 * previous dump from the queue.
+		 *
+		 * XXX the other reason it would be better to use the flags is that we
+		 * wouldn't have to grab MCPServerLock here.
+		 */
+		doit = false;
+		LWLockAcquire(MCPServerLock, LW_SHARED);
+		if (recno == FullDumpGetStartRecno())
+			doit = true;
+		LWLockRelease(MCPServerLock);
+		if (doit)
+		{
+			LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+			MCPHostsSetSync(h, hostno, MCPQSynced);
+			LWLockRelease(MCPHostsLock);
+		}
 
+		/* refresh our knowledge about queue end */
 		LockReplicationQueue(status->ss_queue, LW_SHARED);
 		last_recno = MCPQueueGetLastRecno(status->ss_queue);
 		UnlockReplicationQueue(status->ss_queue);
+
+		/*
+		 * Advance our next-to-send record number, but do so carefully:
+		 * our ReadNext pointer could have been moved by the master process.
+		 */
+		LWLockAcquire(MCPHostsLock, LW_SHARED);
+		next_recno = MCPHostsGetHostRecno(h, McphHostRecnoKindSendNext, hostno);
+		if (next_recno == recno)
+			/* master hasn't moved it -- do so ourselves */
+			recno = MCPHostsNextTx(h, hostno, last_recno);
+		LWLockRelease(MCPHostsLock);
+
+		/* If the slave sent a message, go fetch it */
+		if (mcpWaitTimed(MyProcPort, true, false, 0))
+			break;
 	}
 }
 
@@ -1086,7 +1100,7 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 		 */
 		elog(DEBUG2, "using dump stored on MCP server");
 
-		MCPHostsSetHostRecno(h, McphHostRecnoKindFirst, hostno, stored_dump_recno);
+		MCPHostsSetHostRecno(h, McphHostRecnoKindSendNext, hostno, stored_dump_recno);
 		MCPHostsSetSync(h, hostno, MCPQSynced);
 
 		result = false;
@@ -1549,7 +1563,7 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
 
 			LWLockAcquire(MCPHostsLock, LW_SHARED);
 			frecno = MCPHostsGetHostRecno(state->ss_hosts,
-			 							  McphHostRecnoKindFirst, 
+										  McphHostRecnoKindSendNext,
 										  state->ss_hostno);
 			reqdump = tab->dump_recno < frecno;
 			LWLockRelease(MCPHostsLock);
