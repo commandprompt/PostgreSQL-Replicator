@@ -34,5 +34,6 @@ extern int LOoidGetMasterRefs(Oid lobjId, bool delete);
 extern Oid LOoidGetSlaveOid(Oid master_oid, bool delete);
 extern List *LOoidGetSlaveOids(void);
 extern void LOoidCreateMapping(Oid master_oid, Oid slave_oid);
+extern List *get_slaves_for_relid(Oid relid);
 
 #endif /* CATALOG_REPLICATION_H */
