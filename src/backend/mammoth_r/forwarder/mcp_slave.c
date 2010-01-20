@@ -19,6 +19,7 @@
 #include "mammoth_r/mcp_tables.h"
 #include "mammoth_r/txlog.h"
 #include "miscadmin.h"
+#include "nodes/bitmapset.h"
 #include "storage/ipc.h"
 #include "utils/ps_status.h"
 
@@ -661,6 +662,32 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 				/* clear the table request state for the slave */
 				slavetable->slave_req[state->ss_hostno] = false;
 			}
+			/* 
+			 * Send the table dump even if it's not *yet* replicated by the
+			 * slave if the transaction's bitmapset indicates that the slave
+			 * will replicate it after processing the catalog dump.
+			 */
+			else if ((slavetable->on_slave[state->ss_hostno] == false) &&
+					 state->ss_wait_list)
+			{
+				Bitmapset   *bms = palloc(sizeof(Bitmapset) + 
+							 		(hdr->nwords - 1) * sizeof(bitmapword));
+				bms->nwords = hdr->nwords;
+				memcpy(bms->words, hdr->words, 
+					   bms->nwords * sizeof(bitmapword));
+				/* check whether the slave's bit in the bitmapset is set */
+				if (bms_is_member(state->ss_hostno, bms))
+				{
+					elog(DEBUG2, 
+						"slave %d is present in transaction bitmapset",
+						state->ss_hostno);
+					
+					slavetable->on_slave[state->ss_hostno] = true;
+					slavetable->slave_req[state->ss_hostno] = false;
+					replicate_tx = true;
+				}
+				pfree(bms);
+			}
 
 			elog(DEBUG2, "dump transaction for table \"%s\": %s",
 				 txtable->relpath, replicate_tx ? "replicated" : "not replicated");
@@ -725,7 +752,7 @@ SlaveMessageHook(TxDataHeader *hdr, void *status_arg, ullong recno)
 	if (hdr->dh_flags & MCP_QUEUE_FLAG_CATALOG_DUMP)
 	{
 		elog(DEBUG2,
-			 "waiting for table list, suspended sending data to the slave");
+			 "list wait flag set for slave %d", status->ss_hostno);
 		status->ss_wait_list = true;
 	}
 
@@ -808,13 +835,6 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 	while (recno <= last_recno && TXLOGIsCommitted(recno))
 	{
 		ullong	first_recno;
-
-		/* 
-		 * If we are supposed to wait for a tablelist from slave then
-		 * quit without sending anything. 
-		 */ 
-		if (status->ss_wait_list) 
-			break;
 
 		/* Send current transaction */
 		elog(LOG, "sending transaction "UNI_LLU" to slave", recno);
@@ -995,7 +1015,8 @@ ReceiveSlaveMessage(SlaveStatus *status)
 		if (status->ss_wait_list)
 		{
 			status->ss_wait_list = false;
-			elog(DEBUG2, "table list wait flag cleared, resume sending data to the slave");
+			elog(DEBUG2, "list wait flag cleared for slave %d",
+				 status->ss_hostno);
 		}
 	}
 
