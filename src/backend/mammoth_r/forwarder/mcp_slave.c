@@ -102,10 +102,11 @@ static void MasterNextPromotionState(SlaveStatus *status);
 static void MCPSlaveActOnPromotionSignal(SlaveStatus *status);
 static void MCPSlaveCancelPromotion(SlaveStatus *status);
 static void SlaveStartPromotion(SlaveStatus *status, bool force);
-static void SlaveMergeTableLists(SlaveStatus *state);
+static void SlaveMergeTableLists(SlaveStatus *state, ullong recno);
 static void SlaveStoreTableList(SlaveStatus *state);
 static void SlaveRestoreTableList(SlaveStatus *state);
-static bool MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab);
+static bool MCPSlaveActOnTableRequest(SlaveStatus *state, 
+									  MCPTable tab, ullong recno);
 
 
 void
@@ -979,7 +980,7 @@ ReceiveSlaveMessage(SlaveStatus *status)
 		LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
 		LWLockAcquire(MCPTableListLock, LW_EXCLUSIVE);
 
-		SlaveMergeTableLists(status);
+		SlaveMergeTableLists(status, rm->recno);
 
 		LWLockRelease(MCPTableListLock);
 		LWLockRelease(MCPServerLock);
@@ -1445,11 +1446,13 @@ MCPSlaveCancelPromotion(SlaveStatus *status)
 }
 
 /* 
- * Merge table list received from the slave with a current list
- * stored on disk.
+ * Merge table list received from the slave with a current
+ * list stored on disk. Recno is the record of table list 
+ * message received from the slave and is the slave's next
+ * record to restore at the time of sending the table list.
  */
 static void 
-SlaveMergeTableLists(SlaveStatus *state)
+SlaveMergeTableLists(SlaveStatus *state, ullong recno)
 {
 	ListCell   *cell;
 	bool	changed;
@@ -1495,7 +1498,7 @@ SlaveMergeTableLists(SlaveStatus *state)
 		if (t_received->raise_dump == TableDump)
 		{
         	changed = true;
-			wake_master |= MCPSlaveActOnTableRequest(state, t_found);
+			wake_master |= MCPSlaveActOnTableRequest(state, t_found, recno);
 		}
 	}
 
@@ -1524,10 +1527,11 @@ SlaveMergeTableLists(SlaveStatus *state)
 }
 
 /*
- * Check if a table dump should be requested for the given table
+ * Check if a table dump should be requested for the given table.
+ * Recno is the next to restore record number received from the slave.
  */
 static bool
-MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
+MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab, ullong recno)
 {
 	bool	reqdump = false;
 
@@ -1535,25 +1539,16 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
     tab->slave_req[state->ss_hostno] = true;
 
 	/* Check if the dump hasn't been requested yet */
-	if (tab->req_satisfied == TDnone && tab->dump_recno == InvalidRecno)
-		reqdump = true;
-	else
+	if (tab->req_satisfied == TDnone)
 	{
 	 	/*
 		 * Check if the dump is in queue but the slave has already advanced
-		 * after that point (in which case we need to request it again)
+		 * after that point (in which case we need to request it again). This
+		 * also covers the case of the table dump not requested before, since
+		 * InvalidRecno as the dump_recno is less than any valid recno.
 	 	 */
-		if (tab->req_satisfied == TDnone)
-		{
-			ullong	frecno;
+		reqdump = tab->dump_recno < recno;
 
-			LWLockAcquire(MCPHostsLock, LW_SHARED);
-			frecno = MCPHostsGetHostRecno(state->ss_hosts,
-			 							  McphHostRecnoKindFirst, 
-										  state->ss_hostno);
-			reqdump = tab->dump_recno < frecno;
-			LWLockRelease(MCPHostsLock);
-		}
 	}
 
 	if (reqdump)

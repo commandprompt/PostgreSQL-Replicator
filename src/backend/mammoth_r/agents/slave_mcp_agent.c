@@ -127,7 +127,7 @@ static bool		slave_stop_restore = false;
 MemoryContext SlaveContext;
 
 
-static void SlaveSendTablesToMCP(void);
+static void SlaveSendTablesToMCP(ullong recno);
 static void SlaveReceiveMessage(SlaveState *state);
 static void SlaveSendTablelist(SlaveState *state);
 static void SlaveSendPromotionMsg(int flag);
@@ -600,9 +600,23 @@ final:
 static void
 SlaveSendTablelist(SlaveState *state)
 {
+	ullong	restore_next_recno;
 	if (!slave_should_send_tablelist)
 		return;
-
+	
+	/* 
+	 * The record number we  are about to send  with  the table  list is the
+	 * recno at which the restorer process has stopped. Currently the restorer
+	 * process stops right after the   catalog dump   transaction to send the
+	 * list. The forwarder will compare this recno with the recno of the table
+	 * dumps for the   new tables in this list to decide whether to request a
+	 * new table dump  from the master or reuse an existing one in the queue.
+	 * See MCPSlaveActOnTableRequest at mcp_slave.c
+	 */
+	LockReplicationQueue(state->slave_mcpq, LW_SHARED);
+	restore_next_recno = MCPQueueGetFirstRecno(state->slave_mcpq);
+	UnlockReplicationQueue(state->slave_mcpq);
+	
 	/* reset the flag */
 	slave_should_send_tablelist = false;
 
@@ -610,7 +624,7 @@ SlaveSendTablelist(SlaveState *state)
 	elog(DEBUG2, "sending table list to MCP");
 	StartTransactionCommand();
 	PushActiveSnapshot(GetTransactionSnapshot());
-	SlaveSendTablesToMCP();
+	SlaveSendTablesToMCP(restore_next_recno);
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 }
@@ -848,7 +862,7 @@ SlaveReceiveMessage(SlaveState *state)
 }
 
 static void
-SlaveSendTablesToMCP(void)
+SlaveSendTablesToMCP(ullong recno)
 {
 	MCPMsg	   *sm;
 	List	   *relids,
@@ -913,6 +927,7 @@ SlaveSendTablesToMCP(void)
 			   MAX_REL_PATH);
 
 		sm->flags = MCP_MSG_FLAG_TABLE_LIST | flags;
+		sm->recno = recno;
 
 		wt = (WireBackendTable) sm->data;
 
@@ -960,6 +975,8 @@ SlaveSendTablesToMCP(void)
 		MemSet(sm, 0, sizeof(MCPMsg) + sizeof(WireBackendTableData) +
 		   	   MAX_REL_PATH);
 		sm->flags = MCP_MSG_FLAG_TABLE_LIST; 
+		sm->recno = recno;
+		
 		if (++i == total )
 			sm->flags |= MCP_MSG_FLAG_TABLE_LIST_END;
 		wt = (WireBackendTable) sm->data;
