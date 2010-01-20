@@ -12,10 +12,14 @@
 #define MCP_QUEUE_H
 
 #include "mammoth_r/mcp_file.h"
+#include "nodes/bitmapset.h"
 #include "storage/lwlock.h"
 
 
 #define InvalidRecno	(UINT64CONST(0))
+
+/* taken from bitmapset.c */
+#define BITMAPSET_WORDS ((MCP_MAX_SLAVES - 1) / BITS_PER_BITMAPWORD + 1)
 
 typedef enum
 {
@@ -35,6 +39,9 @@ typedef struct
 	uint32		dh_flags;		/* per-transaction flags, like dump/data etc. */
 	off_t		dh_listoffset;	/* starting offset of the tablelist data */
 	off_t		dh_len;			/* length of transaction data, incl. header */
+	int			nwords;			/* number of words in the bitmapset below */
+	bitmapword	words[BITMAPSET_WORDS]; /* slave replication statuses for this 		
+										 * transaction */
 } TxDataHeader;
 
 #define DATA_HEADER_ID 0x5458

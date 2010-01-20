@@ -43,6 +43,7 @@ static void PGRDumpTables(MCPQueue *queue);
 static void DumpRoles(MCPQueue *queue);
 static void dump_one_sequence(Relation rel, Snapshot snap);
 static void dump_one_table(Relation rel, Snapshot snap, bool table_dump);
+static void set_bitmapset_from_table(Oid relid);
 
 
 /*
@@ -179,7 +180,8 @@ DumpRoles(MCPQueue *q)
 		char	   *rolename = lfirst(cell);
 		
 		/* Look for the role's tuple in pg_authid */
-		HeapTuple	tuple = SearchSysCache(AUTHNAME, PointerGetDatum(rolename),
+		HeapTuple	tuple = SearchSysCache(AUTHNAME,
+		 								   PointerGetDatum(rolename),
 										   0, 0, 0);
 		if (HeapTupleIsValid(tuple))
 		{
@@ -328,6 +330,9 @@ PGRDumpTables(MCPQueue *queue)
 				 	 RelationGetRelationName(rel));
 				apply = false;
 			}
+			/* Fill the table's bitmapset only if we replicate this table */
+			if (apply)
+				set_bitmapset_from_table(RelationGetRelid(rel));
 			/* close relation and release the lock */
 			relation_close(rel, ShareUpdateExclusiveLock);
 		}
@@ -615,6 +620,10 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
 
         PGRUseDumpMode = false;
 
+		/* Fill the table's bitmapset only if we replicate this table */
+		if (apply)
+			set_bitmapset_from_table(RelationGetRelid(rel));
+
         /* Close the target relation and add the data file to the queue */
         heap_close(rel, ShareUpdateExclusiveLock);
     }
@@ -703,4 +712,18 @@ dump_one_table(Relation rel, Snapshot snap, bool table_dump)
 	}
 
 	heap_endscan(scandesc);
+}
+
+/* Add slaves, which replicate the given table, into the local bitmapset */
+static void
+set_bitmapset_from_table(Oid relid)
+{
+	ListCell   *lc;
+	List 	   *slaveids = get_slaves_for_relid(relid);
+	
+	foreach(lc, slaveids)
+	{
+		int id = lfirst_int(lc);
+		LocalQueueAddSlaveToBitmapset(MasterLocalQueue, id);
+	}
 }

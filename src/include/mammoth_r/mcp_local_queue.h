@@ -42,5 +42,6 @@ extern void MCPLocalQueueTruncate(MCPLocalQueue *lq);
 extern MCPFile *MCPLocalQueueGetFile(MCPLocalQueue *lq);
 extern StringInfo MCPQueueTxReadPacket(MCPQueue *q, bool allow_end);
 extern void MCPLocalQueueFinishEmptyTx(MCPLocalQueue *lq, int flags);
+extern void LocalQueueAddSlaveToBitmapset(MCPLocalQueue *lq, int slaveno);
 
 #endif /* MCP_LOCAL_QUEUE_H */

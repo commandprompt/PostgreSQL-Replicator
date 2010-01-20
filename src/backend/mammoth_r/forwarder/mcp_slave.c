@@ -19,6 +19,7 @@
 #include "mammoth_r/mcp_tables.h"
 #include "mammoth_r/txlog.h"
 #include "miscadmin.h"
+#include "nodes/bitmapset.h"
 #include "storage/ipc.h"
 #include "utils/ps_status.h"
 
@@ -102,10 +103,11 @@ static void MasterNextPromotionState(SlaveStatus *status);
 static void MCPSlaveActOnPromotionSignal(SlaveStatus *status);
 static void MCPSlaveCancelPromotion(SlaveStatus *status);
 static void SlaveStartPromotion(SlaveStatus *status, bool force);
-static void SlaveMergeTableLists(SlaveStatus *state);
+static void SlaveMergeTableLists(SlaveStatus *state, ullong recno);
 static void SlaveStoreTableList(SlaveStatus *state);
 static void SlaveRestoreTableList(SlaveStatus *state);
-static bool MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab);
+static bool MCPSlaveActOnTableRequest(SlaveStatus *state, 
+									  MCPTable tab, ullong recno);
 
 
 void
@@ -660,6 +662,32 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 				/* clear the table request state for the slave */
 				slavetable->slave_req[state->ss_hostno] = false;
 			}
+			/* 
+			 * Send the table dump even if it's not *yet* replicated by the
+			 * slave if the transaction's bitmapset indicates that the slave
+			 * will replicate it after processing the catalog dump.
+			 */
+			else if ((slavetable->on_slave[state->ss_hostno] == false) &&
+					 state->ss_wait_list)
+			{
+				Bitmapset   *bms = palloc(sizeof(Bitmapset) + 
+							 		(hdr->nwords - 1) * sizeof(bitmapword));
+				bms->nwords = hdr->nwords;
+				memcpy(bms->words, hdr->words, 
+					   bms->nwords * sizeof(bitmapword));
+				/* check whether the slave's bit in the bitmapset is set */
+				if (bms_is_member(state->ss_hostno, bms))
+				{
+					elog(DEBUG2, 
+						"slave %d is present in transaction bitmapset",
+						state->ss_hostno);
+					
+					slavetable->on_slave[state->ss_hostno] = true;
+					slavetable->slave_req[state->ss_hostno] = false;
+					replicate_tx = true;
+				}
+				pfree(bms);
+			}
 
 			elog(DEBUG2, "dump transaction for table \"%s\": %s",
 				 txtable->relpath, replicate_tx ? "replicated" : "not replicated");
@@ -724,7 +752,7 @@ SlaveMessageHook(TxDataHeader *hdr, void *status_arg, ullong recno)
 	if (hdr->dh_flags & MCP_QUEUE_FLAG_CATALOG_DUMP)
 	{
 		elog(DEBUG2,
-			 "waiting for table list, suspended sending data to the slave");
+			 "list wait flag set for slave %d", status->ss_hostno);
 		status->ss_wait_list = true;
 	}
 
@@ -773,13 +801,12 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 	/* Get recno of the transaction to send */
 	LWLockAcquire(MCPHostsLock, LW_SHARED);
 	recno = MCPHostsGetHostRecno(h, McphHostRecnoKindSendNext, hostno);
-	MCPHostsSetHostRecno(h, McphHostRecnoKindReading, hostno, recno);
     host_sync = MCPHostsGetSync(h, hostno);
 	LWLockRelease(MCPHostsLock);
 
     /* 
 	 * If this host is not in sync, the only thing that we can validly send
-	 * is a dump.  So if we're pointing to something that's not a dump, bail
+	 * is a dump.  So if we're pointing at something that's not a dump, bail
 	 * out here and let the caller fix things.
      */
     if (host_sync != MCPQSynced)
@@ -812,13 +839,6 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 	{
 		ullong	next_recno;
 		bool	doit;
-
-		/* 
-		 * If we are supposed to wait for a tablelist from slave then
-		 * quit without sending anything. 
-		 */ 
-		if (status->ss_wait_list) 
-			break;
 
 		/*
 		 * Send the current transaction, and ensure that no one removes it
@@ -993,7 +1013,7 @@ ReceiveSlaveMessage(SlaveStatus *status)
 		LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
 		LWLockAcquire(MCPTableListLock, LW_EXCLUSIVE);
 
-		SlaveMergeTableLists(status);
+		SlaveMergeTableLists(status, rm->recno);
 
 		LWLockRelease(MCPTableListLock);
 		LWLockRelease(MCPServerLock);
@@ -1008,7 +1028,8 @@ ReceiveSlaveMessage(SlaveStatus *status)
 		if (status->ss_wait_list)
 		{
 			status->ss_wait_list = false;
-			elog(DEBUG2, "table list wait flag cleared, resume sending data to the slave");
+			elog(DEBUG2, "list wait flag cleared for slave %d",
+				 status->ss_hostno);
 		}
 	}
 
@@ -1459,11 +1480,13 @@ MCPSlaveCancelPromotion(SlaveStatus *status)
 }
 
 /* 
- * Merge table list received from the slave with a current list
- * stored on disk.
+ * Merge table list received from the slave with a current
+ * list stored on disk. Recno is the record of table list 
+ * message received from the slave and is the slave's next
+ * record to restore at the time of sending the table list.
  */
 static void 
-SlaveMergeTableLists(SlaveStatus *state)
+SlaveMergeTableLists(SlaveStatus *state, ullong recno)
 {
 	ListCell   *cell;
 	bool	changed;
@@ -1509,7 +1532,7 @@ SlaveMergeTableLists(SlaveStatus *state)
 		if (t_received->raise_dump == TableDump)
 		{
         	changed = true;
-			wake_master |= MCPSlaveActOnTableRequest(state, t_found);
+			wake_master |= MCPSlaveActOnTableRequest(state, t_found, recno);
 		}
 	}
 
@@ -1538,10 +1561,11 @@ SlaveMergeTableLists(SlaveStatus *state)
 }
 
 /*
- * Check if a table dump should be requested for the given table
+ * Check if a table dump should be requested for the given table.
+ * Recno is the next to restore record number received from the slave.
  */
 static bool
-MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
+MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab, ullong recno)
 {
 	bool	reqdump = false;
 
@@ -1549,25 +1573,16 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab)
     tab->slave_req[state->ss_hostno] = true;
 
 	/* Check if the dump hasn't been requested yet */
-	if (tab->req_satisfied == TDnone && tab->dump_recno == InvalidRecno)
-		reqdump = true;
-	else
+	if (tab->req_satisfied == TDnone)
 	{
 	 	/*
 		 * Check if the dump is in queue but the slave has already advanced
-		 * after that point (in which case we need to request it again)
+		 * after that point (in which case we need to request it again). This
+		 * also covers the case of the table dump not requested before, since
+		 * InvalidRecno as the dump_recno is less than any valid recno.
 	 	 */
-		if (tab->req_satisfied == TDnone)
-		{
-			ullong	frecno;
+		reqdump = tab->dump_recno < recno;
 
-			LWLockAcquire(MCPHostsLock, LW_SHARED);
-			frecno = MCPHostsGetHostRecno(state->ss_hosts,
-										  McphHostRecnoKindSendNext,
-										  state->ss_hostno);
-			reqdump = tab->dump_recno < frecno;
-			LWLockRelease(MCPHostsLock);
-		}
 	}
 
 	if (reqdump)

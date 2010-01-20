@@ -881,3 +881,53 @@ LOoidCreateMapping(Oid master_oid, Oid slave_oid)
 	heap_close(slave_lo_refs, RowExclusiveLock);
 	relation_close(slave_lo_refs_idx, RowExclusiveLock);
 }
+
+/* 
+ *	get_slaves_for_relid
+ *
+ * Get the list of slaves, which replicate the given relation.
+ * The caller should hold at least AccessShareLock for the relation.
+ * The caller is responsible for checking that master replicates the relation.
+ */
+List *
+get_slaves_for_relid(Oid relid)
+{
+	SysScanDesc	scan;
+	ScanKeyData	keys[2];
+	Relation	repl_slave_rel;
+	HeapTuple	tuple;
+	List	   *slaveids = NIL;
+
+	Form_repl_slave_relations	slave_rel_form;	
+	repl_slave_rel = heap_open(ReplSlaveRelationsId, AccessShareLock);
+	/* 
+	 * Scan for the slave ids less than MCP_MAX_SLAVES.
+	 * Every slave should satisfy this criteria.
+	 */
+	ScanKeyInit(&keys[0],
+				Anum_repl_slave_relations_slave,
+				BTLessStrategyNumber, F_INT4LT,
+				Int32GetDatum(MCP_MAX_SLAVES));
+				
+	ScanKeyInit(&keys[1],
+				Anum_repl_slave_relations_relid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(repl_slave_rel,
+							  ReplSlaveRelationsSlaveRelidIndexId,
+							  true, SnapshotNow, 2, keys);
+	
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		slave_rel_form = (Form_repl_slave_relations) GETSTRUCT(tuple);
+		/* Add a slave id to the list if the relation is replicated */
+		if (slave_rel_form->enable)
+			slaveids = lappend_int(slaveids, slave_rel_form->slave);
+	}
+	
+	systable_endscan(scan);
+	heap_close(repl_slave_rel, AccessShareLock);
+	
+	return slaveids;
+}
