@@ -31,6 +31,7 @@
 #include "mammoth_r/mcp_local_queue.h"
 #include "mammoth_r/pgr.h"
 #include "mammoth_r/promotion.h"
+#include "nodes/bitmapset.h"
 #include "postmaster/replication.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -61,6 +62,7 @@ struct MCPLocalQueue
 	bool			lq_nontrans_changed;
 	List		   *lq_tablist; 
 	List		   *lq_nt_tablist;
+	Bitmapset	   *lq_bms;
 };
 
 
@@ -130,6 +132,7 @@ reset_files(MCPLocalQueue *lq)
 	 */
 	MemoryContextReset(lq->lq_context);
 	lq->lq_tablist = lq->lq_nt_tablist = NIL;
+	lq->lq_bms = NULL;
 }
 
 /*
@@ -581,4 +584,11 @@ MCPQueueTxReadPacket(MCPQueue *q, bool allow_end)
 
 	/* Possibly decompress it */
 	return MCPDecompressData(str, &dh);
+}
+
+/* Add slave id to the transaction's bitmapset */
+void
+LocalQueueAddSlaveToBitmapset(MCPLocalQueue *lq, int slaveno)
+{
+	lq->lq_bms = bms_add_member(lq->lq_bms, slaveno);
 }
