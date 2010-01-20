@@ -445,6 +445,15 @@ MCPLocalQueueFinalize(MCPLocalQueue *lq, int flags, bool is_commit)
 	hdr.dh_id = DATA_HEADER_ID;
 	hdr.dh_flags = flags;
 	hdr.dh_listoffset = listoff;
+	/* 
+	 * Copy the local queue bitmapset to the transaction header.
+	 * XXX: Should be revised if bitmapset type ever change.
+	 */
+	if (lq->lq_bms != NULL)
+	{
+		hdr.nwords = lq->lq_bms->nwords;
+		memcpy(hdr.words, lq->lq_bms->words, hdr.nwords * sizeof(bitmapword));
+	}
 	/* total file length */
 	hdr.dh_len = MCPFileSeek(lq->lq_trans, 0, SEEK_CUR);
 
