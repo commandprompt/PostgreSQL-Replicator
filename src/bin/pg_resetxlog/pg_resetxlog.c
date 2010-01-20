@@ -96,6 +96,7 @@ main(int argc, char *argv[])
 	char	   *DataDir;
 	int			fd;
 	char		path[MAXPGPATH];
+	uint64		set_sysid = 0;
 
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_resetxlog"));
 
@@ -116,7 +117,7 @@ main(int argc, char *argv[])
 	}
 
 
-	while ((c = getopt(argc, argv, "fl:m:no:O:x:e:")) != -1)
+	while ((c = getopt(argc, argv, "fl:m:no:O:x:e:s:")) != -1)
 	{
 		switch (c)
 		{
@@ -226,7 +227,15 @@ main(int argc, char *argv[])
 					exit(1);
 				}
 				break;
-
+			case 's':
+				set_sysid = strtoull(optarg, &endptr, 0);
+				if (endptr == optarg || *endptr != '\0')
+				{
+					fprintf(stderr, _("%s: invalid argument for option -s\n"),
+							progname);
+					exit(1);
+				}
+				break;
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 				exit(1);
@@ -328,6 +337,8 @@ main(int argc, char *argv[])
 		newXlogId = minXlogId;
 		newXlogSeg = minXlogSeg;
 	}
+	if (set_sysid != 0)
+		ControlFile.system_identifier = set_sysid;
 
 	/*
 	 * If we had to guess anything, and -f was not given, just print the
@@ -988,6 +999,7 @@ usage(void)
 	printf(_("  -o OID          set next OID\n"));
 	printf(_("  -O OFFSET       set next multitransaction offset\n"));
 	printf(_("  -x XID          set next transaction ID\n"));
+	printf(_("  -s SYSID        set new system identifier\n"));
 	printf(_("  --help          show this help, then exit\n"));
 	printf(_("  --version       output version information, then exit\n"));
 	printf(_("\nReport bugs to <pgsql-bugs@postgresql.org>.\n"));
