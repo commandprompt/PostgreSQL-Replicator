@@ -106,6 +106,7 @@ sub initdb
 	my $self = shift;
 	my $opts = shift;
 	my $args = "";
+	my ($sysid, $nextoid);
 
 	confess "postmaster running in $self->{datadir}"
 		if -e "$self->{datadir}/postmaster.pid";
@@ -134,6 +135,16 @@ sub initdb
 			die "could not chmod $path";
 		}
 	}
+	
+	my @pgcontrolout = `pg_resetxlog -n $self->{datadir}`;
+	foreach (@pgcontrolout) {
+		$sysid = $1 if (/^Database system identifier:\s+(\d+)/);
+		$nextoid = $1 if (/^Latest checkpoint's NextOID:\s+(\d+)/);
+	}
+	# randomize sysid and nextoid values
+	$nextoid += int(rand(10000));
+	$sysid += time;
+	`pg_resetxlog -s $sysid -o $nextoid $self->{datadir}`;
 }
 
 sub start
