@@ -179,7 +179,7 @@ mammoth_hosts_status(PG_FUNCTION_ARGS)
 														slaveno));
 		values[3] = TimestampTzGetDatum(ts);
 		values[4] = Int64GetDatum(MCPHostsGetHostRecno(ForwarderHosts, 
-													   McphHostRecnoKindFirst,
+													   McphHostRecnoKindSendNext,
 													   slaveno));
 		values[5] = Int64GetDatum(MCPHostsGetHostRecno(ForwarderHosts, 
 													   McphHostRecnoKindAcked,
