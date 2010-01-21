@@ -136,15 +136,18 @@ sub initdb
 		}
 	}
 	
-	my @pgcontrolout = `pg_resetxlog -n $self->{datadir}`;
-	foreach (@pgcontrolout) {
+	# obtain original sysid and nextoid values
+	open PGCONTROL, "-|", "$OPgsql::pgroot/bin/pg_resetxlog -n $self->{datadir}"
+		or die "cannot run pg_resetxlog: $!";
+	while (<PGCONTROL>) {
 		$sysid = $1 if (/^Database system identifier:\s+(\d+)/);
 		$nextoid = $1 if (/^Latest checkpoint's NextOID:\s+(\d+)/);
 	}
-	# randomize sysid and nextoid values
+	close PGCONTROL;
+	# now write them back
 	$nextoid += int(rand(10000));
 	$sysid += time;
-	`pg_resetxlog -s $sysid -o $nextoid $self->{datadir}`;
+	`$OPgsql::pgroot/bin/pg_resetxlog -s $sysid -o $nextoid $self->{datadir}`;
 }
 
 sub start
