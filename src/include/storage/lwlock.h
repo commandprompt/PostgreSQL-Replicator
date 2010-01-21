@@ -68,7 +68,6 @@ typedef enum LWLockId
 	ReplicationCommitLock,
 	BackendQueueLock,
 	ForwarderQueueLock,
-	ReplicationQueueTruncateLock,
 	BackendTxlogControlLock,
 	ForwarderTxlogControlLock,
 	MCPServerLock,

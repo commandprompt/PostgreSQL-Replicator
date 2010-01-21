@@ -447,13 +447,8 @@ IsPromotionAllowed(int hostno)
 static void
 SlaveSendMessages(SlaveStatus *status)
 {
-	/* Make sure that the queue data won't go away while we are sending it */
-	LWLockAcquire(ReplicationQueueTruncateLock, LW_SHARED);
-
 	/* First, send all messages from the queue */
 	SlaveSendQueuedMessages(status);
-
-	LWLockRelease(ReplicationQueueTruncateLock);
 
 	/* Second, send 'direct' messages */
 	SlaveSendDirectMessages(status);
