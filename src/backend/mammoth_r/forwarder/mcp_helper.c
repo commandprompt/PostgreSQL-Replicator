@@ -23,7 +23,6 @@
 
 
 static void do_queue_optimization(MCPQueue *q, MCPHosts *h);
-static void OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno);
 static void advance_safe_recno(MCPHosts *h);
 static void sigquit_handler(SIGNAL_ARGS);
 static void sigterm_handler(SIGNAL_ARGS);
@@ -113,65 +112,41 @@ ForwarderHelperMain(int argc, char *argv)
 static void
 do_queue_optimization(MCPQueue *q, MCPHosts *h)
 {
-	ullong 	confirmed_recno;
+	ullong 	new_recno;
+	bool	doit = false;
 
 	elog(DEBUG3, "running optimization checks");
 
-	/* XXX: too many locks here, can we get rid of some of them ? */
-	LWLockAcquire(MCPServerLock, LW_SHARED);
-	LockReplicationQueue(q, LW_EXCLUSIVE);
-	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
-
-	/* Get the minimum among confirmed recnos of connected slaves */
-	confirmed_recno = 
-		MCPHostsGetMinAckedRecno(h, ServerCtl->node_pid);
-
-	/* 
-	 * Run optimization. Note that no data will be remove until later
-	 * in MCPQueuePrune call.
-	 */
-
-	if (confirmed_recno > MCPQueueGetInitialRecno(q))
-		OptimizeQueue(q, h, confirmed_recno);
-
-	LWLockRelease(MCPHostsLock);
-
-	/* Remove records up to the point calculated above */
-	MCPQueuePrune(q);
-
-	UnlockReplicationQueue(q);
-	LWLockRelease(MCPServerLock);
-}
-
-/*
- * Caller must hold the global MCPHosts lock
- */
-static void
-OptimizeQueue(MCPQueue *q, MCPHosts *h, ullong confirmed_recno)
-{
-	ullong 	new_vrecno;
-	ullong	dump_end_recno;	
-	
-	Assert(LWLockHeldByMe(MCPHostsLock));
-
 	MCPQueueLogHdrStatus(DEBUG4, q, "PRE OPTIMIZE");
 	MCPHostsLogTabStatus(DEBUG4, h, -1, "PRE OPTIMIZE", ServerCtl->node_pid);
-	elog(DEBUG4, "OPTIMIZE: host dump_recno "UNI_LLU, FullDumpGetStartRecno());
 
-	dump_end_recno = FullDumpGetEndRecno();
-	new_vrecno = MCPHostsGetPruningRecno(h, ServerCtl->node_pid);
-	if (new_vrecno != InvalidRecno)
+	/*
+	 * Get the minimum among confirmed recnos of connected slaves, and set
+	 * the queue's AckRecno and FirstRecno to it.
+	 */
+	LWLockAcquire(MCPServerLock, LW_SHARED);
+	LWLockAcquire(MCPHostsLock, LW_SHARED);
+	new_recno = MCPHostsGetMinAckedRecno(h, ServerCtl->node_pid);
+	LWLockRelease(MCPHostsLock);
+	LWLockRelease(MCPServerLock);
+
+	if (new_recno != InvalidRecno)
 	{
-		/* 
-		 * XXX: since MCPQueuePrune check min of vrecno, frecno we should set
-		 * both here. Note that we can't change that check without changing
- 		 * master/slave code, since vrecno <= frecno on master, but 
- 		 * vrecno >= frecno on slave.
-		 */
-		MCPQueueSetAckRecno(q, new_vrecno);
-		MCPQueueSetFirstRecno(q, new_vrecno + 1);
+		LockReplicationQueue(q, LW_EXCLUSIVE);
+		MCPQueueSetAckRecno(q, new_recno);
+		MCPQueueSetFirstRecno(q, new_recno + 1);
+		UnlockReplicationQueue(q);
+		doit = true;
 	}
-	
+
+	/* Remove records */
+	if (doit)
+	{
+		LockReplicationQueue(q, LW_EXCLUSIVE);
+		MCPQueuePrune(q);
+		UnlockReplicationQueue(q);
+	}
+
 	MCPQueueLogHdrStatus(DEBUG4, q, "POST OPTIMIZE");
 	MCPHostsLogTabStatus(DEBUG4, h, -1, "POST OPTIMIZE", ServerCtl->node_pid);
 }

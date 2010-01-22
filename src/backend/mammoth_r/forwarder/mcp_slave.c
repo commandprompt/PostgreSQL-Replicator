@@ -835,24 +835,12 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		ullong	next_recno;
 		bool	doit;
 
-		/*
-		 * Send the current transaction, and ensure that no one removes it
-		 * from the queue by setting it as the "being read" transaction.
-		 * We remove that as soon as we've sent it, to allow timely queue
-		 * pruning.
-		 */
+		/* Send the current transaction */
 		elog(LOG, "sending transaction "UNI_LLU" to slave", recno);
-		LWLockAcquire(MCPHostsLock, LW_SHARED);
-		MCPHostsSetHostRecno(h, McphHostRecnoKindReading, hostno, recno);
-		LWLockRelease(MCPHostsLock);
 
 		SendQueueTransaction(status->ss_queue, recno,
 							 SlaveTableListHook, (void *) status,
 							 SlaveMessageHook, (void *) status);
-
-		LWLockAcquire(MCPHostsLock, LW_SHARED);
-		MCPHostsSetHostRecno(h, McphHostRecnoKindReading, hostno, InvalidRecno);
-		LWLockRelease(MCPHostsLock);
 
 		/*
 		 * Set host's sync state to MCPQSynced after sending dump.
@@ -1577,7 +1565,6 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab, ullong recno)
 		 * InvalidRecno as the dump_recno is less than any valid recno.
 	 	 */
 		reqdump = tab->dump_recno < recno;
-
 	}
 
 	if (reqdump)

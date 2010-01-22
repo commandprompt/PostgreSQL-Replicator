@@ -30,7 +30,6 @@ typedef enum McphRecnoKind
 /* Per-host record numbers */
 typedef enum McphHostRecnoKind
 {
-	McphHostRecnoKindReading,
 	McphHostRecnoKindSendNext,
 	McphHostRecnoKindAcked,
 	McphHostRecnoKindMax	/* must be last */
@@ -51,8 +50,6 @@ extern ullong	MCPHostsGetHostRecno(MCPHosts *h, McphHostRecnoKind kind,
 extern void		MCPHostsSetHostRecno(MCPHosts *h, McphHostRecnoKind kind,
 					 int host, ullong recno);
 extern ullong	MCPHostsGetMinAckedRecno(MCPHosts *h, pid_t *node_pid);
-
-extern ullong MCPHostsGetPruningRecno(MCPHosts *h, pid_t *node_pid);
 
 extern void		MCPHostsCleanup(MCPHosts *h, MCPQueue *q, ullong recno);
 

@@ -14,7 +14,7 @@
  * correct in the uncommon case where the master process needs to advance them
  * all in case of receiving a full dump.
  *
- * This applies to McphHostRecnoKindReading and McphHostRecnoKindSendNext.
+ * This applies to McphHostRecnoKindSendNext only.
  *
  * All other members of the MCPHosts struct use locks normally.
  *
@@ -193,24 +193,29 @@ MCPHostsNextTx(MCPHosts *h, int hostno, ullong last_recno)
 ullong
 MCPHostsGetMinAckedRecno(MCPHosts *h, pid_t *node_pid)
 {
-	ullong          recno = InvalidRecno;
-	int             i;
+	ullong		newvalue = InvalidRecno;
+	int			i;
 
 	Assert(LWLockHeldByMe(MCPHostsLock));
 
 	/* Looking for the minimum acked recno across all connected slaves */
 	for (i = 0; i < h->h_maxhosts; i++)
 	{
+		ullong	thishost;
+
 		/* Ignore disconnected slaves */
-		if (h->h_hosts[i].recnos[McphHostRecnoKindAcked] == InvalidRecno ||
-			node_pid[i + 1] == 0)
+		if (node_pid[i + 1] == 0)
 			continue;
-		if (recno == InvalidRecno)
-			recno = h->h_hosts[i].recnos[McphHostRecnoKindAcked];
-		else if (recno > h->h_hosts[i].recnos[McphHostRecnoKindAcked])
-			recno = h->h_hosts[i].recnos[McphHostRecnoKindAcked];
+
+		thishost = h->h_hosts[i].recnos[McphHostRecnoKindAcked];
+		/* if a connected slave hasn't set Acked, can't prune anything */
+		if (thishost == InvalidRecno)
+			return InvalidRecno;
+		if (newvalue == InvalidRecno || newvalue > thishost)
+			newvalue = thishost;
 	}
-	return recno;
+
+	return newvalue;
 }
 
 /*
@@ -247,67 +252,6 @@ MCPHostsGetHostRecno(MCPHosts *h, McphHostRecnoKind kind, int host)
 	Assert(LWLockHeldByMe(MCPHostsLock));
 
 	return h->h_hosts[host].recnos[kind];
-}
-
-/*
- * Gets the record number before which all records can be removed.
- * No actual queue modifications here.
- */
-ullong
-MCPHostsGetPruningRecno(MCPHosts *h, pid_t *node_pid)
-{
-	ullong	globalmin = InvalidRecno;
-	int		i;
-
-	Assert(LWLockHeldByMe(MCPHostsLock));
-
-	elog(DEBUG4, "MCPHostsOptimizeQueue");
-
-	for (i = 0; i < h->h_maxhosts; i++)
-	{
-		ullong	thishost = InvalidRecno;
-		ullong	reading;
-		ullong	sendnext;
-		ullong	acked;
-
-		/*
-		 * Ignore unconnected slaves
-		 *
-		 * FIXME this is dangerous: if a slave disconnects for a brief period of
-		 * time, we could remove records it needs.
-		 */
-		if (node_pid[i] == 0)
-			continue;
-
-		reading = h->h_hosts[i].recnos[McphHostRecnoKindReading];
-		sendnext = h->h_hosts[i].recnos[McphHostRecnoKindSendNext];
-		acked = h->h_hosts[i].recnos[McphHostRecnoKindAcked];
-
-		/* initialize to "reading", keeping in mind that it might be Invalid */
-		thishost = reading;
-
-		/*
-		 * If this host hasn't initialized SendNext or Acked, we can't prune
-		 * anything.
-		 */
-		if (sendnext == InvalidRecno || acked == InvalidRecno)
-			return InvalidRecno;
-
-		/* by here, we know neither SendNext nor Acked are Invalid */
-
-		if (thishost == InvalidRecno ||
-			sendnext < thishost)
-			thishost = sendnext;
-		if (acked < thishost)
-			thishost = acked;
-		
-		/* by here, thishost is the smallest of the three, and not Invalid */
-
-		if (globalmin == InvalidRecno || thishost < globalmin)
-			globalmin = thishost;
-	}
-
-	return globalmin;
 }
 
 /* 
@@ -380,7 +324,7 @@ MCPHostsLogTabStatus(int elevel, MCPHosts *h, int hostno, char *prefix, pid_t *n
 			 "%s: slave(%d), f="UNI_LLU" v="UNI_LLU" sync: %s",
 			 prefix,
 			 hostno,
-			 h->h_hosts[hostno].recnos[McphHostRecnoKindReading],
+			 h->h_hosts[hostno].recnos[McphHostRecnoKindSendNext],
 			 h->h_hosts[hostno].recnos[McphHostRecnoKindAcked],
 			 MCPQSyncAsString(h->h_hosts[hostno].sync));
 	}
