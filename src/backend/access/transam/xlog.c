@@ -6660,6 +6660,8 @@ CreateCheckPoint(int flags)
 	ControlFile->checkPoint = ProcLastRecPtr;
 	ControlFile->checkPointCopy = checkPoint;
 	ControlFile->time = (pg_time_t) time(NULL);
+	/* crash recovery should always recover to the end of WAL */
+	MemSet(&ControlFile->minRecoveryPoint, 0, sizeof(XLogRecPtr));
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
 

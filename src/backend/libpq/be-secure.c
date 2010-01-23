@@ -258,6 +258,7 @@ secure_read(Port *port, void *ptr, size_t len)
 		int			err;
 
 rloop:
+		errno = 0;
 		n = SSL_read(port->ssl, ptr, len);
 		err = SSL_get_error(port->ssl, n);
 		switch (err)
@@ -352,6 +353,7 @@ secure_write(Port *port, void *ptr, size_t len)
 		}
 
 wloop:
+		errno = 0;
 		n = SSL_write(port->ssl, ptr, len);
 		err = SSL_get_error(port->ssl, n);
 		switch (err)

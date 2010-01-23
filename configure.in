@@ -1145,6 +1145,20 @@ AC_MSG_RESULT(yes)],
               [AC_MSG_RESULT(no)])
 fi
 
+# Check largefile support.  You might think this is a system service not a
+# compiler characteristic, but you'd be wrong.  We must check this before
+# probing existence of related functions such as fseeko, since the largefile
+# defines can affect what is generated for that.
+AC_SYS_LARGEFILE
+
+# Check for largefile support (must be after AC_SYS_LARGEFILE)
+AC_CHECK_SIZEOF([off_t])
+
+# If we don't have largefile support, can't handle segsize >= 2GB.
+if test "$ac_cv_sizeof_off_t" -lt 8 -a "$segsize" != "1"; then 
+   AC_MSG_ERROR([Large file support is not enabled. Segment size cannot be larger than 1GB.]) 
+fi
+
 
 ##
 ## Functions, global variables
@@ -1155,6 +1169,17 @@ AC_FUNC_ACCEPT_ARGTYPES
 PGAC_FUNC_GETTIMEOFDAY_1ARG
 
 AC_CHECK_FUNCS([cbrt dlopen fcvt fdatasync getpeereid getpeerucred getrlimit memmove poll pstat readlink setproctitle setsid sigprocmask symlink sysconf towlower utime utimes waitpid wcstombs])
+
+AC_REPLACE_FUNCS(fseeko)
+case $host_os in
+	# BSD/OS & NetBSD use a custom fseeko/ftello built on fsetpos/fgetpos
+	# Mingw uses macros to access Win32 API calls
+	bsdi*|netbsd*|mingw*)
+		AC_DEFINE(HAVE_FSEEKO, 1, [Define to 1 because replacement version used.])
+		ac_cv_func_fseeko=yes;;
+	*)
+		AC_FUNC_FSEEKO;;
+esac
 
 # posix_fadvise() is a no-op on Solaris, so don't incur function overhead
 # by calling it, 2009-04-02
@@ -1363,17 +1388,6 @@ AC_CHECK_FUNCS(atexit, [],
                [AC_CHECK_FUNCS(on_exit, [],
                [AC_MSG_ERROR([neither atexit() nor on_exit() found])])])
 
-AC_REPLACE_FUNCS(fseeko)
-case $host_os in
-	# BSD/OS & NetBSD use a custom fseeko/ftello built on fsetpos/fgetpos
-	# Mingw uses macros to access Win32 API calls
-	bsdi*|netbsd*|mingw*)
-		AC_DEFINE(HAVE_FSEEKO, 1, [Define to 1 because replacement version used.])
-		ac_cv_func_fseeko=yes;;
-	*)
-		AC_FUNC_FSEEKO;;
-esac
-
 
 #
 # Pthreads
@@ -1503,10 +1517,16 @@ dnl If there is no native snprintf() or it does not handle the 64-bit type,
 dnl we force our own version of snprintf() to be used instead.
 dnl Note this test must be run after our initial check for snprintf/vsnprintf.
 
+dnl As of Postgres 8.4, we no longer support compilers without a working
+dnl 64-bit type.  But we still handle the case of snprintf being broken.
+
 PGAC_TYPE_64BIT_INT([long int])
 
 if test x"$HAVE_LONG_INT_64" = x"no" ; then
   PGAC_TYPE_64BIT_INT([long long int])
+  if test x"$HAVE_LONG_LONG_INT_64" = x"no" ; then
+    AC_MSG_ERROR([Cannot find a working 64-bit integer type.])
+  fi
 fi
 
 
@@ -1550,10 +1570,10 @@ else
 fi
 
 AC_DEFINE_UNQUOTED(INT64_FORMAT, $INT64_FORMAT,
-                   [Define to the appropriate snprintf format for 64-bit ints, if any.])
+                   [Define to the appropriate snprintf format for 64-bit ints.])
 
 AC_DEFINE_UNQUOTED(UINT64_FORMAT, $UINT64_FORMAT,
-                   [Define to the appropriate snprintf format for unsigned 64-bit ints, if any.])
+                   [Define to the appropriate snprintf format for unsigned 64-bit ints.])
 
 # Now we have checked all the reasons to replace snprintf
 if test $pgac_need_repl_snprintf = yes; then
@@ -1638,20 +1658,6 @@ AC_CHECK_TYPES([int8, uint8, int64, uint64], [], [],
 AC_CHECK_TYPES(sig_atomic_t, [], [], [#include <signal.h>])
 
 
-# If the user did not disable integer datetimes, check that
-# there is a working 64-bit integral type to use.
-if test x"$USE_INTEGER_DATETIMES" = x"yes" &&
-   test x"$HAVE_LONG_INT_64" = x"no" &&
-   test x"$HAVE_LONG_LONG_INT_64" = x"no" &&
-   test x"$HAVE_INT64" = x"no" ; then
-  AC_MSG_ERROR([
-Integer-based datetime support requires a 64-bit integer type,
-but no such type could be found. The --disable-integer-datetimes
-configure option can be used to disable integer-based storage
-of datetime values.])
-fi
-
-
 if test "$PORTNAME" != "win32"
 then
 PGAC_FUNC_POSIX_SIGNALS
@@ -1660,18 +1666,6 @@ if test "$pgac_cv_func_posix_signals" != yes -a "$enable_thread_safety" = yes; t
 Thread-safety requires POSIX signals, which are not supported by this
 operating system.])
 fi
-fi
-
-if test $ac_cv_func_fseeko = yes; then
-AC_SYS_LARGEFILE
-fi
-
-# Check for largefile support (must be after AC_SYS_LARGEFILE)
-AC_CHECK_SIZEOF([off_t])
-
-# If we don't have largefile support, can't handle segsize >= 2GB.
-if test "$ac_cv_sizeof_off_t" -lt 8 -a "$segsize" != "1"; then 
-   AC_MSG_ERROR([Large file support is not enabled. Segment size cannot be larger than 1GB.]) 
 fi
 
 # SunOS doesn't handle negative byte comparisons properly with +/- return
