@@ -127,7 +127,7 @@ static bool		slave_stop_restore = false;
 MemoryContext SlaveContext;
 
 
-static void SlaveSendTablesToMCP(ullong recno);
+static bool SlaveSendTablesToMCP(ullong recno, MemoryContext list_ctx);
 static void SlaveReceiveMessage(SlaveState *state);
 static void SlaveSendTablelist(SlaveState *state);
 static void SlaveSendPromotionMsg(int flag);
@@ -601,6 +601,8 @@ static void
 SlaveSendTablelist(SlaveState *state)
 {
 	ullong	restore_next_recno;
+	MemoryContext	list_ctx;
+	bool			done = false;
 	if (!slave_should_send_tablelist)
 		return;
 	
@@ -620,13 +622,31 @@ SlaveSendTablelist(SlaveState *state)
 	/* reset the flag */
 	slave_should_send_tablelist = false;
 
+	/* 
+	 * We need a persistent context for the table list
+	 * to avoid recreating it with every new transaction.
+	 */
+	list_ctx = AllocSetContextCreate(SlaveContext,
+									 "Tablelist context",
+									 ALLOCSET_SMALL_MINSIZE,
+									 ALLOCSET_SMALL_INITSIZE,
+									 ALLOCSET_SMALL_MAXSIZE);
+
 	/* OK, go ahead */
 	elog(DEBUG2, "sending table list to MCP");
-	StartTransactionCommand();
-	PushActiveSnapshot(GetTransactionSnapshot());
-	SlaveSendTablesToMCP(restore_next_recno);
-	PopActiveSnapshot();
-	CommitTransactionCommand();
+	while (!done)
+	{		
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+		done = SlaveSendTablesToMCP(restore_next_recno, list_ctx);
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+		
+		/* Check for new messages from the forwarder */
+		while (MCPMsgAvailable())
+			SlaveReceiveMessage(state);
+	}
+	MemoryContextDelete(list_ctx);
 }
 
 static void
@@ -861,43 +881,50 @@ SlaveReceiveMessage(SlaveState *state)
 	MCPReleaseMsg(rm);
 }
 
-static void
-SlaveSendTablesToMCP(ullong recno)
+static bool
+SlaveSendTablesToMCP(ullong recno, MemoryContext list_ctx)
 {
 	MCPMsg	   *sm;
-	List	   *relids,
-			   *replicated_rels,
-			   *special_rels = NIL;
 	ListCell   *cell;
-	uint32		flags;
+	List	   *replicated_rels;
+	MemoryContext	old_ctx;
+	uint32			flags = 0;
 	WireBackendTable wt;
 	int				length,
 					total, i;
-
+	
+	static 	bool		interrupted = false;
+	static	List	   *relids = NIL;
+	static	ListCell   *lc = NULL;
+	
 	sm = palloc(sizeof(MCPMsg) + sizeof(WireBackendTableData) + MAX_REL_PATH);
-	flags = MCP_MSG_FLAG_TABLE_LIST_BEGIN;
 
-	relids = get_master_and_slave_replicated_relids(replication_slave_no);
+	if (relids == NIL && !interrupted)
+	{
+		/* Read replicated relation IDs. */
+		old_ctx = MemoryContextSwitchTo(list_ctx);
+		relids = get_master_and_slave_replicated_relids(replication_slave_no);
+		MemoryContextSwitchTo(old_ctx);
+		
+		/* Set flags to indicate the start of the table list */
+		flags = MCP_MSG_FLAG_TABLE_LIST_BEGIN;
+	}
 
 	/*
 	 * Get the list of replicated relations to check if we should request
-	 * dumps for each of them. XXX: The 'dump required' flag should probably be
-	 * in the repl_slave_relations catalog to avoid having several lists of
+	 * dumps for each of them. XXX: The 'dump required' flag should probably 
+	 * be in the repl_slave_relations catalog to avoid having several lists of
 	 * replicated tables.
 	 */
 	replicated_rels = RestoreTableList(REPLICATED_LIST_PATH);
-	
-	/* 
-	 * Make a list of special relations. Special are relations that are not
-	 * receiving data directly like other replicated relations, but used to
-	 * indicate replication of some database object (i.e. large objects, roles)
-	 */
-	special_rels = lappend(special_rels, pstrdup("pg_catalog.pg_largeobject"));
-	special_rels = lappend(special_rels, pstrdup("pg_catalog.pg_authid"));
-	special_rels = lappend(special_rels, pstrdup("pg_catalog.pg_auth_members"));
 
 	/* Send each table to the MCP in a new message */
-	foreach(cell, relids)
+	if (lc == NULL && !interrupted)
+		lc = list_head(relids);
+		
+	interrupted = false;
+		
+	for_each_cell(cell, lc)
 	{
 		Oid         relid,
 					nspid;
@@ -962,39 +989,79 @@ SlaveSendTablesToMCP(ullong recno)
 		relation_close(rel, AccessShareLock);
 
 		flags = 0;
-	}
-
-	/* 
-	 * XXX: HACK
-	 * Send special relations and flush the queue after the last of them is sent
-	 */
-	total = list_length(special_rels);
-	i = 0;
-	foreach(cell, special_rels)
-	{
-		MemSet(sm, 0, sizeof(MCPMsg) + sizeof(WireBackendTableData) +
-		   	   MAX_REL_PATH);
-		sm->flags = MCP_MSG_FLAG_TABLE_LIST; 
-		sm->recno = recno;
 		
-		if (++i == total )
-			sm->flags |= MCP_MSG_FLAG_TABLE_LIST_END;
-		wt = (WireBackendTable) sm->data;
-		/* Never ask for a dump of special relations */
-		wt->raise_dump = TableNoDump;
-		length = snprintf(wt->relpath, MAX_REL_PATH, "%s",
-					  	 (char *)lfirst(cell));
-		sm->datalen = sizeof(WireBackendTableData) + length;
-
-		elog(DEBUG3, "sending table %s (raise dump: %d) to MCP server",
-		 	 wt->relpath, wt->raise_dump);
-
-		MCPSendMsg(sm, (i == total) ? true: false);
-
+		/* 
+		 * If the forwarder sent a message, go fetch it 
+		 * to avoid the forwarder slave process startvation.
+		 */
+		if (mcpWaitTimed(MyProcPort, true, false, 0))
+		{
+			interrupted = true;
+			/* Send all the pending data */
+			MCPFlush();
+			break;
+		}
 	}
-	pfree(sm);
-	list_free_deep(replicated_rels);
-	list_free_deep(special_rels);
+	/* Don't go further unless we have finished sending ordinary tables */
+	if (!interrupted)
+	{
+		List   *special_rels = NIL;
+		
+		/* 
+		 * Make a list of special relations. Special are relations that 
+		 * are not receiving data directly like other replicated relations, 
+		 * but used to indicate replication of some database object (i.e. 
+		 * large objects, roles)
+		 */
+		special_rels = lappend(special_rels, 
+							   pstrdup("pg_catalog.pg_largeobject"));
+		special_rels = lappend(special_rels, 
+							   pstrdup("pg_catalog.pg_authid"));
+		special_rels = lappend(special_rels, 
+							   pstrdup("pg_catalog.pg_auth_members"));
+		
+		/* 
+	 	 * XXX: HACK Send special relations and flush 
+	 	 * the queue after the last of them is sent
+	 	 */
+		total = list_length(special_rels);
+		i = 0;
+		foreach(cell, special_rels)
+		{
+			MemSet(sm, 0, sizeof(MCPMsg) + sizeof(WireBackendTableData) +
+		   	   	   MAX_REL_PATH);
+			sm->flags = MCP_MSG_FLAG_TABLE_LIST; 
+			sm->recno = recno;
+		
+			if (++i == total )
+				sm->flags |= MCP_MSG_FLAG_TABLE_LIST_END;
+			wt = (WireBackendTable) sm->data;
+			/* Never ask for a dump of special relations */
+			wt->raise_dump = TableNoDump;
+			length = snprintf(wt->relpath, MAX_REL_PATH, "%s",
+					  	 	 (char *)lfirst(cell));
+			sm->datalen = sizeof(WireBackendTableData) + length;
+
+			elog(DEBUG3, "sending table %s (raise dump: %d) to MCP server",
+		 	 	 wt->relpath, wt->raise_dump);
+
+			MCPSendMsg(sm, (i == total) ? true: false);
+		}
+		/* Cleanup */
+		
+		list_free_deep(special_rels);
+		lc = NULL;
+		relids = NIL;
+	}
+	else
+	{
+		elog(DEBUG3, "Sending of table list was interrupted by the new data"
+					 "from the master");
+		/* Resume from the next table after the last one sent */
+		lc = lnext(cell);
+	}					
+	pfree(sm);	
+	return !interrupted;
 }
 
 /*
