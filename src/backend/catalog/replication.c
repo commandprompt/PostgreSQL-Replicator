@@ -20,6 +20,9 @@
 #include "catalog/indexing.h"
 #include "catalog/mammoth_indexing.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_authid.h"
+#include "catalog/pg_auth_members.h"
+#include "catalog/pg_largeobject.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/repl_acl.h"
 #include "catalog/repl_authid.h"
@@ -103,6 +106,23 @@ get_catalog_relids(List *relids)
 	relids = lcons_oid(ReplAclRelationId, relids);
 	relids = lcons_oid(ReplSlaveRolesRelationId, relids);
 
+	return relids;
+}
+
+/* 
+ * Make a list of special relations. Special are relations that 
+ * are not receiving data directly like other replicated relations, 
+ * but used to indicate replication of some database object (i.e. 
+ * large objects, roles)
+ */
+
+List *
+get_special_relids(List *relids)
+{
+	relids = lcons_oid(LargeObjectRelationId, relids);
+	relids = lcons_oid(AuthIdRelationId, relids);
+	relids = lcons_oid(AuthMemRelationId, relids);
+	
 	return relids;
 }
 
@@ -237,7 +257,7 @@ get_slave_replicated_relids(int slave)
  * for catalog access
  */
 List *
-get_master_and_slave_replicated_relids(int slaveno)
+get_master_and_slave_replicated_relids(int slaveno, bool include_catalogs)
 {
     Relation    repl_rels;
     List       *relids = NIL;
@@ -294,8 +314,11 @@ get_master_and_slave_replicated_relids(int slaveno)
     }
     heap_close(repl_rels, AccessShareLock);
 
-    /* Append system catalog relation */
-    relids = get_catalog_relids(relids);
+	if (include_catalogs)
+	{
+    	/* Append system catalog relation */
+    	relids = get_catalog_relids(relids);
+	}
     return relids;
 }
 

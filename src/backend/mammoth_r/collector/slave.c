@@ -215,7 +215,7 @@ make_new_replicated_list(List *tl_old, int slaveno)
 	tl_new = NIL;
 
 	/* Acquire a list of replicated relations */
-	relids = get_master_and_slave_replicated_relids(slaveno);
+	relids = get_master_and_slave_replicated_relids(slaveno, false);
 
 	/* Add relations to the replicated list */
 	foreach(cell, relids)
@@ -233,13 +233,10 @@ make_new_replicated_list(List *tl_old, int slaveno)
         nspid = get_rel_namespace(relid);
 
         /* 
-         * Skip tables from pg_catalog namespace. We don't need
-         * to request per-table dumps for them. Also skip invalid
-         * namespace and relation oids.
+         * Skip invalid namespace and relation oids.
          */
          if (relid == InvalidOid || 
-             nspid == InvalidOid || 
-             IsSystemNamespace(nspid))
+             nspid == InvalidOid)
             continue;
 
 
