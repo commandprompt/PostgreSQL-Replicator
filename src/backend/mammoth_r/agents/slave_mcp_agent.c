@@ -440,14 +440,14 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 			SlaveSendAck(state);
 
 		/* Now we can restore the messages we accumulated */
-		for (;!slave_stop_restore;)
+		while (!slave_stop_restore)
 		{
 			SlaveRestoreData(state);
 
-			if (slave_should_send_tablelist)
-				SlaveSendTablelist(state);
-			else
+			if (!slave_should_send_tablelist)
 				break;
+
+			SlaveSendTablelist(state);
 		}
 
 		DISPLAY_SLAVE_PROMOTION_STATES(DEBUG2);
