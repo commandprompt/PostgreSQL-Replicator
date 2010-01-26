@@ -62,8 +62,8 @@ typedef struct MCPMsg
 #define MCP_MSG_FLAG_REQFULL		(1<<14)	/* Full dump request */
 #define MCP_MSG_FLAG_ACK			(1<<16)	/* ACK previous message */
 /* 17 unused */
+/* 18 unused */
 
-#define MCP_MSG_FLAG_TABLE_LIST_BEGIN (1<<18) /* table list begin */
 #define MCP_MSG_FLAG_TABLE_LIST		(1<<19)	/* table list element */
 #define MCP_MSG_FLAG_TABLE_LIST_END (1<<20)	/* end of table list */
 /* 21 unused */

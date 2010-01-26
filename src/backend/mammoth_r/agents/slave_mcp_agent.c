@@ -888,7 +888,6 @@ SlaveSendTablesToMCP(ullong recno, MemoryContext list_ctx)
 	ListCell   *cell;
 	List	   *replicated_rels;
 	MemoryContext	old_ctx;
-	uint32			flags = 0;
 	WireBackendTable wt;
 	int				length,
 					total, i;
@@ -905,9 +904,6 @@ SlaveSendTablesToMCP(ullong recno, MemoryContext list_ctx)
 		old_ctx = MemoryContextSwitchTo(list_ctx);
 		relids = get_master_and_slave_replicated_relids(replication_slave_no);
 		MemoryContextSwitchTo(old_ctx);
-		
-		/* Set flags to indicate the start of the table list */
-		flags = MCP_MSG_FLAG_TABLE_LIST_BEGIN;
 	}
 
 	/*
@@ -953,7 +949,7 @@ SlaveSendTablesToMCP(ullong recno, MemoryContext list_ctx)
 		MemSet(sm, 0, sizeof(MCPMsg) + sizeof(WireBackendTableData) +
 			   MAX_REL_PATH);
 
-		sm->flags = MCP_MSG_FLAG_TABLE_LIST | flags;
+		sm->flags = MCP_MSG_FLAG_TABLE_LIST;
 		sm->recno = recno;
 
 		wt = (WireBackendTable) sm->data;
@@ -988,8 +984,6 @@ SlaveSendTablesToMCP(ullong recno, MemoryContext list_ctx)
 		/* Close target relation */
 		relation_close(rel, AccessShareLock);
 
-		flags = 0;
-		
 		/* 
 		 * If the forwarder sent a message, go fetch it 
 		 * to avoid the forwarder slave process startvation.

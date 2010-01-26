@@ -327,8 +327,6 @@ MCPMsgAsString(char *prefix, MCPMsg *m)
 		strcat(flag_buf, "REQFULL ");
 	if (m->flags & MCP_MSG_FLAG_ACK)
 		strcat(flag_buf, "ACK ");
-	if (m->flags & MCP_MSG_FLAG_TABLE_LIST_BEGIN)
-		strcat(flag_buf, "TABLE_BEGIN ");
 	if (m->flags & MCP_MSG_FLAG_TABLE_LIST)
 		strcat(flag_buf, "TABLE_LIST ");
 	if (m->flags & MCP_MSG_FLAG_TABLE_LIST_END)

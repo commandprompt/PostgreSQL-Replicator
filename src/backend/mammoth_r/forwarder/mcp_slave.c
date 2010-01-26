@@ -977,9 +977,6 @@ ReceiveSlaveMessage(SlaveStatus *status)
 		LOG_PROMOTION_STATES(DEBUG2, status);
 	}
 
-	if (rm->flags & MCP_MSG_FLAG_TABLE_LIST_BEGIN)
-		;	/* nothing to do */
-
 	/* Receive single table name from slave */
 	if (rm->flags & MCP_MSG_FLAG_TABLE_LIST)
 		RecvSlaveTable(status, rm);
