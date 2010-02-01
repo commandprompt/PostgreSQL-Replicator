@@ -129,16 +129,14 @@ get_special_relids(List *relids)
 /*
  * get_replicated_relids
  * 		Get the list of Oids of relations marked to be replicated in the
- * 		master, according to the passed snapshot (which should typically be
- * 		CurrentSnapshot or something equivalent.)
+ * 		master, according to SnapshotNow semantics.
  *
  * This is quite straightforward -- scan pg_catalog.repl_relations and return
  * the mentioned relids that have enable=true.  Note: we do not include the
  * replication catalogs in this list.
- * XXX: can we use SnapshotNow and remove the only parameter?
  */
 List *
-get_replicated_relids(Snapshot snap)
+get_replicated_relids(void)
 {
 	Relation	rels;
 	HeapScanDesc scan;
@@ -146,7 +144,7 @@ get_replicated_relids(Snapshot snap)
 	List	   *relids = NIL;
 
 	rels = heap_open(ReplRelationsId, AccessShareLock);
-	scan = heap_beginscan(rels, snap, 0, NULL);
+	scan = heap_beginscan(rels, SnapshotNow, 0, NULL);
 
 	while (HeapTupleIsValid(tuple = heap_getnext(scan, ForwardScanDirection)))
 	{
@@ -185,7 +183,6 @@ get_replicated_relids(Snapshot snap)
  *
  * Here we scan pg_catalog.repl_slave_relations and look for tuples with the
  * given slave ID.
- * MERGE: SerializableSnapshot was replaced by usage of SnapshotNow for catalog access.
  */
 List *
 get_slave_replicated_relids(int slave)
@@ -253,8 +250,6 @@ get_slave_replicated_relids(int slave)
 /*
  * Return list of oids for relations replicated by both master and the slave
  * with a gived ID.
- * MERGE: GetTransactionSnapshot call was replaced by usage of SnapshotNow
- * for catalog access
  */
 List *
 get_master_and_slave_replicated_relids(int slaveno, bool include_catalogs)
