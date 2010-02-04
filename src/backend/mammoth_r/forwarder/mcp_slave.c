@@ -365,7 +365,7 @@ SlaveCorrectQueue(SlaveStatus *status)
 		{
 			/* This is case (2) */
 			MCPHostsSetHostRecno(status->ss_hosts, McphHostRecnoKindSendNext,
-								 status->ss_hostno, initial_recno + 1);
+								 status->ss_hostno, initial_recno);
 			MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQSynced);
 		}
 		else
@@ -880,6 +880,9 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		if (next_recno == recno)
 			/* master hasn't moved it -- do so ourselves */
 			recno = MCPHostsNextTx(h, hostno, last_recno);
+		else
+			/* master has moved it - start from the new recno */
+			recno = next_recno;
 		LWLockRelease(MCPHostsLock);
 
 		/* If the slave sent a message, go fetch it */

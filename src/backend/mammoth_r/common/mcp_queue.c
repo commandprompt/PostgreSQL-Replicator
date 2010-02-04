@@ -294,6 +294,7 @@ mcpq_bootstrap(MCPQueue *q)
 	hdr.lrecno = InvalidRecno;
 	hdr.vrecno = InvalidRecno;
 	hdr.empty = true;
+	hdr.sync = MCPQUnsynced;
 	hdr.system_identifier = 0;
 	hdr.enqueue_timestamp = (time_t) 0;
 	hdr.dequeue_timestamp = (time_t) 0;
