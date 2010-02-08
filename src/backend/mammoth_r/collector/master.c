@@ -285,11 +285,7 @@ PGRDumpTables(MCPQueue *queue)
 
 	MemoryContextSwitchTo(dumpcxt);
 	
-	snap = RegisterSnapshot(GetTransactionSnapshot());
-	
-	relids = get_replicated_relids(snap);
-	
-	UnregisterSnapshot(snap);
+	relids = get_replicated_relids();
 
 	foreach(cell, relids)
 	{

@@ -18,11 +18,11 @@
 
 extern void repl_open_lo_columns(Relation *rel, Relation *index, LOCKMODE mode);
 extern void repl_open_slave_lo_refs(Relation *rel, Relation *index, LOCKMODE mode);
-extern List *get_replicated_relids(Snapshot snap);
+extern List *get_replicated_relids(void);
 extern List *get_catalog_relids(List *relids);
 extern List *get_special_relids(List *relids);
 extern List *get_slave_replicated_relids(int slave);
-extern List *get_master_and_slave_replicated_relids(int slave, bool catalogs);
+extern List *get_master_and_slave_replicated_relids(int slave, bool include_catalogs);
 extern List *get_relation_lo_columns(Relation rel);
 extern bool RelationNeedsReplication(Relation rel);
 extern Oid get_pg_repl_lo_columns_oid(bool failOK);
