@@ -123,6 +123,8 @@ static bool		slave_should_send_tablelist;
  * if this flag it set.
  */
 static bool		slave_stop_restore = false;
+/* an indicator that the slave has just resumed the restore process */
+static bool 	slave_restore_resumed = false;
 
 MemoryContext SlaveContext;
 
@@ -402,8 +404,18 @@ ReplicationSlaveMain(MCPQueue *q, int hostno)
 		/* Prepare to sleep; set a timeout if the configuration requires it */
 		if (batch_mode)
 			secs = time(NULL) + replication_slave_batch_mode_timeout;
-		else
+		else if (!slave_restore_resumed)
 			secs = (time_t) -1;
+		else
+		{
+			/* 
+			 * If restore process has been resumed recently, then we might
+			 * have data in the queue waiting to be restored; thus avoid
+			 * sleeping on a socket for this round.
+			 */
+			secs = (time_t) 0;
+			slave_restore_resumed = false;
+		}
 
 		ret = mcpWaitTimed(MyProcPort, true, false, secs);
 		if (ret < 0)
@@ -1169,5 +1181,6 @@ SlaveProcessSignals(SlaveState *state)
 		elog(LOG, "Data restore resumed");
 		ReplLocalSignalData.resume = false;
 		slave_stop_restore = false;
+		slave_restore_resumed = true;
 	}
 }
