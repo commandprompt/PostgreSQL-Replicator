@@ -83,8 +83,7 @@ sub run
         $slave1->stop;
 
         # now do evil. Send updates for the tuples on master which slaves are
-        # not aware of. This should raise errors on slaves and produce full
-        # dump.
+        # not aware of. This should raise errors on slaves
 		$self->execute({
 				servers => [$master],
 				string => 'update presence set present = TRUE where present = FALSE',
@@ -118,11 +117,17 @@ sub run
         # checks since we don't have slaves yet.
         sleep(1);
 
-        # now stop master and start slaves. They should raise an error and ask for a
-        # full dump. That request won't be satisfied since we have no master.
+        # now stop master and start slaves. They should raise an error.
         $master->stop;
         $slave0->start(1);
         $slave1->start(1);
+
+		# command slaves to request the dump. This should produce full
+		# dump request, that won't be satisfied since the master is offline.
+		$self->execute ({
+				file => "request_dump.sql",
+				servers => [$slave0, $slave1]
+		});
 
         # the essence of this test. Check whether we don't have the latest record on the
         # slaves. It should be skipped because the queue is not in sync after full
@@ -148,6 +153,14 @@ sub run
         # start master and make sure that the data is now equal
         $master->start(1);
 
+		# should be enough for the dump to reach slaves
+		sleep(3);
+		# resume the restore process on slaves
+		$self->execute({
+				file => "resume_restore.sql",
+				servers => [$slave0, $slave1]
+		});
+		
         MammothTest::wait_replication_complete({
         		master => $master,
         		slaves => [$slave0, $slave1]
