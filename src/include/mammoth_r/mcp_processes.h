@@ -122,6 +122,5 @@ extern void FullDumpSetEndRecno(ullong recno);
  
 extern void WriteForwarderStateFile(void);
 extern void ReadForwarderStateFile(void);
-extern void RemoveForwarderStateFile(void);
 
 #endif /* MCP_PROCESSES_H */

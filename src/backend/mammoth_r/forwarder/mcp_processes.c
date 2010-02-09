@@ -289,22 +289,3 @@ ReadForwarderStateFile(void)
 
 	pfree(localDumpCtl);
 }
-
-/* Delete forwarder state file if it exists */
-void
-RemoveForwarderStateFile(void)
-{
-	MCPFile *mf_state;
-	char    *filename;
-	
-	elog(DEBUG3, "Removing forwarder state file");
-	
-	filename = STATE_FILE_PATH;
-	mf_state = MCPFileCreate(filename);
-
-	if (MCPFileExists(mf_state))
-		MCPFileUnlink(mf_state);
-	
-	/* release memory */
-	MCPFileDestroy(mf_state);
-}

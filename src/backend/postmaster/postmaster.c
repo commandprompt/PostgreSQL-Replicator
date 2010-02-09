@@ -3252,12 +3252,6 @@ PostmasterStateMachine(void)
 
 		shmem_exit(1);
 		reset_shared(PostPortNumber);
-		/* 
-		 * in case we run a forwarder - reset its state file to avoid loading
-		 * bogus data next time we read this file.
-		 */ 
-		if (ForwarderEnable)
-			RemoveForwarderStateFile();
 
 		StartupPID = StartupDataBase();
 		Assert(StartupPID != 0);
