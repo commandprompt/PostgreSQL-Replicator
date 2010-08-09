@@ -201,16 +201,7 @@ PGRCollectTxCommit(CommitDumpMode dump_mode)
 		{
 			/* Check for different flavors of dump */
 			if (dump_mode & CommitFullDumpStart)
-			{
 				flags |= MCP_QUEUE_FLAG_DUMP_START;
-#ifdef NOT_USED
-				/* 
-				 * TODO: put truncate flags for a full dump if it's type is 
-				 * not refresh
-				 */
-				flags |= MCP_QUEUE_FLAG_TRUNC;
-#endif
-			}
 			if (dump_mode & CommitFullDump)
 				flags |= MCP_QUEUE_FLAG_FULL_DUMP;
 			if (dump_mode & CommitCatalogDump)

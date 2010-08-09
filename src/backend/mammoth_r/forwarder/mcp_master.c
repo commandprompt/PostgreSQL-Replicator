@@ -57,8 +57,8 @@ typedef struct MasterState
 	 "unknown")
 
 #define LOG_PROMOTION_STATE(elevel, state) \
-	elog(elevel, "MCP Master promotion state: %s", \
-		 MCPMasterPromotionAsString(state->ms_promotion))
+	(elog(elevel, "MCP Master promotion state: %s", \
+		 MCPMasterPromotionAsString(state->ms_promotion)))
 
 static void McpMasterLoop(MasterState *state);
 static void MCPMasterFinishPromotion(void);
@@ -478,30 +478,6 @@ MCPMasterMessageHook(bool committed, MCPMsg *rm, void *state_arg)
 			skip = true;
 		}
 	
-		/*
-		 * XXX: currently neither ReplicationQueueLock nor HostsLock is held
-		 * during truncate, which might in theory cause a slave process to
-		 * try sending the data being truncated. This should be fixed by holding
-		 * a lock, perhaps a new one called ReplicationQueueTruncateLock.
-		 */
-		if (rm->flags & MCP_QUEUE_FLAG_TRUNC)
-		{
-			ullong recno = *((ullong *)rm->data);
-	
-			elog(DEBUG2, "MCP Receive TRUNC => TRUNC recno: "
-				 UNI_LLU", SYNC: 1,  mcp_dump_request = false,"
-				 "mcp_sync_request = false, mcp_request_in_process = 0",
-				 recno);
-	
-			MCPHostsCleanup(state->ms_hosts, state->ms_queue, recno);
-			
-			/*
-			 * If truncate is a standalone message - don't put it to the queue.
-			 */
-			if (rm->flags == MCP_QUEUE_FLAG_TRUNC)
-				skip = true;
-		}
-
 		if (rm->flags & MCP_MSG_FLAG_PROMOTE_CANCEL)
 		{
 			elog(WARNING, "Received promotion cancel request from master");

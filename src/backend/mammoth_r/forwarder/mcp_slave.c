@@ -116,6 +116,7 @@ HandleSlaveConnection(MCPQueue *q, MCPHosts *h, int slave_no, pg_enc encoding)
 {
 	SlaveStatus *status;
 	bool		request_dump;
+	uint32		flags;
 
 	set_ps_display("startup", false);
 
@@ -173,9 +174,16 @@ HandleSlaveConnection(MCPQueue *q, MCPHosts *h, int slave_no, pg_enc encoding)
 	/* find out if it needs a dump */
 	request_dump = false;
 	LWLockAcquire(MCPHostsLock, LW_SHARED);
+	flags = MCPHostsGetFlags(h, status->ss_hostno);
+	
+	/* 
+	 * Determine whether a new dump is required. 
+	 * See comments in check_sync_status for details.
+	 */
 	if (MCPHostsGetHostRecno(h, McphHostRecnoKindSendNext,
 							 status->ss_hostno) == InvalidRecno ||
-		MCPHostsGetSync(h, status->ss_hostno) == MCPQUnsynced)
+	   (MCPHostsGetSync(h, status->ss_hostno) == MCPQUnsynced &&
+	   !(flags & MCP_HOST_FLAG_ACCEPT_DATA_DURING_DUMP)))					
 		request_dump = true;
 	LWLockRelease(MCPHostsLock);
 
@@ -387,10 +395,18 @@ static void
 check_sync_status(SlaveStatus *status)
 {
 	bool	unsynced = false;
+	uint32	flags;
 
+	/* 
+	 * Don't call for a new full dump if the queue is desync, but the flag
+	 * is set that indicates that slave is in the middle of sending an
+	 * existing dump.
+	 */
 	LWLockAcquire(MCPHostsLock, LW_SHARED);
-	if (MCPHostsGetSync(status->ss_hosts, status->ss_hostno) == MCPQUnsynced)
-		unsynced = true;
+	flags = MCPHostsGetFlags(status->ss_hosts, status->ss_hostno);
+	if ((MCPHostsGetSync(status->ss_hosts, status->ss_hostno) == MCPQUnsynced)
+		&& !(flags & MCP_HOST_FLAG_ACCEPT_DATA_DURING_DUMP))
+			unsynced = true;
 	LWLockRelease(MCPHostsLock);
 
 	if (unsynced)
@@ -555,16 +571,116 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 {
 	ListCell    *cell;
 	SlaveStatus *state;
-	bool	replicate_tx;
+	MCPHosts	*hosts;
+	MCPQSync	 sync;
+	bool	replicate_tx,
+			early_skip;
+	int32	hostno,
+			host_flags;
+
    
 	state = (SlaveStatus *) status_arg;
+	hosts = state->ss_hosts;
+	hostno = state->ss_hostno;
 
-    replicate_tx = false;
-
-	/* Always replicate CATALOG_DUMP transactions */
-	if (hdr->dh_flags & MCP_QUEUE_FLAG_CATALOG_DUMP)
-        replicate_tx = true;
-
+	replicate_tx = early_skip = false;
+	
+	
+	/* Upon receiving dump start there are 2 possibilities:
+	 *  - host is in sync, all dump transactions intil the end of dump
+	 *	 should be skipped.
+	 *  - host in not in sync, start sending all transactions.
+	 */
+	if (hdr->dh_flags & MCP_QUEUE_FLAG_DUMP_START) 
+	{
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+		sync = MCPHostsGetSync(hosts, hostno);
+		if (sync == MCPQSynced)
+			MCPHostsSetFlags(hosts, hostno, MCP_HOST_FLAG_SKIP_DUMP);
+		else
+			MCPHostsSetFlags(hosts, hostno, 
+							 MCP_HOST_FLAG_ACCEPT_DATA_DURING_DUMP);
+		LWLockRelease(MCPHostsLock);
+	}
+	
+	/* 
+	 * Clear flag bits set at dump start and set the queue to sync if it was
+	 * not in sync previously.
+	 */
+	if (hdr->dh_flags & MCP_QUEUE_FLAG_DUMP_END) 
+	{
+		int32 flags, 
+			  old_flags;
+		
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+		
+		old_flags = flags = MCPHostsGetFlags(hosts, hostno);
+		flags &= ~(MCP_HOST_FLAG_SKIP_DUMP| 
+				   MCP_HOST_FLAG_ACCEPT_DATA_DURING_DUMP);
+		MCPHostsSetFlags(hosts, hostno, flags);
+		sync = MCPHostsGetSync(hosts, hostno);
+		
+		LWLockRelease(MCPHostsLock);
+		
+		if (sync != MCPQSynced)
+		{
+			elog(DEBUG4, "Host %d sync: %s -> MCPQSynced", 
+                 hostno, MCPQSyncAsString(sync));
+			LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+			MCPHostsSetSync(hosts, hostno, MCPQSynced);
+			LWLockRelease(MCPHostsLock);
+		}
+		/* 
+		 * Use the value of host's flags before this transaction
+		 * to decide whether to skip it.
+		 */
+		if (old_flags & MCP_HOST_FLAG_SKIP_DUMP)
+			goto final;
+	}
+	
+	
+	/* 
+	 * Decide to skip this transaction:
+	 * - if slave is no in sync and this this transaction is not a part of
+	 *	 the full dump.
+	 * - if this transaction belongs to the full dump and SKIP_DUMP flag is set.
+	 * One important exclusion is that we avoid to skip TABLE DUMP transactions.
+	 * The special case, that leads to this decision, is the following:
+	 * Consider the new table enabled for replication for the particular slave
+	 * during full dump, between the moment the catalog dump transaction is
+	 * collected and the moment snapshot is taken for getting the list of
+	 * table dumps to collect. Now, a catalog dump, that is not a part of the
+	 * full dump, related to recent enable replication, would indicate that
+	 * the corresponding table should be replicated by the slave. On the other
+	 * hand, the table dump for this table, as a part of the full dump, will
+	 * be skipped, and since it goes after the catalog dump, the slave won't
+	 * ask for additional table dumps. To avoid this we have to check every
+	 * table dump, whether it is part of the full dump or not.
+	 */
+	LWLockAcquire(MCPHostsLock, LW_SHARED);	
+	sync = MCPHostsGetSync(hosts, hostno);
+	host_flags = MCPHostsGetFlags(hosts, hostno); 
+	
+	if ((sync != MCPQSynced && MessageTypeIsData(hdr->dh_flags) &&
+		!(host_flags & MCP_HOST_FLAG_ACCEPT_DATA_DURING_DUMP)) 
+		||
+		(MessageTypeBelongsToFullDump(hdr->dh_flags) &&
+		!(hdr->dh_flags & MCP_QUEUE_FLAG_TABLE_DUMP) &&
+		(host_flags & MCP_HOST_FLAG_SKIP_DUMP)))
+			early_skip = true;
+						
+	LWLockRelease(MCPHostsLock);
+	
+	if (early_skip)
+	{
+		elog(DEBUG3, "Early skip condition was triggered");
+		elog(DEBUG3, "Is message dump? %d", MessageTypeBelongsToFullDump(hdr->dh_flags));
+		elog(DEBUG3, "Is message data? %d", MessageTypeIsData(hdr->dh_flags));
+		elog(DEBUG3, "Host's flags: %d", host_flags);
+		goto final;
+	}
+	
+	/* Normal processing of message flags */	
     if (hdr->dh_flags & MCP_QUEUE_FLAG_DUMP_START)
     {
         ListCell   *cell;
@@ -596,7 +712,15 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
         replicate_tx = true;
     }
 
-	/* Check if some tables were not received during full dump */
+	/* Always replicate CATALOG_DUMP transactions */
+	if (hdr->dh_flags & MCP_QUEUE_FLAG_CATALOG_DUMP)
+        replicate_tx = true;
+	
+
+	/* Check if some tables were not received during full dump. Never complain
+	 * about pg_catalog. tables, cause they are not necesssary included in 
+	 * every dump.
+	 */
     if (hdr->dh_flags & MCP_QUEUE_FLAG_DUMP_END)
     {
         ListCell   *cell;
@@ -615,9 +739,12 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
             if (cur->on_slave[state->ss_hostno] && 
                 cur->slave_req[state->ss_hostno])
             {
-                elog(WARNING, 
-                     "data for relation %s has not been received during FULL DUMP",
-                     cur->relpath);
+				if (strncmp(cur->relpath, "pg_catalog", 10) == 0)
+					cur->slave_req[state->ss_hostno] = false;
+				else
+                	elog(WARNING, 
+                     	 "data for relation %s has not been received during FULL DUMP",
+                     	 cur->relpath);
             }
         }
 
@@ -765,7 +892,7 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 		else
 			elog(DEBUG2, "data transaction not replicated");
 	}
-
+final:
 	return replicate_tx;
 }
 
@@ -791,24 +918,6 @@ SlaveMessageHook(TxDataHeader *hdr, void *status_arg, ullong recno)
 			 status->ss_hostno, status->ss_wait_list_recno);		
 	}
 
-	/* If this is the start of a dump, mark the slave as synced */
-    if (hdr->dh_flags & MCP_QUEUE_FLAG_DUMP_START)
-    {
-        MCPQSync    sync;
-
-        Assert(!LWLockHeldByMe(MCPHostsLock));
-
-        LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
-        sync = MCPHostsGetSync(status->ss_hosts, status->ss_hostno);
-        if (sync != MCPQSynced)
-            MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQSynced);
-        LWLockRelease(MCPHostsLock);
-
-        if (sync != MCPQSynced)
-            elog(DEBUG4, "Host %d sync: %s -> MCPQSynced", 
-                 status->ss_hostno, MCPQSyncAsString(sync)); 
-    }
-
 	/* 
 	 * Avoid sending table lists on the slave. We have to send all the data
 	 * before dh_listoffset to accomplish this. But first we need to change
@@ -829,41 +938,13 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 	ullong		last_recno;
 	uint32		hostno = status->ss_hostno;
 	MCPHosts   *h = status->ss_hosts;
-    MCPQSync    host_sync;
 
 	set_ps_display("sending messages to slave", false);
 
 	/* Get recno of the transaction to send */
 	LWLockAcquire(MCPHostsLock, LW_SHARED);
 	recno = MCPHostsGetHostRecno(h, McphHostRecnoKindSendNext, hostno);
-    host_sync = MCPHostsGetSync(h, hostno);
 	LWLockRelease(MCPHostsLock);
-
-    /* 
-	 * If this host is not in sync, the only thing that we can validly send
-	 * is a dump.  So if we're pointing at something that's not a dump, bail
-	 * out here and let the caller fix things.
-     */
-    if (host_sync != MCPQSynced)
-    {
-        ullong dump_recno;
-
-        LWLockAcquire(MCPServerLock, LW_SHARED);
-		dump_recno = FullDumpGetStartRecno();
-        LWLockRelease(MCPServerLock);
-
-		if (dump_recno == InvalidRecno)
-		{
-			elog(DEBUG2, "no dump in queue, host unsynced, abort send");
-			return;
-		}
-		
-		if (dump_recno != recno)
-        {
-            elog(DEBUG2, "not sending a dump, host unsynced, abort send");
-            return;
-        }
-    }
 
 	/* Get recno of the last transaction to send */
 	LockReplicationQueue(status->ss_queue, LW_SHARED);
@@ -873,7 +954,6 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 	while (recno <= last_recno && TXLOGIsCommitted(recno))
 	{
 		ullong	next_recno;
-		bool	doit;
 
 		/* Send the current transaction */
 		elog(LOG, "sending transaction "UNI_LLU" to slave", recno);
@@ -881,30 +961,6 @@ SlaveSendQueuedMessages(SlaveStatus *status)
 		SendQueueTransaction(status->ss_queue, recno,
 							 SlaveTableListHook, (void *) status,
 							 SlaveMessageHook, (void *) status);
-
-		/*
-		 * Set host's sync state to MCPQSynced after sending dump.
-		 *
-		 * XXX It would be better to check the transaction flags to detect the
-		 * dump, since dump_recno points to the last dump in queue. However, we
-		 * never have more than one dump, because upon receiving a TRUNC
-		 * message (at the start of any dump) the master process removes the
-		 * previous dump from the queue.
-		 *
-		 * XXX the other reason it would be better to use the flags is that we
-		 * wouldn't have to grab MCPServerLock here.
-		 */
-		doit = false;
-		LWLockAcquire(MCPServerLock, LW_SHARED);
-		if (recno == FullDumpGetStartRecno())
-			doit = true;
-		LWLockRelease(MCPServerLock);
-		if (doit)
-		{
-			LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
-			MCPHostsSetSync(h, hostno, MCPQSynced);
-			LWLockRelease(MCPHostsLock);
-		}
 
 		/* refresh our knowledge about queue end */
 		LockReplicationQueue(status->ss_queue, LW_SHARED);
@@ -1139,14 +1195,12 @@ ProcessSlaveDumpRequest(SlaveStatus *status)
 	if (stored_dump_recno != InvalidRecno && host_vrecno < stored_dump_recno)
 	{
 		/*
-		 * Skip all messages up to the dump start point.  The queue is set to
-		 * sync state, to avoid further dump requests.
+		 * Skip all messages up to the dump start point. The queue will be
+		 * sent to a sync state when the dump will be sent to the slave.
 		 */
 		elog(DEBUG2, "using dump stored on MCP server");
 
 		MCPHostsSetHostRecno(h, McphHostRecnoKindSendNext, hostno, stored_dump_recno);
-		MCPHostsSetSync(h, hostno, MCPQSynced);
-
 		result = false;
 	}
 	else

@@ -46,6 +46,7 @@ SendQueueTransaction(MCPQueue *q,
 	int			flags;
 	MCPMsg	   *sm;
 	TxDataHeader	*hdr;
+	bool		skip = false;
 
 	/* Make sure we are not trying to send something not in the queue */
 #ifdef ASSERT_ENABLED
@@ -83,63 +84,62 @@ SendQueueTransaction(MCPQueue *q,
 	if (tablelist_hook != NULL)
 	{
 		List   *TxTableList;
-		bool	skip;
 		MCPFile *file = MCPQueueGetDatafile(q);
 		off_t	pos = MCPFileSeek(file, 0, SEEK_CUR);
 
 		TxTableList = TxReadTableList(q, recno, hdr);
 
-		if (TxTableList != NIL)
+		/* 
+		 * HACK: call table list hook for full dump even if table list
+		 * is NULL. DUMP messages should be examined as early as possible
+		 * to determine whether we should skip them. These checks should
+		 * be moved out of table list hook, probably to the new dump
+		 * messages hook.
+		 */
+		if (TxTableList != NIL || MessageTypeBelongsToFullDump(flags))
 		{
 			/* Check if we don't have to send current transaction */
 			skip = ! tablelist_hook(hdr, TxTableList, tablelist_arg);
 
 			list_free_deep(TxTableList);
-		
-			/* Never skip dump transactions */ 
-			if (skip && !MessageTypeIsDump(flags))
-			{
-				elog(DEBUG3, "skipping transaction "UNI_LLU" size "UINT64_FORMAT,
-		 		 	recno, (ullong) txsize);
-				goto final;
-			}
 
 			/* Return to the original position in data file */
 			MCPFileSeek(file, pos, SEEK_SET);
+		} 
+		else 
+		{
+			ereport(DEBUG2,
+					(errmsg("table list hook not called"),
+					 errdetail("Transaction does not have a table list.")));
 		}
 	}
 
 	/* Call the message hook if the caller specified one */
-	if (message_hook != NULL)
+	if (message_hook != NULL && !skip)
 		txsize = message_hook(hdr, message_arg, recno);
 
-	/* 
-	 * HACK: If we see FULL DUMP transaction - first send TRUNCATE 
-	 * as a non-queue message. This message would contain record
-	 * number to truncate to in its data part.
-	 */
-	if (flags & MCP_QUEUE_FLAG_DUMP_START)
-	{
-		MCPMsg *msg = palloc0(sizeof(MCPMsg) + sizeof(recno) - 1);
-
-		msg->recno = InvalidRecno;
-		msg->flags |= MCP_QUEUE_FLAG_TRUNC;
-		msg->datalen = sizeof(recno);
-		memcpy(msg->data, &(recno), sizeof(recno));
-
-		elog(DEBUG3, "%s", MCPMsgAsString("Send message", msg));
-
-		MCPSendMsg(msg, true);
-
-		MCPReleaseMsg(msg);
-	}
-
-	elog(DEBUG3, "sending transaction "UNI_LLU" size "UINT64_FORMAT,
-		 		 recno, (ullong) txsize);
+	if (!skip)
+		elog(DEBUG3, "sending transaction "UNI_LLU" size "UINT64_FORMAT,
+		 		 	 recno, (ullong) txsize);
+	else
+		elog(DEBUG3, "skipping transaction "UNI_LLU" size "UINT64_FORMAT,
+ 		 			 recno, (ullong) txsize);
 
 	read = (off_t) sizeof(TxDataHeader);
 	offset = sizeof(TxDataHeader);
-	toread = Min(txsize, MCP_MAX_MSG_SIZE) - sizeof(TxDataHeader);
+	
+	/* 
+	 * In case, when the transactions should be skipped, send an empty
+	 * message instead.
+	 */
+	if (skip)
+	{
+		toread = 0;
+		flags = (hdr->dh_flags = MCP_QUEUE_FLAG_EMPTY);
+		txsize = read;
+		hdr->dh_len = txsize;
+	} else
+		toread = Min(txsize, MCP_MAX_MSG_SIZE) - sizeof(TxDataHeader);
 
 	/*
 	 * The only case when read == txsize is when transaction is empty
@@ -173,8 +173,7 @@ SendQueueTransaction(MCPQueue *q,
 		offset = 0;
 		toread = Min(txsize - read, (off_t) MCP_MAX_MSG_SIZE);
 	}
-
-final:
+	
 	pfree(sm);
 	MCPQueueTxClose(q);
 }
@@ -344,13 +343,8 @@ TxReadTableList(MCPQueue *q, ullong recno, TxDataHeader *hdr)
 	Assert(file != NULL);
 
 	/* Return if transaction doesn't contain any tables (e.g. promote) */
-	if (hdr->dh_listoffset == (off_t) 0)
-	{
-		ereport(DEBUG2,
-				(errmsg("table list hook not called"),
-				 errdetail("Transaction does not have a table list.")));
+	if (hdr->dh_listoffset == (off_t) 0)	
 		return NIL;
-	}
 
 	/* Seek to the start of the tablelist data */
 	MCPFileSeek(file, hdr->dh_listoffset, SEEK_SET);
