@@ -215,6 +215,7 @@ SlaveMainLoop(SlaveStatus *status)
 
 			CHECK_FOR_INTERRUPTS();
 		}
+		SlaveSendMessages(status);
 
 		/*
 		 * If there's a PROMOTE FORCE in progress, we cannot sleep forever --
@@ -685,6 +686,18 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 				}
 				pfree(bms);
 			}
+			
+			if (!replicate_tx &&
+				strncmp(slavetable->relpath, "pg_catalog.repl_slave_roles", NAMEDATALEN) == 0)
+			{
+				/* XXX: always accept repl_slave_relations dump. This relation
+				 * is a special case, since it's not a part of the catalog
+				 * dump, but a replication catalog (FIXME).
+				 */
+				slavetable->on_slave[state->ss_hostno] = true;
+				slavetable->slave_req[state->ss_hostno] = false;
+				replicate_tx = true;				
+			}
 
 			elog(DEBUG2, "dump transaction for table \"%s\": %s",
 				 txtable->relpath, replicate_tx ? "replicated" : "not replicated");
@@ -697,7 +710,7 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 	}
 	else if (hdr->dh_flags & MCP_QUEUE_FLAG_DATA)
 	{
-		char	*rp;
+		char	*rp = NULL;
 
 		/*
 		 * Note: we may use outdated table list here, since we don't reread it
@@ -712,6 +725,26 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 		{
 			BackendTable	txtable = lfirst(cell);
 			MCPTable		slavetable;
+			
+			/* 
+			 * Check for special cases. One is the repl_slave_relations
+			 * (see comments in TABLE_DUMP). Another is a single pg_largeobject
+			 * relation, related to lo changes without changes to the tables
+			 * with lo reference (i.e. by a direct call to lo_write).
+			 * Note: these relations are not part of the master's list, thus
+			 * the check is performed before the table is checked against it.
+			 */
+			if (txtable != NULL &&
+			    (strncmp(txtable->relpath, "pg_catalog.repl_slave_roles", 
+						 NAMEDATALEN) == 0 ||
+				 (strncmp(txtable->relpath, "pg_catalog.pg_largeobject", 
+						  NAMEDATALEN) == 0 && list_length(TableList) == 1)))
+			{
+				elog(DEBUG5, "special case table %s", txtable->relpath);
+				rp = txtable->relpath;
+				replicate_tx = true;
+				break;
+			}
 
 			slavetable = TableListEntry(state->ss_tablelist, txtable);
 			if (slavetable != NULL &&
@@ -725,7 +758,10 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 		}
 
 		if (replicate_tx)
+		{
+			Assert(rp != NULL);
 			elog(DEBUG2, "data replicated (includes table %s)", rp);
+		}
 		else
 			elog(DEBUG2, "data transaction not replicated");
 	}

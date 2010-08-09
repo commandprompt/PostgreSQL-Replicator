@@ -1023,6 +1023,13 @@ CollectNewRole(Relation authidRel, HeapTuple roleTuple, CommandId cid)
 				
 	/* Add relation name to the queue and free relation name buffer */
 	MCPLocalQueueAddRelation(MasterLocalQueue, relpath, false, true);
+	/* XXX: add repl_slave_roles relation name to the table list to
+	 * pass the checks at slave forwarder process (we won't have
+	 * pg_authid or pg_authmembers in the slave's table list, cause we never
+	 * send dumps for these tables.
+	 */
+	MCPLocalQueueAddRelation(MasterLocalQueue, "pg_catalog.repl_slave_roles", 
+							 false, true);
 	pfree(relpath);
 	
 	/* Put role tuple data into the queue */
@@ -1076,6 +1083,13 @@ CollectAlterRole(Relation authidRel, HeapTuple oldTuple,
 	
 	/* Add relation name to the queue */
 	MCPLocalQueueAddRelation(MasterLocalQueue, relpath, false, true);
+	/* XXX: add repl_slave_roles relation name to the table list to
+	 * pass the checks at slave forwarder process (we won't have
+	 * pg_authid or pg_authmembers in the slave's table list, cause we never
+	 * send dumps for these tables.
+	 */
+	MCPLocalQueueAddRelation(MasterLocalQueue, "pg_catalog.repl_slave_roles", 
+							 false, true);	
 	pfree(relpath);
 
 	/* Add rolename to the queue */
@@ -1154,6 +1168,13 @@ collect_role_members(Relation authMembersRel, HeapTuple membersTuple,
 				
 	/* Add relation name to the queue and free relation name buffer */
 	MCPLocalQueueAddRelation(MasterLocalQueue, relpath, false, true);
+	/* XXX: add repl_slave_roles relation name to the table list to
+	 * pass the checks at slave forwarder process (we won't have
+	 * pg_authid or pg_authmembers in the slave's table list, cause we never
+	 * send dumps for these tables.
+	 */
+	MCPLocalQueueAddRelation(MasterLocalQueue, "pg_catalog.repl_slave_roles", 
+							 false, true);	
 	pfree(relpath);
 	
 	/* Put a transformed tuple to the queue */
@@ -1250,10 +1271,7 @@ dump_write_lo(HeapTuple tuple, Oid loid)
    						tuple->t_len, 0, true);
 }
 
-/*
- * Just dump simple plain header for truncate lo_refs relation
- * And nothing else matters..
- */
+/* Just dump simple plain header for truncate lo_refs relation */
 static void
 PGRCollectTruncateLO(CommandId cid)
 {

@@ -109,23 +109,6 @@ get_catalog_relids(List *relids)
 	return relids;
 }
 
-/* 
- * Make a list of special relations. Special are relations that 
- * are not receiving data directly like other replicated relations, 
- * but used to indicate replication of some database object (i.e. 
- * large objects, roles)
- */
-
-List *
-get_special_relids(List *relids)
-{
-	relids = lcons_oid(LargeObjectRelationId, relids);
-	relids = lcons_oid(AuthIdRelationId, relids);
-	relids = lcons_oid(AuthMemRelationId, relids);
-	
-	return relids;
-}
-
 /*
  * get_replicated_relids
  * 		Get the list of Oids of relations marked to be replicated in the

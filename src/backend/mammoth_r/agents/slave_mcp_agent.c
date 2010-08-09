@@ -932,7 +932,6 @@ prepare_tablelist_messages(ullong recno, MemoryContext list_ctx)
 	/* Read replicated relation IDs. */
 	relids = get_master_and_slave_replicated_relids(replication_slave_no,
 	 												false);
-	relids = get_special_relids(relids);
 	
 	/* 
 	 * Switch to the list memory context to preserve
