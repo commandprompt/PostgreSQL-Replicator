@@ -18,3 +18,4 @@ t_16_large_objects
 t_18_forwarder_restart
 t_19_replicator_functions
 t_20_enable_disable_drop
+t_22_skip_dump

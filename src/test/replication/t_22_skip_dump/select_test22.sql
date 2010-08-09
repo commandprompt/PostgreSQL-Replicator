@@ -1,0 +1,1 @@
+SELECT * FROM test22 ORDER BY id;
