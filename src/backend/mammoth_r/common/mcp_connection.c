@@ -309,8 +309,6 @@ MCPMsgAsString(char *prefix, MCPMsg *m)
 	char            flag_buf[512] = "";
 	char            log_str[1024] = "";
 
-	if (m->flags & MCP_QUEUE_FLAG_TRUNC)
-		strcat(flag_buf, "TRUNC ");
 	if (m->flags & MCP_QUEUE_FLAG_DATA)
 		strcat(flag_buf, "DATA ");
 	if (m->flags & MCP_QUEUE_FLAG_DUMP_START)

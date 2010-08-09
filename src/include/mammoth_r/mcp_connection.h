@@ -56,7 +56,7 @@ typedef struct MCPMsg
 #define MCP_QUEUE_FLAG_FULL_DUMP	(1<<8)	/* part of a full dump */
 /* 8 unused */
 /* 9 unused */
-#define MCP_QUEUE_FLAG_TRUNC		(1<<10)	/* truncate the MCP queue */
+/* 10 unused */
 #define MCP_MSG_FLAG_AUTH			(1<<11)	/* Auth-related message */
 #define MCP_MSG_FLAG_ECHO			(1<<12)	/* mcp<->master: keepalive */
 #define MCP_MSG_FLAG_REQTABLE		(1<<13)	/* dump request for a single table */

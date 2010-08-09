@@ -641,7 +641,7 @@ SlaveTableListHook(TxDataHeader *hdr, List *TableList, void *status_arg)
 	
 	/* 
 	 * Decide to skip this transaction:
-	 * - if slave is no in sync and this this transaction is not a part of
+	 * - if slave is not in sync and this this transaction is not a part of
 	 *	 the full dump.
 	 * - if this transaction belongs to the full dump and SKIP_DUMP flag is set.
 	 * One important exclusion is that we avoid to skip TABLE DUMP transactions.
