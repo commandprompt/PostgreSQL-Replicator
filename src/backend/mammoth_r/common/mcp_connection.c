@@ -321,6 +321,10 @@ MCPMsgAsString(char *prefix, MCPMsg *m)
 		strcat(flag_buf, "CATALOG DUMP ");
 	if (m->flags & MCP_QUEUE_FLAG_TABLE_DUMP)
 		strcat(flag_buf, "TABLE DUMP ");
+	if (m->flags & MCP_QUEUE_FLAG_FULL_DUMP)
+		strcat(flag_buf, "FULL DUMP ");
+	if (m->flags & MCP_QUEUE_FLAG_EMPTY)
+		strcat(flag_buf, "EMPTY");
 	if (m->flags & MCP_MSG_FLAG_REQTABLE)
 		strcat(flag_buf, "REQTABLE ");
 	if (m->flags & MCP_MSG_FLAG_REQFULL)

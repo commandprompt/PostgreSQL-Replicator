@@ -15,6 +15,14 @@
 
 extern int mcp_max_slaves;
 
+/* slave specific flags */
+/* skip until the end of current full dump */
+#define MCP_HOST_FLAG_SKIP_DUMP						1
+/* accept data transactions between dump start and dump end, even if the host
+   is not in sync.*/
+#define MCP_HOST_FLAG_ACCEPT_DATA_DURING_DUMP		2 
+
+
 /* struct definition appears in mcp_hosts.c */
 typedef struct MCPHosts MCPHosts;
 
@@ -60,5 +68,8 @@ extern time_t	MCPHostsGetTimestamp(MCPHosts *h, int hostno);
 /* encoding-specific functions */
 extern void		MCPHostsSetEncoding(MCPHosts *h, pg_enc new_encoding);
 extern pg_enc 	MCPHostsGetEncoding(MCPHosts *h);
+
+extern uint32	MCPHostsSetFlags(MCPHosts *h, int hostno, uint32 flags);
+extern uint32	MCPHostsGetFlags(MCPHosts *h, int hostno);
 
 #endif /* MCP_HOSTS_H */

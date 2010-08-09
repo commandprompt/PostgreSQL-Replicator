@@ -47,6 +47,7 @@ typedef struct TxHostsRecord
 	ullong		recnos[McphHostRecnoKindMax];
 	time_t      timestamp;		/* timestamp of last get operation */
 	MCPQSync    sync;			/* synchronized status */
+	uint32		flags;			/* per slave flags */
 } TxHostsRecord;
 
 /* typedef appears in mcp_hosts.h */
@@ -358,3 +359,18 @@ MCPHostsGetEncoding(MCPHosts *h)
 	Assert(LWLockHeldByMe(MCPHostsLock));
 	return h->h_encoding;
 }
+
+uint32
+MCPHostsSetFlags(MCPHosts *h, int hostno, uint32 flags) 
+{
+	Assert(LWLockHeldByMe(MCPHostsLock));
+	return (h->h_hosts[hostno].flags |= flags);
+}
+
+uint32
+MCPHostsGetFlags(MCPHosts *h, int hostno)
+{
+	Assert(LWLockHeldByMe(MCPHostsLock));
+	return h->h_hosts[hostno].flags;
+}
+

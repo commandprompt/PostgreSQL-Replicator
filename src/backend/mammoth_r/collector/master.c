@@ -79,7 +79,7 @@ PGRDumpAll(MCPQueue *master_mcpq)
 		PGRCollectDumpStart();
 
 		/* Put data from replication catalogs to the queue */
-		dump_recno = PGRDumpCatalogs(master_mcpq, CommitFullDump);
+		dump_recno = PGRDumpCatalogs(master_mcpq, CommitFullDumpStart|CommitFullDump);
 		Assert(dump_recno != InvalidRecno);
 
 		/* Commit catalog dump transaction and record it in the TXLOG */
@@ -235,14 +235,14 @@ DumpRoles(MCPQueue *q)
 	 * already enqueued, thus we have to use a special-purpose code.
 	 */
 	if (roles_no > 0)
-		PGRCollectTxCommit(CommitTableDump);
+		PGRCollectTxCommit(CommitTableDump|CommitFullDump);
 	else
 	{
 		/* 
 		 * send this transaction as a part of the full dump 
 		 * (avoid skipping it) 
 		 */
-		PGRCollectEmptyTx(MCP_QUEUE_FLAG_TABLE_DUMP);
+		PGRCollectEmptyTx(MCP_QUEUE_FLAG_TABLE_DUMP|MCP_QUEUE_FLAG_FULL_DUMP);
 	}
 	MCPLocalQueueSwitchFile(MasterLocalQueue);
 
@@ -333,9 +333,9 @@ PGRDumpTables(MCPQueue *queue)
 			relation_close(rel, ShareUpdateExclusiveLock);
 		}
 		if (apply)
-			PGRCollectTxCommit(CommitTableDump);
+			PGRCollectTxCommit(CommitTableDump|CommitFullDump);
 		else
-			PGRCollectEmptyTx(MCP_QUEUE_FLAG_TABLE_DUMP);
+			PGRCollectEmptyTx(MCP_QUEUE_FLAG_TABLE_DUMP|MCP_QUEUE_FLAG_FULL_DUMP);
 
 		/* Create a new file with the original path for the local queue. */
 		MCPLocalQueueSwitchFile(MasterLocalQueue);
@@ -357,7 +357,7 @@ PGRDumpTables(MCPQueue *queue)
 	StartTransactionCommand();
 
 	/* Put empty transaction header with dump end flag */
-	PGRCollectEmptyTx(MCP_QUEUE_FLAG_DUMP_END);
+	PGRCollectEmptyTx(MCP_QUEUE_FLAG_DUMP_END|MCP_QUEUE_FLAG_FULL_DUMP);
 	
 	dump_end_file = MCPLocalQueueGetFile(MasterLocalQueue);
 

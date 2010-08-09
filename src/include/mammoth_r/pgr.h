@@ -66,9 +66,10 @@ typedef enum
 typedef enum
 {
 	CommitNoDump = 0,
-	CommitFullDump = 1,
-	CommitCatalogDump = 2,
-	CommitTableDump = 4,
+	CommitFullDumpStart = 1,
+	CommitFullDump = 2,
+	CommitCatalogDump = 4,
+	CommitTableDump = 8,
 } CommitDumpMode;
 
 
