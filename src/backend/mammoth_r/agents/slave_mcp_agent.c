@@ -550,26 +550,35 @@ SlaveRestoreData(SlaveState *state)
 	{
 		TxDataHeader	hdr;
 		ullong			recno;
+		bool			skip;
 
 		recno = MCPQueueGetFirstRecno(q);
 		elog(DEBUG4, "RESTORING transaction recno "UNI_LLU, recno);
-
+		skip = false;
+		
 		MCPQueueTxOpen(q, recno);
 
 		MCPQueueReadDataHeader(q, &hdr);
 
-		if ((MCPQueueGetSync(q) != MCPQSynced) && 
-			!(hdr.dh_flags & MCP_QUEUE_FLAG_DUMP_START))
+		/* If the queue is not in sync - refuse to restore anything until
+		 * full dump transaction is observed. When latter happens - set the
+		 * queue to sync.
+		 */
+		if (MCPQueueGetSync(q) != MCPQSynced) 
 		{
-			elog(DEBUG2, "queue is not in sync, restore cancelled");
-			goto final;
+			if (!(hdr.dh_flags & MCP_QUEUE_FLAG_DUMP_START)) {
+				skip = true;
+			} else
+				MCPQueueSetSync(q, MCPQSynced);
 		}
 
 		/* Restore this transaction, but only if we don't have to skip it */
-		if (!(hdr.dh_flags & MCP_QUEUE_FLAG_EMPTY))
+		if (!(hdr.dh_flags & MCP_QUEUE_FLAG_EMPTY) && !skip)
 			PGRRestoreData(q, state->bss_slaveno);
-		else
+		else if (!skip)
 			elog(DEBUG2, "restore not launched, transaction is empty");
+		else
+			elog(DEBUG2, "transaction is skipped due to queue desync");
 			
 		elog(DEBUG4, "PGRRestoreData done: frecno="UNI_LLU, 
 					  MCPQueueGetFirstRecno(q));
@@ -604,7 +613,6 @@ SlaveRestoreData(SlaveState *state)
 		DISPLAY_SLAVE_PROMOTION_STATES(DEBUG2);
 	}
 
-final:
 	UnlockReplicationQueue(q);
 }
 
@@ -821,24 +829,12 @@ slave_pre_commit_actions(MCPMsg *msg, SlaveState *state)
 	}
 	else
 	{
-		/*
-		 * Truncate the MCP queue if MCP_QUEUE_FLAG_TRUNC is received from
-		 * master.
-		 */
-		if (msg->flags & MCP_QUEUE_FLAG_TRUNC)
-		{
-			ullong recno = *((ullong *)msg->data);
-
-			elog(LOG, "TRUNCATE and SET SYNC to "UNI_LLU, recno);
-
-			LockReplicationQueue(state->slave_mcpq, LW_EXCLUSIVE);
-			MCPQueueCleanup(state->slave_mcpq, recno);
-			MCPQueueSetSync(state->slave_mcpq, MCPQSynced);
-			UnlockReplicationQueue(state->slave_mcpq);
-		}
-
 		if (msg->flags & MCP_QUEUE_FLAG_DUMP_START)
 		{
+			/* 
+			 * The queue will be put to sync during restore,
+			 * to avoid restoring obsolete data prior to dump.
+			 */
 			ereport(LOG,
 					(errmsg("received start of dump"),
 					 errdetail("Record number "UNI_LLU, msg->recno)));
