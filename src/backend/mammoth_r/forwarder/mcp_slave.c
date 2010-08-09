@@ -56,6 +56,7 @@ typedef struct SlaveStatus
 	MCPQueue   *ss_queue;
 	MCPHosts   *ss_hosts;
 	int			ss_hostno;
+	ullong		ss_wait_list_recno;
 	MCPSlavePromotionState ss_promotion;
 	MCPSlaveForcePromotionState ss_force_promotion;
 	uint32		current_tablelist_rev;
@@ -81,9 +82,9 @@ typedef struct SlaveStatus
 	 "unknown")
 
 #define LOG_PROMOTION_STATES(elevel, status) \
-	elog(elevel, "slave promotion: %s, force promotion: %s", \
+	(elog(elevel, "slave promotion: %s, force promotion: %s", \
 		 PromotionAsString(status->ss_promotion), \
-		 ForcePromotionAsString(status->ss_force_promotion))
+		 ForcePromotionAsString(status->ss_force_promotion)))
 	
 
 static void SlaveMainLoop(SlaveStatus *status);
@@ -125,6 +126,7 @@ HandleSlaveConnection(MCPQueue *q, MCPHosts *h, int slave_no, pg_enc encoding)
 	status->ss_tablelist = NIL;
 	status->ss_recv_list = NIL;
 	status->current_tablelist_rev = 0;
+	status->ss_wait_list_recno = InvalidRecno;
 
 	status->ss_queue = q;
 	status->ss_hosts = h;
@@ -746,9 +748,11 @@ SlaveMessageHook(TxDataHeader *hdr, void *status_arg, ullong recno)
 	 */
 	if (hdr->dh_flags & MCP_QUEUE_FLAG_CATALOG_DUMP)
 	{
-		elog(DEBUG2,
-			 "list wait flag set for slave %d", status->ss_hostno);
 		status->ss_wait_list = true;
+		status->ss_wait_list_recno = recno + 1;
+		elog(DEBUG2,
+			 "list wait flag set for slave %d recno "UNI_LLU, 
+			 status->ss_hostno, status->ss_wait_list_recno);		
 	}
 
 	/* If this is the start of a dump, mark the slave as synced */
@@ -1008,11 +1012,11 @@ ReceiveSlaveMessage(SlaveStatus *status)
 			ShowTable(DEBUG5, tab);
 		}
 		/* Clear the 'wait for the table list' flag */
-		if (status->ss_wait_list)
+		if (status->ss_wait_list && rm->recno == status->ss_wait_list_recno)
 		{
 			status->ss_wait_list = false;
-			elog(DEBUG2, "list wait flag cleared for slave %d",
-				 status->ss_hostno);
+			elog(DEBUG2, "list wait flag cleared for slave %d recno "UNI_LLU,
+				 status->ss_hostno, status->ss_wait_list_recno);
 		}
 	}
 
@@ -1552,9 +1556,6 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab, ullong recno)
 {
 	bool	reqdump = false;
 
-    /* Set 'requested by the slave' state for the table */
-    tab->slave_req[state->ss_hostno] = true;
-
 	/* Check if the dump hasn't been requested yet */
 	if (tab->req_satisfied == TDnone)
 	{
@@ -1584,6 +1585,11 @@ MCPSlaveActOnTableRequest(SlaveStatus *state, MCPTable tab, ullong recno)
 		else
 			elog(DEBUG2, "dump for table \"%s\" is already in the queue",
 				 tab->relpath);
+	}
+	if (reqdump || tab->req_satisfied != TDnone)
+	{
+		/* Set 'requested by the slave' state for the table */
+    	tab->slave_req[state->ss_hostno] = true;
 	}
     return reqdump;
 }

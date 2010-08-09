@@ -53,6 +53,7 @@ typedef struct MCPMsg
 #define MCP_QUEUE_FLAG_DUMP_START	(1<<5)	/* start of full dump */
 #define MCP_QUEUE_FLAG_DUMP_END		(1<<6)	/* end of full dump */
 #define MCP_QUEUE_FLAG_EMPTY		(1<<7)	/* transaction is empty */
+#define MCP_QUEUE_FLAG_FULL_DUMP	(1<<8)	/* part of a full dump */
 /* 8 unused */
 /* 9 unused */
 #define MCP_QUEUE_FLAG_TRUNC		(1<<10)	/* truncate the MCP queue */
@@ -80,8 +81,10 @@ typedef struct MCPMsg
 /* 30 unused */
 /* 31 unused */
 
-#define MessageTypeIsDump(flags) (((flags) | MCP_QUEUE_FLAG_TABLE_DUMP) || \
-								((flags) | MCP_QUEUE_FLAG_CATALOG_DUMP))
+#define MessageTypeIsDump(flags) (((flags) & MCP_QUEUE_FLAG_TABLE_DUMP) || \
+								((flags) & MCP_QUEUE_FLAG_CATALOG_DUMP))
+#define MessageTypeBelongsToFullDump(flags) ((flags) & MCP_QUEUE_FLAG_FULL_DUMP)
+#define MessageTypeIsData(flags) ((flags) & MCP_QUEUE_FLAG_DATA)
 
 
 /* mcp_connection.c (server routines) */

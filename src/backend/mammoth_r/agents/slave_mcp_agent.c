@@ -851,7 +851,7 @@ slave_pre_commit_actions(MCPMsg *msg, SlaveState *state)
 		}
 
 		/* Actions on DATA or DUMP transaction */
-		if (msg->flags & MCP_QUEUE_FLAG_DATA ||
+		if (MessageTypeIsData(msg->flags) ||
 			MessageTypeIsDump(msg->flags))
 		{
 			elog(DEBUG4, "received transaction "UNI_LLU, msg->recno);
