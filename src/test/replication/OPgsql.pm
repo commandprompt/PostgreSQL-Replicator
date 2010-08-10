@@ -21,6 +21,7 @@ sub BEGIN {
 	$OPgsql::pgroot = defined $ENV{PGROOT} ? $ENV{PGROOT} :
 		defined $main::config->{test}{pgroot} ? $main::config->{test}{pgroot} :
 		"/usr/local/pgsql";
+	chomp($OPgsql::sharedir = qx{$OPgsql::pgroot/bin/pg_config --sharedir});
 	$OPgsql::database = defined $main::config->{test}{database} ? $main::config->{test}{database} :
 		"mammoth";
 
@@ -229,7 +230,6 @@ sub execute
 	my ($v, $d, $f) = File::Spec->splitpath($file);
 
 	print "executing $f in $self->{name}\n";
-
 	confess "$file not found or not readable" unless -f $file and -r $file;
 	$stdout = "/dev/null" unless defined $stdout;
 	$stderr = "/dev/null" unless defined $stderr;

@@ -35,8 +35,9 @@ sub run {
 		});
 
 		# load replication functions
-		(-f "$self->{dirname}/replicator-functions.sql") or 
-		`ln -s $OPgsql::pgroot/share/replicator-functions.sql "$self->{dirname}/replicator-functions.sql"`;
+		(-f "$self->{dirname}/replicator-functions.sql") or
+		symlink "$OPgsql::sharedir/replicator-functions.sql",
+				"$self->{dirname}/replicator-functions.sql";
 
 		$self->execute({
 			file => 'replicator-functions.sql',
