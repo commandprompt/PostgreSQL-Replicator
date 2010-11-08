@@ -505,42 +505,31 @@ MCPQueueTxCommit(MCPQueue *q, ullong recno)
  * recno = InvalidRecno to make the queue assign the next unused recno.
  */
 ullong
-MCPQueueCommit(MCPQueue *q, MCPFile *txdata, ullong recno)
+MCPQueueCommit(MCPQueue *q, MCPFile *txdata)
 {
 	char   *new_name;
+	ullong	recno;
 
 	Assert(!LWLockHeldByMe(q->lock));
 
-	if (recno == InvalidRecno)
-	{
-		/* Use next unassigned recno for the next transaction */
-		LockReplicationQueue(q, LW_EXCLUSIVE);
+	/* Use next unassigned recno for the next transaction */
+	LockReplicationQueue(q, LW_EXCLUSIVE);
 
-		/* If the queue is empty we should setup a queue tail recno first */
-		if (MCPQueueIsEmpty(q))
-		{
-			recno = MCPQueueGetInitialRecno(q);
-			MCPQueueSetLastRecno(q, recno);
-			MCPQueueSetEmpty(q, false);
-		}
-		else
-		{
-			recno = MCPQueueGetLastRecno(q);
-			MCPQueueSetLastRecno(q, ++recno);
-		}
-		MCPQueueSetEnqueueTimestamp(q);
-		
-		UnlockReplicationQueue(q);
+	/* If the queue is empty we should setup a queue tail recno first */
+	if (MCPQueueIsEmpty(q))
+	{
+		recno = MCPQueueGetInitialRecno(q);
+		MCPQueueSetLastRecno(q, recno);
+		MCPQueueSetEmpty(q, false);
 	}
 	else
 	{
-		/*
-		 * If we were passed a valid recno, make sure the queue is prepared to
-		 * receive it.
-		 */
-		if (!MCPQueueIsEmpty(q))
-			elog(PANIC, "non-invalid recno passed to empty queue");
+		recno = MCPQueueGetLastRecno(q);
+		MCPQueueSetLastRecno(q, ++recno);
 	}
+	MCPQueueSetEnqueueTimestamp(q);
+	
+	UnlockReplicationQueue(q);
 
 	new_name = MCPQDatafileName(q, recno);
 	MCPFileRename(txdata, new_name);

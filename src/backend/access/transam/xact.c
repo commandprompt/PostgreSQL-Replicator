@@ -1338,7 +1338,7 @@ repl_finish_tx(void)
 		ullong	recno;
 
 		/* Give the local queue file to commit */
-		recno = MCPQueueCommit(MasterMCPQueue, file, InvalidRecno);
+		recno = MCPQueueCommit(MasterMCPQueue, file);
 		TXLOGSetCommitted(recno);
 
 		/* Inform MQP about the commit */

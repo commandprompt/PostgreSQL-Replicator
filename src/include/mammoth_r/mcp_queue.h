@@ -104,7 +104,7 @@ extern void		MCPQueueNextTx(MCPQueue *q);
 extern void		MCPQueueTxOpen(MCPQueue *q, ullong recno);
 extern void		MCPQueueTxClose(MCPQueue *q);
 extern void		MCPQueueTxCommit(MCPQueue *q, ullong recno);
-extern ullong	MCPQueueCommit(MCPQueue *q, MCPFile *txdata, ullong recno);
+extern ullong	MCPQueueCommit(MCPQueue *q, MCPFile *txdata);
 
 /* functions to lock/unlock the queue */
 extern void 	LockReplicationQueue(MCPQueue *q, LWLockMode mode);

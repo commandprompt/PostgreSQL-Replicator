@@ -138,7 +138,7 @@ DumpRoles(MCPQueue *q)
 	LWLockAcquire(ReplicationCommitLock, LW_EXCLUSIVE);
 
 	txdata = MCPLocalQueueGetFile(MasterLocalQueue);
-	recno = MCPQueueCommit(q, txdata, InvalidRecno);
+	recno = MCPQueueCommit(q, txdata);
 
 	LWLockRelease(ReplicationCommitLock);
 
@@ -299,7 +299,7 @@ PGRDumpTables(MCPQueue *queue)
 		snap = RegisterSnapshot(GetTransactionSnapshot());
 
 		data_file = MCPLocalQueueGetFile(MasterLocalQueue);
-		recno = MCPQueueCommit(queue, data_file, InvalidRecno);
+		recno = MCPQueueCommit(queue, data_file);
 
 		LWLockRelease(ReplicationCommitLock);
 
@@ -362,7 +362,7 @@ PGRDumpTables(MCPQueue *queue)
 	dump_end_file = MCPLocalQueueGetFile(MasterLocalQueue);
 
 	LWLockAcquire(ReplicationCommitLock, LW_EXCLUSIVE);
-	dump_end_recno = MCPQueueCommit(queue, dump_end_file, InvalidRecno);
+	dump_end_recno = MCPQueueCommit(queue, dump_end_file);
 	LWLockRelease(ReplicationCommitLock);
 
 	MCPLocalQueueSwitchFile(MasterLocalQueue);
@@ -435,7 +435,7 @@ PGRDumpCatalogs(MCPQueue *master_mcpq, CommitDumpMode mode)
 		 * Enqueue transaction data file. Contrary to the normal transaction we
 		 * do this before placing actual data into the file.
 	 	 */
-		dump_recno = MCPQueueCommit(master_mcpq, data_file, InvalidRecno);
+		dump_recno = MCPQueueCommit(master_mcpq, data_file);
 
 		/*
 		 * We can release the ReplicationCommitLock here, because from this
@@ -553,7 +553,7 @@ PGRDumpSingleTable(MCPQueue *master_mcpq, char *relpath)
     dumpfile = MCPLocalQueueGetFile(MasterLocalQueue);
 
     /* Add this transaction to the queue */
-    recno = MCPQueueCommit(master_mcpq, dumpfile, InvalidRecno);
+    recno = MCPQueueCommit(master_mcpq, dumpfile);
 
     LWLockRelease(ReplicationCommitLock);
 
