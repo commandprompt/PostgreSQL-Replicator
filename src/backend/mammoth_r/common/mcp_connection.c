@@ -351,6 +351,8 @@ MCPMsgAsString(char *prefix, MCPMsg *m)
 		strcat(flag_buf, "PROMOTE CANCEL ");
 	if (m->flags & MCP_MSG_FLAG_ECHO)
 		strcat(flag_buf, "ECHO");
+	if (m->flags & MCP_MSG_FLAG_QUEUE_CORRECTION)
+		strcat(flag_buf, "QUEUE CORRECTION");
 
 	if (*prefix != '\0')
 		snprintf(log_str, sizeof(log_str),

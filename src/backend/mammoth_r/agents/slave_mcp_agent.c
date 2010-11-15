@@ -827,6 +827,20 @@ slave_pre_commit_actions(MCPMsg *msg, SlaveState *state)
 			slave_promotion = slave_promotion_cancelled;
 		}   
 	}
+	else if (msg->flags & MCP_MSG_FLAG_QUEUE_CORRECTION)
+	{		
+		ullong 	new_initial_recno;		
+		memcpy(&new_initial_recno, msg->data, sizeof(ullong));
+		
+		ereport(LOG,
+				(errmsg("received queue correction request"),
+				errdetail("New initial recno: "UNI_LLU, new_initial_recno)));
+		
+		LockReplicationQueue(state->slave_mcpq, LW_EXCLUSIVE);
+		MCPQueueCleanup(state->slave_mcpq, new_initial_recno);
+		UnlockReplicationQueue(state->slave_mcpq);
+		
+	}
 	else
 	{
 		if (msg->flags & MCP_QUEUE_FLAG_DUMP_START)

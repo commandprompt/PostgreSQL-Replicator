@@ -85,49 +85,39 @@ static void authenticate_callback(void *arg);
  */
 static bool		doing_socket_setup = false;
 
-static void
+static ullong
 ReceiveInitialRecno(MCPQueue *q)
 {
 	ullong	initial_recno;
 
 	initial_recno = MCPRecvInitialRecno();
-	/* initial_recno contains lrecno + 1 from MCP server, or InvalidRecno */
+	elog(DEBUG3, "received initial recno from the forwarder: "UNI_LLU,
+				 initial_recno);
+	/* initial_recno contains lrecno + 1 from MCP server */
 
 	LockReplicationQueue(q, LW_EXCLUSIVE);
 	if (MCPQueueGetFirstRecno(q) != initial_recno)
 	{
 
-		if (initial_recno == InvalidRecno)
+		if (initial_recno > MCPQueueGetAckRecno(q) &&
+			(initial_recno <= MCPQueueGetLastRecno(q) + 1) &&
+			initial_recno >= MCPQueueGetInitialRecno(q))
 		{
-			/* MCP server unsynced, must cause a dump */
-			ereport(LOG,
-					(errmsg("setting queue to unsync"),
-					 errdetail("First recno requested InvalidRecno.")));
-			MCPQueueSetSync(q, MCPQUnsynced);
+			/* OK to serve from current queue */
+			elog(LOG,
+				 "first recno correction: "UNI_LLU" -> "UNI_LLU,
+				 MCPQueueGetFirstRecno(q), initial_recno);
 		}
 		else
 		{
-			if (initial_recno > MCPQueueGetAckRecno(q) &&
-				initial_recno <= MCPQueueGetLastRecno(q) &&
-				initial_recno >= MCPQueueGetInitialRecno(q))
-			{
-				/* OK to serve from current queue */
-				elog(LOG,
-					 "first recno correction: "UNI_LLU" -> "UNI_LLU,
-					 MCPQueueGetFirstRecno(q), initial_recno);
-				MCPQueueSetFirstRecno(q, initial_recno);
-			}
-			else
-			{
-				ereport(WARNING,
-						(errmsg("setting queue to unsync"),
-						 errdetail("First recno requested "UNI_LLU" not in range.",
-								   initial_recno)));
-				MCPQueueSetSync(q, MCPQUnsynced);
-			}
+			initial_recno = MCPQueueGetAckRecno(q) + 1;
+			/* Start sending data from the recno next to the latest confirmed */
+			elog(DEBUG3, "first recno fallback to acked recno: "UNI_LLU, initial_recno);
 		}
+		MCPQueueSetFirstRecno(q, initial_recno);
 	}
 	UnlockReplicationQueue(q);
+	return initial_recno;
 }
 
 int
@@ -149,6 +139,8 @@ ReplicationMasterMain(MCPQueue *q)
 	ErrorContextCallback errcontext;
 	uint64		sysid;
 	int			sync;
+	ullong		new_fw_recno,
+				lrecno;
 
 	/* MasterState initialization */
 	MasterState *state = &global_state;
@@ -283,6 +275,7 @@ ReplicationMasterMain(MCPQueue *q)
 	/* grab queue data */
 	LockReplicationQueue(q, LW_SHARED);
 	sync = MCPQueueGetSync(q);
+	lrecno = MCPQueueGetLastRecno(q);
 	UnlockReplicationQueue(q);
 
 	if (McpAuthenticateToServer(sysid, forwkey, encoding) == STATUS_ERROR)
@@ -301,7 +294,17 @@ ReplicationMasterMain(MCPQueue *q)
 	LWLockRelease(ReplicationLock);
 
 	/* set initial frecno, as received from the MCP server */
-	ReceiveInitialRecno(q);
+	new_fw_recno = ReceiveInitialRecno(q);
+	
+	elog(DEBUG3, "sending next-to-send recno to the forwarder: "UNI_LLU,
+				 new_fw_recno);
+	/* send a recno the sending will be resumed from to the MCP server */
+	MCPSendInitialRecno(new_fw_recno);
+	
+	elog(DEBUG3, "sending master's queue end recno to the forwarder: "UNI_LLU,
+				 lrecno);
+	/* send the queue last recno for the forwarder to validate hosts */
+	MCPSendInitialRecno(lrecno);
 
 	ereport(LOG,
 		   (errmsg("master connected to forwarder")));

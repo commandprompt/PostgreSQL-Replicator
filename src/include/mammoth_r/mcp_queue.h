@@ -24,12 +24,14 @@
 typedef enum
 {
 	MCPQUnsynced,
-	MCPQSynced
+	MCPQSynced,
+	MCPQResynced
 } MCPQSync;
 
 #define	MCPQSyncAsString(sync) \
 	((sync == MCPQUnsynced) ? "Unsynced" : \
 	(sync == MCPQSynced) ? "Synced" : \
+	(sync == MCPQResynced) ? "Resynced" : \
 	"Unknown Sync Value")
 
 

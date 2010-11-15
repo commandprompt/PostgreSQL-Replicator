@@ -77,14 +77,18 @@ static void MasterStoreTableList(MasterState *state);
 static void ReceiveMasterTableList(List *tl_received, TxDataHeader *hdr,
 								   ullong recno, void *arg_state);
 static void SendTableDumps(MasterState *state);
+static void MCPCorrectHosts(MCPHosts *h, ullong master_next_recno, 
+							ullong master_lrecno);
 
 
 void
 HandleMasterConnection(MCPQueue *q, MCPHosts *h)
 {
 	MasterState *state;
+	ullong		fw_next_recno,
+				master_next_recno,
+				master_lrecno;
 	MCPQSync	sync;
-	ullong		initial_recno;
 
 	set_ps_display("startup", false);
 	
@@ -127,30 +131,60 @@ HandleMasterConnection(MCPQueue *q, MCPHosts *h)
 
 	/* send initial recno to the master */
 	LockReplicationQueue(q, LW_SHARED);
-	initial_recno = MCPQueueGetLastRecno(q);
-	if (initial_recno != InvalidRecno)
-		initial_recno += 1;
-	/* fetch initial sync state while we have the lock */
+	fw_next_recno = MCPQueueGetLastRecno(q) + 1;
 	sync = MCPQueueGetSync(q);
 	UnlockReplicationQueue(q);
 
-	MCPSendInitialRecno(initial_recno);
+	elog(DEBUG3, "sending the expected next-to-receive recno to master: "UNI_LLU,
+				 fw_next_recno);
+	/* Send expected next to receive recno to the master */
+	MCPSendInitialRecno(fw_next_recno);
+	
+	/* Get actual next to receive recno from master */
+	master_next_recno = MCPRecvInitialRecno();
+	elog(DEBUG3, "received master's next-to-send recno: "UNI_LLU, master_next_recno);
+	master_lrecno = MCPRecvInitialRecno();
+	elog(DEBUG3, "received master's last recno: "UNI_LLU, master_lrecno);
+	
+	LockReplicationQueue(q, LW_EXCLUSIVE);
+	MCPQueueSetSync(q, MCPQSynced);
+	UnlockReplicationQueue(q);
+	
+	if (fw_next_recno != master_next_recno)
+	{
+		/* 
+		 * We have a mismatch between what forwarder expects to receive,
+		 * and what master is going to send next, which means that the
+		 * current forwarder's queue is considered 'invalid' by the master.
+		 * Truncate it and make the master's next-to-send the new queue start.
+		 */ 
+		elog(DEBUG3, "forwarder's queue correction, cleanup at "UNI_LLU,
+					 master_next_recno);
+		LockReplicationQueue(q, LW_EXCLUSIVE);
+		MCPQueueCleanup(q, master_next_recno);
+		UnlockReplicationQueue(q);
+		
+		/* Also reset host's ACK recnos */
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+		MCPHostsSetRecno(state->ms_hosts, McphRecnoKindSafeToAck, InvalidRecno);
+		MCPHostsSetRecno(state->ms_hosts, McphRecnoKindLastAcked, InvalidRecno);
+		LWLockRelease(MCPHostsLock);
+		
+		/* 
+		 * Now recheck host's records, sending those that are incompatible
+		 * with the master's queue to desync.
+		 */
+		LWLockAcquire(MCPServerLock, LW_SHARED);
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+		
+		MCPCorrectHosts(state->ms_hosts, master_next_recno, master_lrecno);
+		
+		LWLockRelease(MCPHostsLock);
+		LWLockRelease(MCPServerLock);
+		
+	}
 
 	LOG_PROMOTION_STATE(DEBUG2, state);
-
-	/*
-	 * If we are not in sync state, request a dump from the master.  Note:
-	 * checking the flag after releasing the lock is safe because we cannot
-	 * get sync'ed by a different process.
-	 */
-	if (sync != MCPQSynced)
-	{
-		/* simulate receiving REQDUMP from a slave */
-		elog(LOG, "queue desynchronized => request FULL DUMP");
-		LWLockAcquire(MCPServerLock, LW_EXCLUSIVE);
-		FullDumpSetProgress(FDrequested);
-		LWLockRelease(MCPServerLock);
-	}
 
 	/* go on forever until we're told to close up */
 	McpMasterLoop(state);
@@ -1064,4 +1098,40 @@ SendTableDumps(MasterState *state)
     LWLockRelease(MCPTableListLock);
 
     pfree(sm);
+}
+
+/* 
+ * Detect the hosts with next recnos incompatible with the master, change 
+ * their queue state so they would send the new recnos to the slave and desync.
+ */
+static void
+MCPCorrectHosts(MCPHosts *h, ullong master_next_recno, ullong master_lrecno)
+{
+	int 	slaveno;
+	
+	Assert(LWLockHeldByMe(MCPHostsLock));
+	Assert(LWLockHeldByMe(MCPServerLock));
+	
+	for (slaveno = 0; slaveno < MCPHostsGetMaxHosts(h); slaveno++)
+	{
+		ullong	frecno = MCPHostsGetHostRecno(h, 
+											  McphHostRecnoKindSendNext, 
+											  slaveno);
+		/* Skip offline slaves */
+		if (ServerCtl->node_pid[slaveno + 1] == 0)
+			continue;
+		
+		/* 
+		 * If the host expects to receive the next record outside of recnos
+		 * available to the master - set its queue to Resync, so it will be
+		 * able to send the new queue data to the slave and desync.
+		 */	
+		if (frecno > master_lrecno + 1 || frecno < master_next_recno)
+		{
+			elog(DEBUG3, "host's frecno "UNI_LLU" is outside of the queue",
+						 frecno);
+			elog(DEBUG3, "setting host (%d) to resync", slaveno); 			 
+			MCPHostsSetSync(h, MCPQResynced, slaveno);
+		}
+	}
 }

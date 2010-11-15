@@ -329,28 +329,13 @@ SlaveMainLoop(SlaveStatus *status)
  * Set the queue so that the slave will start getting messages from the queue
  * starting from the first one it doesn't have.
  *
- * If the slave needs a dump, make sure it gets it.  If we have a dump in the
- * queue, use that -- otherwise set things up so that the master is asked for
- * it.
- *
- * There are four cases here:
- *
- * (1) It can be in sync with what MCPHosts says.  In this case we needn't
- * do anything.
- *
- * (2) It can be in sync with a recno that's within our queue, but not what
- * MCPHosts says.  In this case we just adjust MCPHosts to represent what
- * the slave believes.
- *
- * (3) the slave believes it is in synced state, but has an initial recno
- * outside what we have in queue.  For all intents and purposes this is the
- * same as being out of sync, because we cannot serve what it wants.
- *
- * (4) the slave is out of sync.
- *
- * In cases (3) and (4), we set the queue to unsync and expect the caller to
- * send a dump as appropriate.
- */
+ * If master is connected - then we look at the queue to determine whether
+ * there is a recno in the queue the slave can resume receiving data from.
+ * Otherwise, the slave's data is assumed to be correct, and the check gets
+ * postponed until the time the master connects. In both cases, the host
+ * gets desynced upon receiving Invalid recno from the slave.
+ */ 
+ 
 static void
 SlaveCorrectQueue(SlaveStatus *status)
 {
@@ -358,37 +343,49 @@ SlaveCorrectQueue(SlaveStatus *status)
 
 	/* get the initial recno from the slave */
 	initial_recno = MCPRecvInitialRecno();
+	elog(DEBUG3, "received initial recno from slave (%d): "UNI_LLU, 
+				 status->ss_hostno, initial_recno);
 
+	/* 
+	 * The following code acts differently depending on whether the master
+	 * is connected or not; thus, hold the server's lock here to avoid master's
+	 * connection in the middle of the code's execution.
+	 */
+	LWLockAcquire(MCPServerLock, LW_SHARED);
+	
 	LockReplicationQueue(status->ss_queue, LW_SHARED);
 	LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
 
 	if (initial_recno == InvalidRecno)
 	{
-		/* Case (4) above */
 		MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQUnsynced);
 	}
-	else if (initial_recno != MCPHostsGetHostRecno(status->ss_hosts,
-												   McphHostRecnoKindSendNext,
-												   status->ss_hostno))
+	else
 	{
-		if (initial_recno >= MCPQueueGetInitialRecno(status->ss_queue) &&
-			initial_recno <= MCPQueueGetLastRecno(status->ss_queue))
+		if (ServerCtl->node_pid[0] == 0)
 		{
-			/* This is case (2) */
 			MCPHostsSetHostRecno(status->ss_hosts, McphHostRecnoKindSendNext,
-								 status->ss_hostno, initial_recno);
+							 	 status->ss_hostno, initial_recno);
+			MCPHostsSetHostRecno(status->ss_hosts, McphHostRecnoKindAcked,
+							 	 status->ss_hostno, InvalidRecno);
 			MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQSynced);
-		}
-		else
+		} else
 		{
-			/* This is case (3) */
-			MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQUnsynced);
-		}
+			/* 
+			 * master is connected, use the forwarder's queue to decide
+			 * whether to put this slave to desync. 
+			 */ 
+			ullong fw_brecno = MCPQueueGetInitialRecno(status->ss_queue);
+			
+			if (initial_recno < fw_brecno)
+				MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQResynced);			
+		}			
 	}
 
 	/* otherwise, it is case (1) -- do nothing */
 	LWLockRelease(MCPHostsLock);
 	UnlockReplicationQueue(status->ss_queue);
+	LWLockRelease(MCPServerLock);
 }
 
 static void
@@ -477,8 +474,48 @@ static void
 SlaveSendDirectMessages(SlaveStatus *status)
 {
 	MCPMsg sm;
+	MCPQSync	sync;
 
 	MemSet(&sm, 0, sizeof(MCPMsg));
+	
+	LWLockAcquire(MCPHostsLock, LW_SHARED);
+	sync = MCPHostsGetSync(status->ss_hosts, status->ss_hostno);
+	LWLockRelease(MCPHostsLock);
+
+	if (sync == MCPQResynced)
+	{
+		/* Special case, we need data in the message sent */
+		MCPMsg     *msg;
+		ullong		new_initial_recno;
+		
+		msg = palloc(sizeof(MCPMsg) + sizeof(ullong) - 1);
+
+		LWLockAcquire(MCPHostsLock, LW_SHARED);
+		new_initial_recno = MCPHostsGetHostRecno(status->ss_hosts,
+												 McphHostRecnoKindSendNext,
+												 status->ss_hostno);
+		LWLockRelease(MCPHostsLock);
+		/* Form a message with the new queue parameters for the slave */
+		msg->flags = MCP_MSG_FLAG_QUEUE_CORRECTION;
+		msg->recno = InvalidRecno;		
+		memcpy(msg->data, &new_initial_recno, sizeof(ullong));
+		elog(DEBUG3, "Sending queue correction at recno "UNI_LLU, new_initial_recno);
+		
+		/* 
+		 * Send a message with would set the slave's queue to start
+		 * with a record we put in it.
+		 */
+		MCPMsgPrint(DEBUG3, "Send", msg);
+		MCPSendMsg(msg, true);
+		
+		/* Desync the host to force it to ask for a full dump */
+		LWLockAcquire(MCPHostsLock, LW_EXCLUSIVE);
+		MCPHostsSetSync(status->ss_hosts, status->ss_hostno, MCPQUnsynced);
+		LWLockRelease(MCPHostsLock);
+		
+		return;
+	}
+	/* Other cases (with static message without any data) */
 
 	/* 
 	 * If we should send a PROMOTE_READY message at the current step of
